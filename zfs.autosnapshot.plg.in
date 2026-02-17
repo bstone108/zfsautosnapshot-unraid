@@ -3,6 +3,7 @@
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
 - Fixed package download block to use explicit `&lt;URL&gt;` and `&lt;MD5&gt;` nodes required by current Unraid plugin installer.
+- Added resilient installer fallback: plugin install script now downloads and MD5-verifies package directly before `upgradepkg`.
 - Fixed install/remove script paths to use literal values (avoids unresolved XML entities in CDATA).
 - Switched to canonical 2-page Unraid layout (`xmenu` entry + child settings page).
 - Moved Settings tile placement to `OtherSettings` for broad UI compatibility.
@@ -19,7 +20,41 @@
 
   <FILE Run="/bin/bash">
     <![CDATA[
-upgradepkg --install-new /boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-__VERSION__-noarch-1.txz;
+PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
+PKG_FILE="zfs-autosnapshot-__VERSION__-noarch-1.txz"
+PKG_PATH="${PKG_DIR}/${PKG_FILE}"
+PKG_URL="__BASE_URL__/${PKG_FILE}"
+PKG_MD5="__PKG_MD5__"
+
+mkdir -p "${PKG_DIR}"
+
+download_pkg() {
+  if command -v wget >/dev/null 2>&1; then
+    wget --no-cache -O "${PKG_PATH}" "${PKG_URL}"
+  else
+    curl -fsSL "${PKG_URL}" -o "${PKG_PATH}"
+  fi
+}
+
+verify_md5() {
+  if command -v md5sum >/dev/null 2>&1; then
+    echo "${PKG_MD5}  ${PKG_PATH}" | md5sum -c -
+  else
+    [[ "$(md5 -q "${PKG_PATH}")" == "${PKG_MD5}" ]]
+  fi
+}
+
+if [[ ! -f "${PKG_PATH}" ]]; then
+  download_pkg
+fi
+
+if ! verify_md5; then
+  rm -f "${PKG_PATH}"
+  download_pkg
+  verify_md5
+fi
+
+upgradepkg --install-new "${PKG_PATH}";
     ]]>
   </FILE>
 
