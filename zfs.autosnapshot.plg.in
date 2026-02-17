@@ -2,6 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Fixed macOS metadata pollution on fresh installs: build now disables AppleDouble archive metadata and post-install removes stray `._*` files.
 - Hardened fresh-install behavior: installer now enforces package install success and verifies package registration in `/var/log/packages`.
 - Added uninstall fallback cleanup for systems missing package DB entries from earlier installs.
 - Moved the Save Settings button above the Live Run Log panel for quicker access.

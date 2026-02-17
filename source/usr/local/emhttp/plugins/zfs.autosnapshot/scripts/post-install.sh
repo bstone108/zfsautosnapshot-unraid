@@ -17,6 +17,9 @@ else
   echo "Keeping existing config: $TARGET_CFG"
 fi
 
+# Remove any AppleDouble metadata files that can break Unraid page parsing.
+find "$PLUGIN_DIR" -type f \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+
 "${PLUGIN_DIR}/scripts/sync-cron.sh" || true
 
 exit 0

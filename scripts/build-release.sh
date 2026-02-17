@@ -47,9 +47,17 @@ cp -a "$SRC_DIR/." "$STAGING_DIR/"
 # Strip common macOS Finder metadata from release payloads.
 find "$STAGING_DIR" -name ".DS_Store" -delete
 find "$STAGING_DIR" -name "._*" -delete
+find "$STAGING_DIR" -name ".AppleDouble" -type d -prune -exec rm -rf {} +
 
 # Package as .txz (tar + xz), compatible with Unraid upgradepkg/removepkg flow.
-tar -C "$STAGING_DIR" -cJf "$PKG_PATH" .
+if tar --version 2>/dev/null | grep -qi "bsdtar"; then
+  # macOS bsdtar can embed AppleDouble metadata unless explicitly disabled.
+  if ! COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --no-mac-metadata -C "$STAGING_DIR" -cJf "$PKG_PATH" . 2>/dev/null; then
+    COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -C "$STAGING_DIR" -cJf "$PKG_PATH" .
+  fi
+else
+  tar -C "$STAGING_DIR" -cJf "$PKG_PATH" .
+fi
 
 if command -v md5sum >/dev/null 2>&1; then
   PKG_MD5="$(md5sum "$PKG_PATH" | awk '{print $1}')"
