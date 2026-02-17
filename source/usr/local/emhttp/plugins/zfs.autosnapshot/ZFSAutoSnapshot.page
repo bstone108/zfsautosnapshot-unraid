@@ -1,6 +1,7 @@
-Menu="OtherSettings"
+Menu="Utilities"
 Icon="zfs-autosnapshot.png"
 Title="ZFS Auto Snapshot"
-Type="xmenu"
-Tabs="false"
 ---
+<?php
+include '/usr/local/emhttp/plugins/zfs.autosnapshot/php/settings.php';
+?>
