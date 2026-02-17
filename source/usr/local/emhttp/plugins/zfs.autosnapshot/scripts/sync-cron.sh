@@ -59,6 +59,26 @@ validate_cron_5_fields() {
   [[ "$count" == "5" ]]
 }
 
+refresh_cron_runtime() {
+  local reloaded=0
+
+  if command -v update_cron >/dev/null 2>&1; then
+    update_cron
+    reloaded=1
+  fi
+
+  if [[ -x /etc/rc.d/rc.crond ]]; then
+    /etc/rc.d/rc.crond restart >/dev/null 2>&1 || true
+    reloaded=1
+  fi
+
+  if (( reloaded )); then
+    echo "Cron runtime refreshed."
+  else
+    echo "Cron runtime refresh skipped (update_cron/rc.crond not found)." >&2
+  fi
+}
+
 build_cron_schedule() {
   local mode
   mode="$(echo "${SCHEDULE_MODE:-}" | tr '[:upper:]' '[:lower:]')"
@@ -144,7 +164,7 @@ CRON_SCHEDULE_EFFECTIVE="$(build_cron_schedule)" || exit 1
 
 if [[ -z "$CRON_SCHEDULE_EFFECTIVE" ]]; then
   rm -f "$CRON_FILE"
-  command -v update_cron >/dev/null 2>&1 && update_cron
+  refresh_cron_runtime
   echo "Cron schedule disabled."
   exit 0
 fi
@@ -161,6 +181,6 @@ fi
 } > "$CRON_FILE"
 
 chmod 0644 "$CRON_FILE"
-command -v update_cron >/dev/null 2>&1 && update_cron
+refresh_cron_runtime
 
 echo "Cron schedule applied: $CRON_SCHEDULE_EFFECTIVE"

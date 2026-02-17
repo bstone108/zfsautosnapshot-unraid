@@ -1,7 +1,8 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.26" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.27" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.17.26 (2026-02-16)
+### 2026.02.17.27 (2026-02-16)
+- Scheduler reliability fix: every schedule apply/disable now refreshes cron runtime and restarts `crond`.
 - Fixed macOS metadata pollution on fresh installs: build now disables AppleDouble archive metadata and post-install removes stray `._*` files.
 - Hardened fresh-install behavior: installer now enforces package install success and verifies package registration in `/var/log/packages`.
 - Added uninstall fallback cleanup for systems missing package DB entries from earlier installs.
@@ -28,9 +29,9 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.26-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.26-noarch-1.txz</URL>
-    <MD5>8c9675df3f2d5d3db6370cedd43a56f4</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.27-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.27-noarch-1.txz</URL>
+    <MD5>597e721b942ccbe6f59f559c85dc96ce</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -38,10 +39,10 @@
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.17.26-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.17.27-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="8c9675df3f2d5d3db6370cedd43a56f4"
+PKG_MD5="597e721b942ccbe6f59f559c85dc96ce"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
