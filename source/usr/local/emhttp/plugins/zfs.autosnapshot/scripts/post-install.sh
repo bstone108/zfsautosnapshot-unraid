@@ -20,6 +20,23 @@ fi
 # Remove any AppleDouble metadata files that can break Unraid page parsing.
 find "$PLUGIN_DIR" -type f \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
 
-"${PLUGIN_DIR}/scripts/sync-cron.sh" || true
+sync_exit=0
+if [[ -x "${PLUGIN_DIR}/scripts/sync-cron.sh" ]]; then
+  "${PLUGIN_DIR}/scripts/sync-cron.sh" || sync_exit=$?
+fi
+
+# Force cron runtime refresh on every install/upgrade so users do not need
+# to press Save just to activate a pre-existing schedule.
+if command -v update_cron >/dev/null 2>&1; then
+  update_cron || true
+fi
+
+if [[ -x /etc/rc.d/rc.crond ]]; then
+  /etc/rc.d/rc.crond restart >/dev/null 2>&1 || true
+fi
+
+if (( sync_exit != 0 )); then
+  echo "WARNING: sync-cron.sh failed during install/upgrade (exit ${sync_exit})." >&2
+fi
 
 exit 0
