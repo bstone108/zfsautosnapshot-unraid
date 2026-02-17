@@ -1269,9 +1269,6 @@ if ($resolvedCron === '') {
           <input type="checkbox" id="dry_run" name="dry_run" value="1" <?php echo ($config['DRY_RUN'] === '1') ? 'checked' : ''; ?>>
           <span>Dry run (preview only, no snapshot create/delete)</span>
         </label>
-        <div style="margin-top: 6px;">
-          <a href="#live_run_log" class="btn">View Live Log</a>
-        </div>
         <div class="zfsas-help">
           Leave this unchecked for normal operation. In Dry Run mode, use Live Run Log to see each action that would be taken.
         </div>
@@ -1413,6 +1410,7 @@ if ($resolvedCron === '') {
   }
 
   var logPollIntervalMs = <?php echo (int) $logPollIntervalMs; ?>;
+  var logApiBasePath = <?php echo json_encode((string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH) ?: '/Settings/ZFSAutoSnapshot')); ?>;
   var logPaused = false;
   var logTimer = null;
   var logFingerprint = '';
@@ -1558,7 +1556,47 @@ if ($resolvedCron === '') {
     if (isNaN(lines) || lines < 50) {
       lines = 400;
     }
-    return '?zfsas_api=log_tail&lines=' + encodeURIComponent(lines) + '&_=' + Date.now();
+
+    var basePath = logApiBasePath || window.location.pathname || '/Settings/ZFSAutoSnapshot';
+    if (basePath.charAt(0) !== '/') {
+      basePath = '/' + basePath;
+    }
+
+    return window.location.protocol + '//' + window.location.host + basePath +
+      '?zfsas_api=log_tail&lines=' + encodeURIComponent(lines) + '&_=' + Date.now();
+  }
+
+  function requestJson(url, onSuccess, onError) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', url, true);
+    xhr.setRequestHeader('Accept', 'application/json');
+
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) {
+        return;
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        onError(new Error('HTTP ' + xhr.status));
+        return;
+      }
+
+      var payload;
+      try {
+        payload = JSON.parse(xhr.responseText);
+      } catch (parseError) {
+        onError(new Error('Invalid JSON response.'));
+        return;
+      }
+
+      onSuccess(payload);
+    };
+
+    xhr.onerror = function () {
+      onError(new Error('Network error.'));
+    };
+
+    xhr.send();
   }
 
   function fetchLiveLog(forceScrollToBottom) {
@@ -1570,19 +1608,12 @@ if ($resolvedCron === '') {
     var shouldFollowTail = !!forceScrollToBottom || (outputEl.scrollTop + outputEl.clientHeight >= outputEl.scrollHeight - 40);
     setLogStatus(logPaused ? 'Paused.' : 'Updating...', false);
 
-    fetch(buildLogApiUrl(), {
-      credentials: 'same-origin',
-      cache: 'no-store'
-    })
-      .then(function (response) {
-        if (!response.ok) {
-          throw new Error('HTTP ' + response.status);
-        }
-        return response.json();
-      })
-      .then(function (data) {
+    requestJson(
+      buildLogApiUrl(),
+      function (data) {
         if (!data || data.ok !== true) {
-          throw new Error('Unexpected response payload.');
+          setLogStatus('Log refresh failed: Unexpected response payload.', true);
+          return;
         }
 
         var content = '';
@@ -1611,10 +1642,11 @@ if ($resolvedCron === '') {
 
         var prefix = logPaused ? 'Paused' : 'Live';
         setLogStatus(prefix + ' | Last refresh: ' + new Date().toLocaleTimeString(), false);
-      })
-      .catch(function (error) {
+      },
+      function (error) {
         setLogStatus('Log refresh failed: ' + error.message, true);
-      });
+      }
+    );
   }
 
   function startLogPolling() {

@@ -1,9 +1,10 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.21" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.22" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.17.21 (2026-02-16)
+### 2026.02.17.22 (2026-02-16)
+- Removed the extra "View Live Log" button under Dry Run.
+- Fixed Live Run Log polling compatibility by switching to XHR and an explicit same-page API path.
 - Added the installed plugin version badge at the top of the settings page for quick verification.
-- Added a direct "View Live Log" control under Dry Run and anchored the log panel for easier discovery.
 - Added a real-time log viewer in the WebUI so Dry Run output is visible live (including `[DRY_RUN]` actions).
 - Updated the Prefix help text to show the actual configured prefix value and clearer wording.
 - Installer now forces a cron sync immediately after package install so schedule changes apply without requiring a manual Save.
@@ -22,18 +23,18 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.21-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.21-noarch-1.txz</URL>
-    <MD5>4cd0d2c899805a8e06cb897d35c414ec</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.22-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.22-noarch-1.txz</URL>
+    <MD5>d6e9f43cd73525e4ed2f0d84dbc3854b</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
     <INLINE><![CDATA[
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.17.21-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.17.22-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="4cd0d2c899805a8e06cb897d35c414ec"
+PKG_MD5="d6e9f43cd73525e4ed2f0d84dbc3854b"
 
 mkdir -p "${PKG_DIR}"
 
