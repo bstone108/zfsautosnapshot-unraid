@@ -78,5 +78,4 @@ Host both files at `<base_url>`, then install in Unraid using the generated `.pl
 
 ## License
 
-This project is licensed under MIT with Commons Clause.
-You can use, modify, and redistribute the code, but you may not sell software or services whose value is derived substantially from this project.
+This project is licensed under the MIT License.
