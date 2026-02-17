@@ -1,8 +1,6 @@
-Author="Brandon Stone"
-Title="ZFS Auto Snapshot"
-Type="php"
 Menu="Utilities"
-Tag="camera"
+Icon="camera"
+Title="ZFS Auto Snapshot"
 ---
 <?php
 include '/usr/local/emhttp/plugins/zfs.autosnapshot/php/settings.php';
