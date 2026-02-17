@@ -3,6 +3,7 @@ $pluginName = 'zfs.autosnapshot';
 $configDir = "/boot/config/plugins/{$pluginName}";
 $configFile = "{$configDir}/zfs_autosnapshot.conf";
 $syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
+$logApiUrl = "/plugins/{$pluginName}/php/log-tail.php";
 $logFile = '/var/log/zfs_autosnapshot.log';
 $logPollIntervalMs = 2000;
 
@@ -1410,7 +1411,7 @@ if ($resolvedCron === '') {
   }
 
   var logPollIntervalMs = <?php echo (int) $logPollIntervalMs; ?>;
-  var logApiBasePath = <?php echo json_encode((string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH) ?: '/Settings/ZFSAutoSnapshot')); ?>;
+  var logApiUrl = <?php echo json_encode($logApiUrl); ?>;
   var logPaused = false;
   var logTimer = null;
   var logFingerprint = '';
@@ -1556,14 +1557,7 @@ if ($resolvedCron === '') {
     if (isNaN(lines) || lines < 50) {
       lines = 400;
     }
-
-    var basePath = logApiBasePath || window.location.pathname || '/Settings/ZFSAutoSnapshot';
-    if (basePath.charAt(0) !== '/') {
-      basePath = '/' + basePath;
-    }
-
-    return window.location.protocol + '//' + window.location.host + basePath +
-      '?zfsas_api=log_tail&lines=' + encodeURIComponent(lines) + '&_=' + Date.now();
+    return logApiUrl + '?lines=' + encodeURIComponent(lines) + '&_=' + Date.now();
   }
 
   function requestJson(url, onSuccess, onError) {
