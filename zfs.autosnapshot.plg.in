@@ -2,6 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Updated the Prefix help text to show the actual configured prefix value and clearer wording.
 - Installer now forces a cron sync immediately after package install so schedule changes apply without requiring a manual Save.
 - Fixed generated cron entry format for Unraid/BusyBox (`/etc/cron.d`) by removing the unsupported username column.
 - Adjusted Datasets card layout so the Dry Run checkbox sits on its own line under Snapshot prefix (prevents overlap).

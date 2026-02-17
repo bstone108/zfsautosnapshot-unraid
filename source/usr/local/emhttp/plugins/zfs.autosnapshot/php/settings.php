@@ -1063,7 +1063,7 @@ if ($resolvedCron === '') {
         <label for="prefix">Snapshot name prefix</label>
         <input id="prefix" name="prefix" class="zfsas-input" value="<?php echo h($config['PREFIX']); ?>">
         <div class="zfsas-help">
-          Safety guard: only snapshots containing <code>@prefix</code> are eligible for automatic deletion.
+          Safety guard: only snapshots containing the prefix <code><?php echo h($config['PREFIX']); ?></code> are eligible for automatic deletion.
         </div>
       </div>
 
