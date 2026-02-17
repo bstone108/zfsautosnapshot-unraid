@@ -1379,6 +1379,10 @@ if ($resolvedCron === '') {
       </div>
     </div>
 
+    <div class="zfsas-actions">
+      <button type="submit" class="btn btn-primary">Save Settings</button>
+    </div>
+
     <div class="zfsas-card" id="live_run_log">
       <h3>Live Run Log</h3>
       <div class="zfsas-help">
@@ -1396,10 +1400,6 @@ if ($resolvedCron === '') {
         <div id="log_status" class="zfsas-log-status">Loading live log...</div>
       </div>
       <pre id="log_output" class="zfsas-log-output">Loading log output...</pre>
-    </div>
-
-    <div class="zfsas-actions">
-      <button type="submit" class="btn btn-primary">Save Settings</button>
     </div>
   </form>
 </div>

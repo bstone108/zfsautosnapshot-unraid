@@ -2,6 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Moved the Save Settings button above the Live Run Log panel for quicker access.
 - Fixed Live Run Log "Invalid JSON response" by moving log reads to a dedicated JSON endpoint (`/plugins/.../php/log-tail.php`).
 - Removed the extra "View Live Log" button under Dry Run.
 - Improved Live Run Log polling compatibility by using XHR transport.

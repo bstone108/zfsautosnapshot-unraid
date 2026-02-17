@@ -1,7 +1,8 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.23" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.24" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.17.23 (2026-02-16)
+### 2026.02.17.24 (2026-02-16)
+- Moved the Save Settings button above the Live Run Log panel for quicker access.
 - Fixed Live Run Log "Invalid JSON response" by moving log reads to a dedicated JSON endpoint (`/plugins/.../php/log-tail.php`).
 - Removed the extra "View Live Log" button under Dry Run.
 - Improved Live Run Log polling compatibility by using XHR transport.
@@ -24,18 +25,18 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.23-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.23-noarch-1.txz</URL>
-    <MD5>7a714c8b892204e1f57038bcb7469178</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.24-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.24-noarch-1.txz</URL>
+    <MD5>5db2168373c6751cab5b534f1c4c6ae9</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
     <INLINE><![CDATA[
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.17.23-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.17.24-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="7a714c8b892204e1f57038bcb7469178"
+PKG_MD5="5db2168373c6751cab5b534f1c4c6ae9"
 
 mkdir -p "${PKG_DIR}"
 
