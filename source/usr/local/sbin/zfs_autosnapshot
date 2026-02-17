@@ -1,0 +1,318 @@
+#!/bin/bash
+set -euo pipefail
+
+# =============================================================================
+# ZFS Automatic Snapshot Script for Unraid
+#
+# What it does (in this order):
+#   1) Time-based retention cleanup (ONLY snapshots with PREFIX)
+#   2) Space-based cleanup if pool free space falls below configured thresholds
+#   3) Creates a fresh snapshot for each configured dataset
+#
+# SAFETY:
+#   - This script ONLY destroys snapshots whose name contains "@${PREFIX}".
+#   - Any snapshots not matching that prefix are never touched.
+# =============================================================================
+
+CONFIG_DIR="/boot/config/plugins/zfs.autosnapshot"
+CONFIG_FILE="${CONFIG_FILE:-$CONFIG_DIR/zfs_autosnapshot.conf}"
+
+# -----------------------------------------------------------------------------
+# Defaults (can be overridden in config file)
+# -----------------------------------------------------------------------------
+DATASETS=""
+PREFIX="autosnapshot-"
+DRY_RUN=0
+
+KEEP_ALL_FOR_DAYS=14
+KEEP_DAILY_UNTIL_DAYS=30
+KEEP_WEEKLY_UNTIL_DAYS=183
+
+LOCKFILE="/tmp/zfs_autosnapshot.lock"
+LOCKDIR="/tmp/zfs_autosnapshot.lockdir"
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+log() { echo "$@"; }
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+die() {
+  log "ERROR: $*" >&2
+  exit 1
+}
+
+do_destroy() {
+  local snap="$1"
+  if (( DRY_RUN )); then
+    log "[DRY_RUN] zfs destroy '$snap'"
+  else
+    zfs destroy "$snap"
+  fi
+}
+
+do_snapshot() {
+  local snap="$1"
+  if (( DRY_RUN )); then
+    log "[DRY_RUN] zfs snapshot '$snap'"
+  else
+    zfs snapshot "$snap"
+  fi
+}
+
+# Convert "100G", "500MB", "2T", etc. into bytes (1024-based).
+threshold_to_bytes() {
+  local raw="$1"
+  local upper num unit
+
+  upper="$(echo "$raw" | tr '[:lower:]' '[:upper:]')"
+  upper="${upper%B}"
+
+  num="${upper%%[!0-9]*}"
+  unit="${upper#$num}"
+
+  if [[ -z "$num" || ! "$num" =~ ^[0-9]+$ ]]; then
+    die "Bad threshold '$raw' (expected like 500M, 100G, 2T)"
+  fi
+
+  case "$unit" in
+    K) echo $((num * 1024)) ;;
+    M) echo $((num * 1024 * 1024)) ;;
+    G) echo $((num * 1024 * 1024 * 1024)) ;;
+    T) echo $((num * 1024 * 1024 * 1024 * 1024)) ;;
+    *) die "Bad unit in '$raw' (use K, M, G, or T, optional B: GB/TB)" ;;
+  esac
+}
+
+get_pool_avail() { zfs list -o avail -H -p "$1"; }
+
+# "freeing" may be missing or "-". Treat as 0 if not numeric.
+get_pool_freeing() {
+  local value
+  value="$(zpool get -H -o value freeing "$1" 2>/dev/null || true)"
+  [[ "$value" =~ ^[0-9]+$ ]] && echo "$value" || echo 0
+}
+
+upsert_pool_threshold() {
+  local pool="$1"
+  local threshold="$2"
+  local i
+
+  for i in "${!pool_names[@]}"; do
+    if [[ "${pool_names[$i]}" == "$pool" ]]; then
+      if (( threshold > pool_thresholds[$i] )); then
+        pool_thresholds[$i]="$threshold"
+      fi
+      return 0
+    fi
+  done
+
+  pool_names+=("$pool")
+  pool_thresholds+=("$threshold")
+}
+
+# -----------------------------------------------------------------------------
+# Acquire exclusive lock (non-blocking)
+#   Prefer flock. Fallback to mkdir lock if flock is unavailable.
+# -----------------------------------------------------------------------------
+acquire_lock() {
+  if command -v flock >/dev/null 2>&1; then
+    exec 200>"$LOCKFILE"
+    if ! flock -n 200; then
+      log "Another instance is already running (lock: $LOCKFILE). Exiting."
+      exit 0
+    fi
+    echo "$$" 1>&200
+  else
+    if ! mkdir "$LOCKDIR" 2>/dev/null; then
+      log "Another instance is already running (lock: $LOCKDIR). Exiting."
+      exit 0
+    fi
+    echo "$$" > "$LOCKDIR/pid"
+    trap 'rm -rf "$LOCKDIR"' EXIT
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Time-based retention cleanup for one dataset
+# -----------------------------------------------------------------------------
+time_clean_dataset() {
+  local ds="$1"
+  log "Time-based cleanup for dataset: $ds"
+
+  # Output format: name<TAB>creation_epoch (newest first)
+  local snaps
+  snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$ds" | grep -F "@${PREFIX}" || true)"
+
+  if [[ -z "$snaps" ]]; then
+    log "  No ${PREFIX} snapshots found."
+    return 0
+  fi
+
+  # Keep seen day/week keys in newline-delimited sets for broad Bash compatibility.
+  local kept_day=$'\n'
+  local kept_week=$'\n'
+
+  while IFS=$'\t' read -r snap_name snap_created; do
+    [[ -z "$snap_name" || -z "$snap_created" ]] && continue
+
+    local age=$((NOW_EPOCH - snap_created))
+
+    if (( age > KEEP_WEEKLY_UNTIL_SECONDS )); then
+      log "  Deleting (older than ${KEEP_WEEKLY_UNTIL_DAYS}d): $snap_name"
+      do_destroy "$snap_name"
+      continue
+    fi
+
+    if (( age > KEEP_DAILY_UNTIL_SECONDS )); then
+      local week_key
+      week_key="$(date -d @"$snap_created" +%Y-%W)"
+      if [[ "$kept_week" != *$'\n'"$week_key"$'\n'* ]]; then
+        kept_week+="$week_key"$'\n'
+        log "  Keeping weekly latest: $snap_name"
+      else
+        log "  Deleting weekly duplicate: $snap_name"
+        do_destroy "$snap_name"
+      fi
+      continue
+    fi
+
+    if (( age > KEEP_ALL_FOR_SECONDS )); then
+      local day_key
+      day_key="$(date -d @"$snap_created" +%Y-%m-%d)"
+      if [[ "$kept_day" != *$'\n'"$day_key"$'\n'* ]]; then
+        kept_day+="$day_key"$'\n'
+        log "  Keeping daily latest: $snap_name"
+      else
+        log "  Deleting daily duplicate: $snap_name"
+        do_destroy "$snap_name"
+      fi
+      continue
+    fi
+
+    log "  Keeping recent: $snap_name"
+  done <<< "$snaps"
+}
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
+if [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+fi
+
+if ! command -v zfs >/dev/null 2>&1 || ! command -v zpool >/dev/null 2>&1; then
+  die "zfs/zpool commands not found. Is ZFS installed and loaded on this Unraid system?"
+fi
+
+if (( KEEP_ALL_FOR_DAYS >= KEEP_DAILY_UNTIL_DAYS || KEEP_DAILY_UNTIL_DAYS >= KEEP_WEEKLY_UNTIL_DAYS )); then
+  die "Retention config invalid: KEEP_ALL_FOR_DAYS < KEEP_DAILY_UNTIL_DAYS < KEEP_WEEKLY_UNTIL_DAYS"
+fi
+
+IFS=',' read -r -a raw_pairs <<< "$DATASETS"
+declare -a pairs=()
+for raw_pair in "${raw_pairs[@]}"; do
+  pair="$(trim "$raw_pair")"
+  [[ -z "$pair" ]] && continue
+
+  if [[ "$pair" != *:* ]]; then
+    die "Bad DATASETS entry '$pair' (expected dataset:threshold)"
+  fi
+
+  ds="$(trim "${pair%:*}")"
+  thresh="$(trim "${pair##*:}")"
+
+  if [[ -z "$ds" || -z "$thresh" ]]; then
+    die "Bad DATASETS entry '$pair' (expected dataset:threshold)"
+  fi
+
+  pairs+=("$ds:$thresh")
+done
+
+if ((${#pairs[@]} == 0)); then
+  die "DATASETS is empty. Configure DATASETS in $CONFIG_FILE"
+fi
+
+acquire_lock
+
+KEEP_ALL_FOR_SECONDS=$((KEEP_ALL_FOR_DAYS * 86400))
+KEEP_DAILY_UNTIL_SECONDS=$((KEEP_DAILY_UNTIL_DAYS * 86400))
+KEEP_WEEKLY_UNTIL_SECONDS=$((KEEP_WEEKLY_UNTIL_DAYS * 86400))
+NOW_EPOCH="$(date +%s)"
+
+declare -a pool_names=()
+declare -a pool_thresholds=()
+
+# Phase A: time-based cleanup + compute per-pool thresholds
+for pair in "${pairs[@]}"; do
+  ds="${pair%:*}"
+  thresh="${pair##*:}"
+
+  pool="${ds%%/*}"
+  thresh_bytes="$(threshold_to_bytes "$thresh")"
+  upsert_pool_threshold "$pool" "$thresh_bytes"
+
+  time_clean_dataset "$ds"
+done
+
+# Phase B: space-based cleanup for each pool
+for i in "${!pool_names[@]}"; do
+  pool="${pool_names[$i]}"
+  min_free="${pool_thresholds[$i]}"
+
+  while :; do
+    avail="$(get_pool_avail "$pool")"
+    freeing="$(get_pool_freeing "$pool")"
+    effective_avail=$((avail + freeing))
+
+    if (( effective_avail >= min_free )); then
+      log "Pool $pool OK: effective_avail=$effective_avail bytes (>= $min_free)."
+      break
+    fi
+
+    snapshot_list=""
+    for pair in "${pairs[@]}"; do
+      ds="${pair%:*}"
+      this_pool="${ds%%/*}"
+      [[ "$this_pool" != "$pool" ]] && continue
+
+      snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$ds" | grep -F "@${PREFIX}" || true)"
+      [[ -n "$snaps" ]] && snapshot_list+="$snaps"$'\n'
+    done
+
+    if [[ -z "$snapshot_list" ]]; then
+      log "Pool $pool low on space, but no ${PREFIX} snapshots remain for listed datasets."
+      break
+    fi
+
+    oldest_line="$(printf '%s' "$snapshot_list" | awk -F '\t' 'NF >= 2' | sort -k2n | head -n 1)"
+    oldest_snap="${oldest_line%%$'\t'*}"
+
+    if [[ -z "$oldest_snap" ]]; then
+      log "Pool $pool low on space, but couldn't parse an eligible snapshot entry."
+      break
+    fi
+
+    log "Pool $pool low on space -> deleting oldest eligible snapshot: $oldest_snap"
+    do_destroy "$oldest_snap"
+  done
+done
+
+# Phase C: create new snapshots
+timestamp="$(date +%Y-%m-%d_%H-%M-%S)"
+
+for pair in "${pairs[@]}"; do
+  ds="${pair%:*}"
+  new_snap="$ds@${PREFIX}${timestamp}"
+  log "Creating snapshot: $new_snap"
+  do_snapshot "$new_snap"
+done
+
+log "Snapshot management complete."

@@ -1,0 +1,11 @@
+zfs-autosnapshot: zfs-autosnapshot (Unraid ZFS snapshot automation)
+zfs-autosnapshot:
+zfs-autosnapshot: Time-based and space-based ZFS snapshot lifecycle manager for Unraid.
+zfs-autosnapshot: It keeps snapshots by age tiers, enforces pool free-space thresholds,
+zfs-autosnapshot: and creates fresh snapshots for configured datasets.
+zfs-autosnapshot:
+zfs-autosnapshot: Config file:
+zfs-autosnapshot:   /boot/config/plugins/zfs.autosnapshot/zfs_autosnapshot.conf
+zfs-autosnapshot:
+zfs-autosnapshot: Plugin path:
+zfs-autosnapshot:   /usr/local/emhttp/plugins/zfs.autosnapshot

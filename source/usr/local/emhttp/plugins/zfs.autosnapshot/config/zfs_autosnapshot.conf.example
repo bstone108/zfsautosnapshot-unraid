@@ -1,0 +1,62 @@
+# -----------------------------------------------------------------------------
+# ZFS Auto Snapshot plugin config
+# Path: /boot/config/plugins/zfs.autosnapshot/zfs_autosnapshot.conf
+# -----------------------------------------------------------------------------
+
+# DATASETS
+# Comma-separated dataset:threshold entries.
+# Example:
+#   DATASETS="tank/media:100G,tank/photos:200G"
+#
+# dataset   = full ZFS dataset path
+# threshold = minimum free-space target for that dataset's pool (K/M/G/T, optional B)
+DATASETS=""
+
+# PREFIX
+# Only snapshots whose name contains "@${PREFIX}" are eligible for deletion.
+PREFIX="autosnapshot-"
+
+# DRY_RUN
+# 1 = preview only (no snapshot destroy/create)
+# 0 = live changes enabled
+DRY_RUN=0
+
+# Retention windows (days)
+# KEEP_ALL_FOR_DAYS        = keep every snapshot younger than this age
+# KEEP_DAILY_UNTIL_DAYS    = for older snapshots, keep newest 1/day until this age
+# KEEP_WEEKLY_UNTIL_DAYS   = for older snapshots, keep newest 1/week until this age
+# Older than KEEP_WEEKLY_UNTIL_DAYS are removed.
+KEEP_ALL_FOR_DAYS=14
+KEEP_DAILY_UNTIL_DAYS=30
+KEEP_WEEKLY_UNTIL_DAYS=183
+
+# -----------------------------------------------------------------------------
+# Plain-English Scheduling
+# -----------------------------------------------------------------------------
+# SCHEDULE_MODE options:
+#   disabled = do not create a cron entry
+#   hourly   = every N hours (SCHEDULE_EVERY_HOURS)
+#   daily    = every day at HH:MM
+#   weekly   = once per week on chosen day/time
+#   custom   = advanced; use CUSTOM_CRON_SCHEDULE directly
+SCHEDULE_MODE="disabled"
+
+# Hourly mode: run every N hours (1-24)
+SCHEDULE_EVERY_HOURS=1
+
+# Daily mode: run every day at this 24-hour time
+SCHEDULE_DAILY_HOUR=3
+SCHEDULE_DAILY_MINUTE=0
+
+# Weekly mode: run on weekday at this 24-hour time
+# Day values: 0=Sunday, 1=Monday, 2=Tuesday, ... 6=Saturday
+SCHEDULE_WEEKLY_DAY=0
+SCHEDULE_WEEKLY_HOUR=3
+SCHEDULE_WEEKLY_MINUTE=0
+
+# Custom mode only: 5-field cron expression
+CUSTOM_CRON_SCHEDULE=""
+
+# Backward compatibility only. sync-cron.sh derives this from SCHEDULE_MODE.
+# You can leave this empty unless you're migrating from an older config style.
+CRON_SCHEDULE=""

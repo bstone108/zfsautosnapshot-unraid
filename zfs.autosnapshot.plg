@@ -1,0 +1,38 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name "zfs.autosnapshot">
+<!ENTITY author "Brandon Stone">
+<!ENTITY version "2026.02.17-verified">
+<!ENTITY pluginURL "https://example.com/unraid/zfs-autosnapshot/zfs.autosnapshot.plg">
+<!ENTITY package "zfs-autosnapshot-2026.02.17-verified-noarch-1.txz">
+<!ENTITY packageMD5 "a2db45df7e458e598991491e285be50d">
+<!ENTITY packageURL "https://example.com/unraid/zfs-autosnapshot/&package;">
+]>
+<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;">
+  <CHANGES>
+### 2026.02.17-verified (2026-02-16)
+- Initial release scaffold for automated ZFS snapshots.
+  </CHANGES>
+
+  <FILE Name="/boot/config/plugins/&name;/&package;" Min="6.11.0">&packageURL;</FILE>
+  <FILE Name="/boot/config/plugins/&name;/&package;.md5">&packageMD5;</FILE>
+
+  <FILE Run="/bin/bash">
+    <![CDATA[
+upgradepkg --install-new /boot/config/plugins/&name;/&package;
+    ]]>
+  </FILE>
+
+  <FILE Run="/bin/bash" Method="remove">
+    <![CDATA[
+if [ -x /usr/local/emhttp/plugins/&name;/scripts/pre-remove.sh ]; then
+  /usr/local/emhttp/plugins/&name;/scripts/pre-remove.sh || true
+fi
+
+removepkg zfs-autosnapshot >/dev/null 2>&1 || true
+rm -f /boot/config/plugins/&name;/zfs-autosnapshot-*-noarch-1.txz
+rm -f /boot/config/plugins/&name;/zfs-autosnapshot-*-noarch-1.txz.md5
+rmdir /boot/config/plugins/&name; 2>/dev/null || true
+    ]]>
+  </FILE>
+</PLUGIN>
