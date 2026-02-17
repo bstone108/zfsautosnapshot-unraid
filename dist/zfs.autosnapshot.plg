@@ -1,7 +1,8 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.16" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.17" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.17.16 (2026-02-16)
+### 2026.02.17.17 (2026-02-16)
+- Installer now forces a cron sync immediately after package install so schedule changes apply without requiring a manual Save.
 - Fixed generated cron entry format for Unraid/BusyBox (`/etc/cron.d`) by removing the unsupported username column.
 - Adjusted Datasets card layout so the Dry Run checkbox sits on its own line under Snapshot prefix (prevents overlap).
 - Added new schedule mode: run every N minutes (1-59), alongside existing hourly/daily/weekly/custom options.
@@ -17,15 +18,15 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.16-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.16-noarch-1.txz</URL>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.17-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.17-noarch-1.txz</URL>
     <MD5>7087bcb36a8abfcca0c4ad28639acd47</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
     <INLINE><![CDATA[
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.17.16-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.17.17-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
 PKG_MD5="7087bcb36a8abfcca0c4ad28639acd47"
@@ -59,6 +60,9 @@ if ! verify_md5; then
 fi
 
 upgradepkg --install-new "${PKG_PATH}";
+if [ -x /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/sync-cron.sh ]; then
+  /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/sync-cron.sh || true
+fi
     ]]></INLINE>
   </FILE>
 
