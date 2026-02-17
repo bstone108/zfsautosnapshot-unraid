@@ -2,6 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Added the installed plugin version badge at the top of the settings page for quick verification.
 - Added a direct "View Live Log" control under Dry Run and anchored the log panel for easier discovery.
 - Added a real-time log viewer in the WebUI so Dry Run output is visible live (including `[DRY_RUN]` actions).
 - Updated the Prefix help text to show the actual configured prefix value and clearer wording.

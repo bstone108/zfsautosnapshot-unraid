@@ -122,6 +122,53 @@ function tailFileLines($path, $lineCount, $maxBytes, &$wasTruncated = false)
     return $text;
 }
 
+function detectInstalledPluginVersion($pluginName)
+{
+    $pluginName = trim((string) $pluginName);
+    if ($pluginName === '') {
+        return 'unknown';
+    }
+
+    $manifestPaths = [
+        "/var/log/plugins/{$pluginName}.plg",
+        "/boot/config/plugins/{$pluginName}.plg",
+    ];
+
+    foreach ($manifestPaths as $manifestPath) {
+        if (!is_file($manifestPath) || !is_readable($manifestPath)) {
+            continue;
+        }
+
+        $xmlHead = @file_get_contents($manifestPath, false, null, 0, 8192);
+        if (!is_string($xmlHead) || $xmlHead === '') {
+            continue;
+        }
+
+        if (preg_match('/<PLUGIN\b[^>]*\bversion="([^"]+)"/i', $xmlHead, $match) === 1) {
+            $version = trimValue($match[1]);
+            if ($version !== '') {
+                return $version;
+            }
+        }
+    }
+
+    $packagePattern = '/var/log/packages/zfs-autosnapshot-*';
+    $packageFiles = glob($packagePattern);
+    if (is_array($packageFiles) && count($packageFiles) > 0) {
+        natsort($packageFiles);
+        $latest = (string) end($packageFiles);
+        $packageName = basename($latest);
+        if (preg_match('/^zfs-autosnapshot-(.+)-[^-]+-[0-9]+$/', $packageName, $match) === 1) {
+            $version = trimValue($match[1]);
+            if ($version !== '') {
+                return $version;
+            }
+        }
+    }
+
+    return 'unknown';
+}
+
 function parseConfigFile($path, $defaults)
 {
     $config = $defaults;
@@ -652,6 +699,8 @@ if ($apiAction === 'log_tail') {
     ]);
 }
 
+$installedVersion = detectInstalledPluginVersion($pluginName);
+
 $config = parseConfigFile($configFile, $defaults);
 $errors = [];
 $notices = [];
@@ -784,13 +833,32 @@ if ($resolvedCron === '') {
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
 }
 
+.zfsas-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .zfsas-title {
-  margin-bottom: 6px;
+  margin: 0;
 }
 
 .zfsas-subtitle {
   color: #444;
-  margin-bottom: 16px;
+  margin: 6px 0 16px;
+}
+
+.zfsas-version {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #bfd3ff;
+  border-radius: 999px;
+  background: #eef4ff;
+  color: #1f4b8c;
 }
 
 .zfsas-card {
@@ -1060,6 +1128,12 @@ if ($resolvedCron === '') {
     grid-template-columns: 1fr;
   }
 
+  .zfsas-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
   .zfsas-pool-filter {
     width: 100%;
   }
@@ -1081,7 +1155,10 @@ if ($resolvedCron === '') {
 </style>
 
 <div class="zfsas-wrap">
-  <h2 class="zfsas-title">ZFS Auto Snapshot</h2>
+  <div class="zfsas-header">
+    <h2 class="zfsas-title">ZFS Auto Snapshot</h2>
+    <span class="zfsas-version">Version <?php echo h($installedVersion); ?></span>
+  </div>
   <div class="zfsas-subtitle">
     Manage dataset selection, retention policy, and automatic run schedule.
   </div>
