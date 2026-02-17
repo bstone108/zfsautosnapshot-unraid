@@ -1,7 +1,8 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.7" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.9" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.17.7 (2026-02-16)
+### 2026.02.17.9 (2026-02-16)
+- Fixed package download block to use explicit `&lt;URL&gt;` and `&lt;MD5&gt;` nodes required by current Unraid plugin installer.
 - Fixed install/remove script paths to use literal values (avoids unresolved XML entities in CDATA).
 - Switched to canonical 2-page Unraid layout (`xmenu` entry + child settings page).
 - Moved Settings tile placement to `OtherSettings` for broad UI compatibility.
@@ -11,12 +12,14 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.7-noarch-1.txz" Min="6.11.0">https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.7-noarch-1.txz</FILE>
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.7-noarch-1.txz.md5">25d380d8f2bff3fcdd67958183b02325</FILE>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.9-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.9-noarch-1.txz</URL>
+    <MD5>25d380d8f2bff3fcdd67958183b02325</MD5>
+  </FILE>
 
   <FILE Run="/bin/bash">
     <![CDATA[
-upgradepkg --install-new /boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.7-noarch-1.txz;
+upgradepkg --install-new /boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.9-noarch-1.txz;
     ]]>
   </FILE>
 
