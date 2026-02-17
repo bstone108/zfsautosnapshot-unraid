@@ -29,6 +29,12 @@ The settings page writes to:
 
 You can also edit the config manually if needed.
 
+## Install on Unraid
+
+Plugin URL:
+
+`https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg`
+
 ## Scheduling
 
 The plugin supports human-friendly schedule modes:
@@ -58,7 +64,7 @@ From repo root:
 Example:
 
 ```bash
-./scripts/build-release.sh 2026.02.16 https://raw.githubusercontent.com/OWNER/REPO/main/dist
+./scripts/build-release.sh 2026.02.17 https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist
 ```
 
 This creates:
@@ -68,3 +74,8 @@ This creates:
 - `zfs.autosnapshot.plg` (copied to repo root)
 
 Host both files at `<base_url>`, then install in Unraid using the generated `.plg` URL.
+
+## License
+
+This project is licensed under MIT with Commons Clause.
+You can use, modify, and redistribute the code, but you may not sell software or services whose value is derived substantially from this project.

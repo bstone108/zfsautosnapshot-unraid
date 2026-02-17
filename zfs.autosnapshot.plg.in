@@ -11,7 +11,9 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Initial release scaffold for automated ZFS snapshots.
+- Web UI for dataset checkbox selection and retention settings.
+- Plain-English scheduling (hourly/daily/weekly/custom) with cron sync.
+- Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
   <FILE Name="/boot/config/plugins/&name;/&package;" Min="6.11.0">&packageURL;</FILE>

@@ -2,16 +2,18 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name "zfs.autosnapshot">
 <!ENTITY author "Brandon Stone">
-<!ENTITY version "2026.02.17-verified">
-<!ENTITY pluginURL "https://example.com/unraid/zfs-autosnapshot/zfs.autosnapshot.plg">
-<!ENTITY package "zfs-autosnapshot-2026.02.17-verified-noarch-1.txz">
+<!ENTITY version "2026.02.17">
+<!ENTITY pluginURL "https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg">
+<!ENTITY package "zfs-autosnapshot-2026.02.17-noarch-1.txz">
 <!ENTITY packageMD5 "a2db45df7e458e598991491e285be50d">
-<!ENTITY packageURL "https://example.com/unraid/zfs-autosnapshot/&package;">
+<!ENTITY packageURL "https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/&package;">
 ]>
 <PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;">
   <CHANGES>
-### 2026.02.17-verified (2026-02-16)
-- Initial release scaffold for automated ZFS snapshots.
+### 2026.02.17 (2026-02-16)
+- Web UI for dataset checkbox selection and retention settings.
+- Plain-English scheduling (hourly/daily/weekly/custom) with cron sync.
+- Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
   <FILE Name="/boot/config/plugins/&name;/&package;" Min="6.11.0">&packageURL;</FILE>
