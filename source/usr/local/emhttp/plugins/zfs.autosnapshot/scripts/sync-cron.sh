@@ -77,6 +77,16 @@ build_cron_schedule() {
       echo ""
       ;;
 
+    minutes)
+      local interval
+      interval="$(require_int_in_range "SCHEDULE_EVERY_MINUTES" "${SCHEDULE_EVERY_MINUTES:-15}" 1 59)" || return 1
+      if (( interval == 1 )); then
+        echo "* * * * *"
+      else
+        echo "*/${interval} * * * *"
+      fi
+      ;;
+
     hourly)
       local interval
       interval="$(require_int_in_range "SCHEDULE_EVERY_HOURS" "${SCHEDULE_EVERY_HOURS:-1}" 1 24)" || return 1
@@ -117,7 +127,7 @@ build_cron_schedule() {
       ;;
 
     *)
-      echo "Invalid SCHEDULE_MODE '$mode' (use disabled, hourly, daily, weekly, custom)." >&2
+      echo "Invalid SCHEDULE_MODE '$mode' (use disabled, minutes, hourly, daily, weekly, custom)." >&2
       return 1
       ;;
   esac

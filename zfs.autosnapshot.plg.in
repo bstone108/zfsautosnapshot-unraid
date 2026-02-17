@@ -2,6 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Added new schedule mode: run every N minutes (1-59), alongside existing hourly/daily/weekly/custom options.
 - Improved dataset discovery to scan each pool individually and include both filesystems and zvols.
 - Redesigned dataset picker with pool filter dropdown, cleaner grouping, and quick select controls.
 - Fixed script execution format: install/remove `Run="/bin/bash"` blocks now use explicit `<INLINE><![CDATA[...]]></INLINE>`.
@@ -10,7 +11,7 @@
 - Added resilient installer fallback: plugin install script now downloads and MD5-verifies package directly before `upgradepkg`.
 - Fixed install/remove script paths to use literal values (avoids unresolved XML entities in CDATA).
 - Web UI for dataset checkbox selection and retention settings.
-- Plain-English scheduling (hourly/daily/weekly/custom) with cron sync.
+- Plain-English scheduling (minutes/hourly/daily/weekly/custom) with cron sync.
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 

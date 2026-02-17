@@ -40,6 +40,7 @@ Plugin URL:
 The plugin supports human-friendly schedule modes:
 
 - Disabled
+- Every N minutes
 - Every N hours
 - Daily at HH:MM
 - Weekly on a day/time

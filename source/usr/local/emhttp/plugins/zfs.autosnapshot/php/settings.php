@@ -12,6 +12,7 @@ $defaults = [
     'KEEP_DAILY_UNTIL_DAYS' => '30',
     'KEEP_WEEKLY_UNTIL_DAYS' => '183',
     'SCHEDULE_MODE' => 'disabled',
+    'SCHEDULE_EVERY_MINUTES' => '15',
     'SCHEDULE_EVERY_HOURS' => '1',
     'SCHEDULE_DAILY_HOUR' => '3',
     'SCHEDULE_DAILY_MINUTE' => '0',
@@ -471,6 +472,14 @@ function buildCronFromSettings($config, &$errors)
         return '';
     }
 
+    if ($mode === 'minutes') {
+        $every = intInRange($config['SCHEDULE_EVERY_MINUTES'] ?? '15', 1, 59, 'Every N minutes', $errors);
+        if ($every === null) {
+            return '';
+        }
+        return ((int) $every === 1) ? '* * * * *' : "*/{$every} * * * *";
+    }
+
     if ($mode === 'hourly') {
         $every = intInRange($config['SCHEDULE_EVERY_HOURS'] ?? '1', 1, 24, 'Every N hours', $errors);
         if ($every === null) {
@@ -550,6 +559,7 @@ function renderConfig($config)
     $lines[] = '';
     $lines[] = '# Human-friendly schedule fields';
     $lines[] = 'SCHEDULE_MODE=' . quoteConfigString($config['SCHEDULE_MODE']);
+    $lines[] = 'SCHEDULE_EVERY_MINUTES=' . $config['SCHEDULE_EVERY_MINUTES'];
     $lines[] = 'SCHEDULE_EVERY_HOURS=' . $config['SCHEDULE_EVERY_HOURS'];
     $lines[] = 'SCHEDULE_DAILY_HOUR=' . $config['SCHEDULE_DAILY_HOUR'];
     $lines[] = 'SCHEDULE_DAILY_MINUTE=' . $config['SCHEDULE_DAILY_MINUTE'];
@@ -592,6 +602,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $submitted['KEEP_DAILY_UNTIL_DAYS'] = trimValue($_POST['keep_daily_until_days'] ?? $submitted['KEEP_DAILY_UNTIL_DAYS']);
     $submitted['KEEP_WEEKLY_UNTIL_DAYS'] = trimValue($_POST['keep_weekly_until_days'] ?? $submitted['KEEP_WEEKLY_UNTIL_DAYS']);
     $submitted['SCHEDULE_MODE'] = strtolower(trimValue($_POST['schedule_mode'] ?? $submitted['SCHEDULE_MODE']));
+    $submitted['SCHEDULE_EVERY_MINUTES'] = trimValue($_POST['schedule_every_minutes'] ?? $submitted['SCHEDULE_EVERY_MINUTES']);
     $submitted['SCHEDULE_EVERY_HOURS'] = trimValue($_POST['schedule_every_hours'] ?? $submitted['SCHEDULE_EVERY_HOURS']);
     $submitted['SCHEDULE_DAILY_HOUR'] = trimValue($_POST['schedule_daily_hour'] ?? $submitted['SCHEDULE_DAILY_HOUR']);
     $submitted['SCHEDULE_DAILY_MINUTE'] = trimValue($_POST['schedule_daily_minute'] ?? $submitted['SCHEDULE_DAILY_MINUTE']);
@@ -631,10 +642,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    if (!in_array($submitted['SCHEDULE_MODE'], ['disabled', 'hourly', 'daily', 'weekly', 'custom'], true)) {
+    if (!in_array($submitted['SCHEDULE_MODE'], ['disabled', 'minutes', 'hourly', 'daily', 'weekly', 'custom'], true)) {
         $errors[] = 'Schedule mode is invalid.';
     }
 
+    $submitted['SCHEDULE_EVERY_MINUTES'] = intInRange($submitted['SCHEDULE_EVERY_MINUTES'], 1, 59, 'Every N minutes', $errors) ?? $submitted['SCHEDULE_EVERY_MINUTES'];
     $submitted['SCHEDULE_EVERY_HOURS'] = intInRange($submitted['SCHEDULE_EVERY_HOURS'], 1, 24, 'Every N hours', $errors) ?? $submitted['SCHEDULE_EVERY_HOURS'];
     $submitted['SCHEDULE_DAILY_HOUR'] = intInRange($submitted['SCHEDULE_DAILY_HOUR'], 0, 23, 'Daily hour', $errors) ?? $submitted['SCHEDULE_DAILY_HOUR'];
     $submitted['SCHEDULE_DAILY_MINUTE'] = intInRange($submitted['SCHEDULE_DAILY_MINUTE'], 0, 59, 'Daily minute', $errors) ?? $submitted['SCHEDULE_DAILY_MINUTE'];
@@ -1087,6 +1099,7 @@ if ($resolvedCron === '') {
         <label for="schedule_mode">How often should automatic runs happen?</label>
         <select id="schedule_mode" name="schedule_mode" class="zfsas-select">
           <option value="disabled" <?php echo ($config['SCHEDULE_MODE'] === 'disabled') ? 'selected' : ''; ?>>Disabled (manual only)</option>
+          <option value="minutes" <?php echo ($config['SCHEDULE_MODE'] === 'minutes') ? 'selected' : ''; ?>>Every N minutes</option>
           <option value="hourly" <?php echo ($config['SCHEDULE_MODE'] === 'hourly') ? 'selected' : ''; ?>>Every N hours</option>
           <option value="daily" <?php echo ($config['SCHEDULE_MODE'] === 'daily') ? 'selected' : ''; ?>>Every day at a specific time</option>
           <option value="weekly" <?php echo ($config['SCHEDULE_MODE'] === 'weekly') ? 'selected' : ''; ?>>Once per week</option>
@@ -1094,6 +1107,14 @@ if ($resolvedCron === '') {
         </select>
         <div class="zfsas-help">
           The plugin converts this to a cron job automatically.
+        </div>
+      </div>
+
+      <div class="zfsas-field zfsas-schedule-row" data-mode="minutes" style="margin-top: 12px;">
+        <label for="schedule_every_minutes">Every how many minutes?</label>
+        <input id="schedule_every_minutes" name="schedule_every_minutes" class="zfsas-input" type="number" min="1" max="59" value="<?php echo h($config['SCHEDULE_EVERY_MINUTES']); ?>">
+        <div class="zfsas-help">
+          1 means every minute. 15 means every 15 minutes.
         </div>
       </div>
 
@@ -1178,6 +1199,17 @@ if ($resolvedCron === '') {
     var mode = byId('schedule_mode').value;
     if (mode === 'disabled') {
       return 'Automatic schedule is disabled. Run manually whenever needed.';
+    }
+
+    if (mode === 'minutes') {
+      var everyMinutes = parseInt(byId('schedule_every_minutes').value, 10);
+      if (isNaN(everyMinutes) || everyMinutes < 1) {
+        everyMinutes = 1;
+      }
+      if (everyMinutes === 1) {
+        return 'Runs every minute.';
+      }
+      return 'Runs every ' + everyMinutes + ' minutes.';
     }
 
     if (mode === 'hourly') {
@@ -1273,7 +1305,7 @@ if ($resolvedCron === '') {
     refreshDatasetCount();
   }
 
-  ['schedule_mode', 'schedule_every_hours', 'schedule_daily_hour', 'schedule_daily_minute', 'schedule_weekly_day', 'schedule_weekly_hour', 'schedule_weekly_minute', 'custom_cron_schedule'].forEach(function (id) {
+  ['schedule_mode', 'schedule_every_minutes', 'schedule_every_hours', 'schedule_daily_hour', 'schedule_daily_minute', 'schedule_weekly_day', 'schedule_weekly_hour', 'schedule_weekly_minute', 'custom_cron_schedule'].forEach(function (id) {
     var element = byId(id);
     if (element) {
       element.addEventListener('change', refreshScheduleUI);
