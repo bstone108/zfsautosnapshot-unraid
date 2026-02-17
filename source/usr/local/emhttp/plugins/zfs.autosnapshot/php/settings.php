@@ -766,6 +766,23 @@ if ($resolvedCron === '') {
   flex: 1;
 }
 
+.zfsas-checkline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  line-height: 1.3;
+}
+
+.zfsas-checkline input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+}
+
+.zfsas-checkline span {
+  flex: 1 1 auto;
+}
+
 .zfsas-alert {
   border-radius: 8px;
   padding: 10px 12px;
@@ -1042,24 +1059,22 @@ if ($resolvedCron === '') {
         </div>
       <?php endif; ?>
 
-      <div class="zfsas-grid" style="margin-top: 14px;">
-        <div class="zfsas-field">
-          <label for="prefix">Snapshot name prefix</label>
-          <input id="prefix" name="prefix" class="zfsas-input" value="<?php echo h($config['PREFIX']); ?>">
-          <div class="zfsas-help">
-            Safety guard: only snapshots containing <code>@prefix</code> are eligible for automatic deletion.
-          </div>
+      <div class="zfsas-field" style="margin-top: 14px;">
+        <label for="prefix">Snapshot name prefix</label>
+        <input id="prefix" name="prefix" class="zfsas-input" value="<?php echo h($config['PREFIX']); ?>">
+        <div class="zfsas-help">
+          Safety guard: only snapshots containing <code>@prefix</code> are eligible for automatic deletion.
         </div>
+      </div>
 
-        <div class="zfsas-field">
-          <label for="dry_run">Mode</label>
-          <div class="zfsas-inline">
-            <input type="checkbox" id="dry_run" name="dry_run" value="1" <?php echo ($config['DRY_RUN'] === '1') ? 'checked' : ''; ?>>
-            <span>Dry run (preview only, no snapshot create/delete)</span>
-          </div>
-          <div class="zfsas-help">
-            Leave this unchecked for normal operation.
-          </div>
+      <div class="zfsas-field" style="margin-top: 12px;">
+        <label for="dry_run">Mode</label>
+        <label class="zfsas-checkline" for="dry_run">
+          <input type="checkbox" id="dry_run" name="dry_run" value="1" <?php echo ($config['DRY_RUN'] === '1') ? 'checked' : ''; ?>>
+          <span>Dry run (preview only, no snapshot create/delete)</span>
+        </label>
+        <div class="zfsas-help">
+          Leave this unchecked for normal operation.
         </div>
       </div>
     </div>
