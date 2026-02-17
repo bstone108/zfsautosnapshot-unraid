@@ -3,6 +3,8 @@ $pluginName = 'zfs.autosnapshot';
 $configDir = "/boot/config/plugins/{$pluginName}";
 $configFile = "{$configDir}/zfs_autosnapshot.conf";
 $syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
+$logFile = '/var/log/zfs_autosnapshot.log';
+$logPollIntervalMs = 2000;
 
 $defaults = [
     'DATASETS' => '',
@@ -68,6 +70,56 @@ function normalizeThreshold($value)
     }
 
     return $match[1] . $match[2];
+}
+
+function sendJson($payload, $statusCode = 200)
+{
+    if (!headers_sent()) {
+        http_response_code((int) $statusCode);
+        header('Content-Type: application/json; charset=UTF-8');
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+    }
+
+    echo json_encode($payload);
+    exit;
+}
+
+function tailFileLines($path, $lineCount, $maxBytes, &$wasTruncated = false)
+{
+    $wasTruncated = false;
+
+    $lineCount = (int) $lineCount;
+    if ($lineCount < 50) {
+        $lineCount = 50;
+    } elseif ($lineCount > 2000) {
+        $lineCount = 2000;
+    }
+
+    $maxBytes = (int) $maxBytes;
+    if ($maxBytes < 1024) {
+        $maxBytes = 1024;
+    }
+
+    $output = [];
+    $exitCode = 0;
+    @exec('tail -n ' . $lineCount . ' ' . escapeshellarg($path) . ' 2>/dev/null', $output, $exitCode);
+
+    if ($exitCode !== 0) {
+        return '';
+    }
+
+    $text = implode("\n", $output);
+    if ($text !== '') {
+        $text .= "\n";
+    }
+
+    if (strlen($text) > $maxBytes) {
+        $text = substr($text, -$maxBytes);
+        $wasTruncated = true;
+    }
+
+    return $text;
 }
 
 function parseConfigFile($path, $defaults)
@@ -575,6 +627,31 @@ function renderConfig($config)
     return implode("\n", $lines);
 }
 
+$apiAction = strtolower(trimValue($_GET['zfsas_api'] ?? ''));
+if ($apiAction === 'log_tail') {
+    $lineCount = (int) ($_GET['lines'] ?? 300);
+    $exists = is_file($logFile);
+    $readable = is_readable($logFile);
+    $mtime = ($exists ? (int) @filemtime($logFile) : 0);
+    $size = ($exists ? (int) @filesize($logFile) : 0);
+    $truncated = false;
+    $content = '';
+
+    if ($exists && $readable) {
+        $content = tailFileLines($logFile, $lineCount, 200000, $truncated);
+    }
+
+    sendJson([
+        'ok' => true,
+        'exists' => $exists,
+        'readable' => $readable,
+        'mtime' => $mtime,
+        'size' => $size,
+        'truncated' => $truncated,
+        'content' => $content,
+    ]);
+}
+
 $config = parseConfigFile($configFile, $defaults);
 $errors = [];
 $notices = [];
@@ -935,6 +1012,43 @@ if ($resolvedCron === '') {
   color: #264b85;
 }
 
+.zfsas-log-toolbar {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.zfsas-log-toolbar .zfsas-select {
+  width: auto;
+  min-width: 140px;
+}
+
+.zfsas-log-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: #4f5a66;
+}
+
+.zfsas-log-status.error {
+  color: #8f2d2a;
+}
+
+.zfsas-log-output {
+  margin-top: 10px;
+  min-height: 260px;
+  max-height: 420px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #1f2f40;
+  background: #0d1724;
+  color: #d9edf7;
+  font: 12px/1.35 Consolas, Menlo, Monaco, monospace;
+  white-space: pre-wrap;
+}
+
 .zfsas-actions {
   display: flex;
   justify-content: flex-end;
@@ -955,6 +1069,11 @@ if ($resolvedCron === '') {
   }
 
   .zfsas-dataset-count {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .zfsas-log-status {
     margin-left: 0;
     width: 100%;
   }
@@ -1182,6 +1301,25 @@ if ($resolvedCron === '') {
       </div>
     </div>
 
+    <div class="zfsas-card">
+      <h3>Live Run Log</h3>
+      <div class="zfsas-help">
+        Real-time output from <code><?php echo h($logFile); ?></code>. In Dry Run mode, look for <code>[DRY_RUN]</code> lines to see what would have been changed.
+      </div>
+      <div class="zfsas-log-toolbar">
+        <button type="button" class="btn" id="log_toggle">Pause Live View</button>
+        <button type="button" class="btn" id="log_refresh">Refresh Now</button>
+        <select id="log_lines" class="zfsas-select">
+          <option value="200">Last 200 lines</option>
+          <option value="400" selected>Last 400 lines</option>
+          <option value="800">Last 800 lines</option>
+          <option value="1200">Last 1200 lines</option>
+        </select>
+        <div id="log_status" class="zfsas-log-status">Loading live log...</div>
+      </div>
+      <pre id="log_output" class="zfsas-log-output">Loading log output...</pre>
+    </div>
+
     <div class="zfsas-actions">
       <button type="submit" class="btn btn-primary">Save Settings</button>
     </div>
@@ -1193,6 +1331,11 @@ if ($resolvedCron === '') {
   function byId(id) {
     return document.getElementById(id);
   }
+
+  var logPollIntervalMs = <?php echo (int) $logPollIntervalMs; ?>;
+  var logPaused = false;
+  var logTimer = null;
+  var logFingerprint = '';
 
   function pad2(value) {
     value = parseInt(value, 10);
@@ -1320,6 +1463,93 @@ if ($resolvedCron === '') {
     refreshDatasetCount();
   }
 
+  function setLogStatus(message, isError) {
+    var statusEl = byId('log_status');
+    if (!statusEl) {
+      return;
+    }
+    statusEl.textContent = message;
+    statusEl.classList.toggle('error', !!isError);
+  }
+
+  function buildLogApiUrl() {
+    var linesEl = byId('log_lines');
+    var lines = linesEl ? parseInt(linesEl.value, 10) : 400;
+    if (isNaN(lines) || lines < 50) {
+      lines = 400;
+    }
+    return '?zfsas_api=log_tail&lines=' + encodeURIComponent(lines) + '&_=' + Date.now();
+  }
+
+  function fetchLiveLog(forceScrollToBottom) {
+    var outputEl = byId('log_output');
+    if (!outputEl) {
+      return;
+    }
+
+    var shouldFollowTail = !!forceScrollToBottom || (outputEl.scrollTop + outputEl.clientHeight >= outputEl.scrollHeight - 40);
+    setLogStatus(logPaused ? 'Paused.' : 'Updating...', false);
+
+    fetch(buildLogApiUrl(), {
+      credentials: 'same-origin',
+      cache: 'no-store'
+    })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error('HTTP ' + response.status);
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        if (!data || data.ok !== true) {
+          throw new Error('Unexpected response payload.');
+        }
+
+        var content = '';
+        if (!data.exists) {
+          content = 'Log file does not exist yet. Wait for the next scheduled run or click Save Settings to apply schedule changes.';
+        } else if (!data.readable) {
+          content = 'Log file exists but is not readable by the web UI process.';
+        } else if (!data.content) {
+          content = 'Log file is currently empty.';
+        } else {
+          content = data.content;
+          if (data.truncated) {
+            content = '[Showing the latest portion of the log]\n' + content;
+          }
+        }
+
+        var fingerprint = String(data.mtime || 0) + ':' + String(data.size || 0) + ':' + String(content.length);
+        if (fingerprint !== logFingerprint || forceScrollToBottom) {
+          outputEl.textContent = content;
+          logFingerprint = fingerprint;
+        }
+
+        if (shouldFollowTail) {
+          outputEl.scrollTop = outputEl.scrollHeight;
+        }
+
+        var prefix = logPaused ? 'Paused' : 'Live';
+        setLogStatus(prefix + ' | Last refresh: ' + new Date().toLocaleTimeString(), false);
+      })
+      .catch(function (error) {
+        setLogStatus('Log refresh failed: ' + error.message, true);
+      });
+  }
+
+  function startLogPolling() {
+    if (logTimer !== null) {
+      clearInterval(logTimer);
+    }
+
+    logTimer = setInterval(function () {
+      if (logPaused) {
+        return;
+      }
+      fetchLiveLog(false);
+    }, logPollIntervalMs);
+  }
+
   ['schedule_mode', 'schedule_every_minutes', 'schedule_every_hours', 'schedule_daily_hour', 'schedule_daily_minute', 'schedule_weekly_day', 'schedule_weekly_hour', 'schedule_weekly_minute', 'custom_cron_schedule'].forEach(function (id) {
     var element = byId(id);
     if (element) {
@@ -1369,8 +1599,47 @@ if ($resolvedCron === '') {
     box.addEventListener('change', refreshDatasetCount);
   });
 
+  var logToggleBtn = byId('log_toggle');
+  if (logToggleBtn) {
+    logToggleBtn.addEventListener('click', function () {
+      logPaused = !logPaused;
+      logToggleBtn.textContent = logPaused ? 'Resume Live View' : 'Pause Live View';
+      if (!logPaused) {
+        fetchLiveLog(true);
+      } else {
+        setLogStatus('Paused.', false);
+      }
+    });
+  }
+
+  var logRefreshBtn = byId('log_refresh');
+  if (logRefreshBtn) {
+    logRefreshBtn.addEventListener('click', function () {
+      fetchLiveLog(true);
+    });
+  }
+
+  var logLinesSelect = byId('log_lines');
+  if (logLinesSelect) {
+    logLinesSelect.addEventListener('change', function () {
+      fetchLiveLog(true);
+    });
+  }
+
   applyPoolFilter();
   refreshScheduleUI();
   refreshDatasetCount();
+
+  if (byId('log_output')) {
+    fetchLiveLog(true);
+    startLogPolling();
+  }
+
+  window.addEventListener('beforeunload', function () {
+    if (logTimer !== null) {
+      clearInterval(logTimer);
+      logTimer = null;
+    }
+  });
 })();
 </script>
