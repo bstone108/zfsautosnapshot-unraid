@@ -1,0 +1,8 @@
+Menu="ZFSAutoSnapshot"
+Icon="zfs-autosnapshot.png"
+Title="Configuration"
+Markdown="false"
+---
+<?php
+include '/usr/local/emhttp/plugins/zfs.autosnapshot/php/settings.php';
+?>

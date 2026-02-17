@@ -8,11 +8,12 @@
 <!ENTITY packageMD5 "__PKG_MD5__">
 <!ENTITY packageURL "__BASE_URL__/&package;">
 ]>
-<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;">
+<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Fixed page registration by switching to `ZFSAutoSnapshot.page` naming.
-- Added icon assets in both `images/` and `icons/` for UI compatibility.
+- Switched to canonical 2-page Unraid layout (`xmenu` entry + child settings page).
+- Moved Settings tile placement to `OtherSettings` for broad UI compatibility.
+- Added explicit plugin `Launch` target (`Settings/ZFSAutoSnapshot`).
 - Web UI for dataset checkbox selection and retention settings.
 - Plain-English scheduling (hourly/daily/weekly/custom) with cron sync.
 - Time-based and space-based cleanup plus fresh snapshot creation.
