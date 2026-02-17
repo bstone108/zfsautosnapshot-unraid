@@ -46,6 +46,7 @@ cp -a "$SRC_DIR/." "$STAGING_DIR/"
 
 # Strip common macOS Finder metadata from release payloads.
 find "$STAGING_DIR" -name ".DS_Store" -delete
+find "$STAGING_DIR" -name "._*" -delete
 
 # Package as .txz (tar + xz), compatible with Unraid upgradepkg/removepkg flow.
 tar -C "$STAGING_DIR" -cJf "$PKG_PATH" .

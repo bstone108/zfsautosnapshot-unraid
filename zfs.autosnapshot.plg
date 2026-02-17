@@ -1,7 +1,9 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.24" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.25" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.17.24 (2026-02-16)
+### 2026.02.17.25 (2026-02-16)
+- Hardened fresh-install behavior: installer now enforces package install success and verifies package registration in `/var/log/packages`.
+- Added uninstall fallback cleanup for systems missing package DB entries from earlier installs.
 - Moved the Save Settings button above the Live Run Log panel for quicker access.
 - Fixed Live Run Log "Invalid JSON response" by moving log reads to a dedicated JSON endpoint (`/plugins/.../php/log-tail.php`).
 - Removed the extra "View Live Log" button under Dry Run.
@@ -25,18 +27,32 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.24-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.24-noarch-1.txz</URL>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.25-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.25-noarch-1.txz</URL>
     <MD5>5db2168373c6751cab5b534f1c4c6ae9</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
     <INLINE><![CDATA[
+set -euo pipefail
+
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.17.24-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.17.25-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
 PKG_MD5="5db2168373c6751cab5b534f1c4c6ae9"
+PKG_NAME="zfs-autosnapshot"
+
+if command -v upgradepkg >/dev/null 2>&1; then
+  UPGRADEPKG="$(command -v upgradepkg)"
+elif [[ -x /sbin/upgradepkg ]]; then
+  UPGRADEPKG="/sbin/upgradepkg"
+elif [[ -x /usr/sbin/upgradepkg ]]; then
+  UPGRADEPKG="/usr/sbin/upgradepkg"
+else
+  echo "ERROR: upgradepkg not found on system." >&2
+  exit 1
+fi
 
 mkdir -p "${PKG_DIR}"
 
@@ -66,7 +82,18 @@ if ! verify_md5; then
   verify_md5
 fi
 
-upgradepkg --install-new "${PKG_PATH}";
+"${UPGRADEPKG}" --install-new "${PKG_PATH}"
+
+if ! ls -1 /var/log/packages 2>/dev/null | grep -q "^${PKG_NAME}"; then
+  echo "Package registration missing after install; retrying with --reinstall." >&2
+  "${UPGRADEPKG}" --install-new --reinstall "${PKG_PATH}"
+fi
+
+if ! ls -1 /var/log/packages 2>/dev/null | grep -q "^${PKG_NAME}"; then
+  echo "ERROR: ${PKG_NAME} is still missing from /var/log/packages after install." >&2
+  exit 1
+fi
+
 if [ -x /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/sync-cron.sh ]; then
   /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/sync-cron.sh || true
 fi
@@ -75,11 +102,18 @@ fi
 
   <FILE Run="/bin/bash" Method="remove">
     <INLINE><![CDATA[
+set -euo pipefail
+
 if [ -x /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/pre-remove.sh ]; then
   /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/pre-remove.sh || true
 fi
 
 removepkg zfs-autosnapshot >/dev/null 2>&1 || true
+
+# Fallback cleanup for installs that missed package DB registration.
+rm -f /usr/local/sbin/zfs_autosnapshot
+rm -rf /usr/local/emhttp/plugins/zfs.autosnapshot
+
 rm -f /boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-*-noarch-1.txz
 rm -f /boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-*-noarch-1.txz.md5
 rmdir /boot/config/plugins/zfs.autosnapshot 2>/dev/null || true
