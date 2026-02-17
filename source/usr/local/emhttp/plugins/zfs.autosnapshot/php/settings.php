@@ -44,7 +44,18 @@ function trimValue($value)
 
 function isValidDatasetName($dataset)
 {
-    return preg_match('/^[A-Za-z0-9._\/-]+$/', (string) $dataset) === 1;
+    return preg_match('/^[A-Za-z0-9._\/:-]+$/', (string) $dataset) === 1;
+}
+
+function datasetPoolName($dataset)
+{
+    $dataset = trimValue($dataset);
+    if ($dataset === '') {
+        return '';
+    }
+
+    $parts = explode('/', $dataset, 2);
+    return $parts[0];
 }
 
 function normalizeThreshold($value)
@@ -146,17 +157,68 @@ function parseDatasetsCsv($datasetsCsv, &$warnings = [])
 function listZfsDatasets(&$errorMessage = null)
 {
     $errorMessage = null;
+    $datasets = [];
+    $poolNames = [];
+    $poolExitCode = 0;
+
+    @exec('zpool list -H -o name 2>/dev/null', $poolNames, $poolExitCode);
+
+    if ($poolExitCode === 0 && count($poolNames) > 0) {
+        $poolScanErrors = [];
+
+        foreach ($poolNames as $poolLine) {
+            $pool = trimValue($poolLine);
+            if ($pool === '') {
+                continue;
+            }
+
+            $poolOutput = [];
+            $poolListExitCode = 0;
+            // Include both filesystems and zvols, scanning each pool independently.
+            @exec('zfs list -H -o name -t filesystem,volume -r ' . escapeshellarg($pool) . ' 2>/dev/null', $poolOutput, $poolListExitCode);
+
+            if ($poolListExitCode !== 0) {
+                $poolScanErrors[] = $pool;
+                continue;
+            }
+
+            foreach ($poolOutput as $line) {
+                $dataset = trimValue($line);
+                if ($dataset === '' || !isValidDatasetName($dataset)) {
+                    continue;
+                }
+                $datasets[$dataset] = true;
+            }
+        }
+
+        if (count($datasets) > 0) {
+            $list = array_keys($datasets);
+            sort($list, SORT_NATURAL | SORT_FLAG_CASE);
+
+            if (count($poolScanErrors) > 0) {
+                $errorMessage = 'Some pools could not be scanned: ' . implode(', ', $poolScanErrors);
+            }
+
+            return $list;
+        }
+
+        if (count($poolScanErrors) > 0) {
+            $errorMessage = 'Could not auto-discover datasets from these pools: ' . implode(', ', $poolScanErrors);
+        }
+    }
+
+    // Fallback: aggregate list in case per-pool scan is unavailable.
     $output = [];
     $exitCode = 0;
-
-    @exec('zfs list -H -o name -t filesystem 2>/dev/null', $output, $exitCode);
+    @exec('zfs list -H -o name -t filesystem,volume 2>/dev/null', $output, $exitCode);
 
     if ($exitCode !== 0) {
-        $errorMessage = 'Could not auto-discover datasets from ZFS on this page load.';
+        if ($errorMessage === null) {
+            $errorMessage = 'Could not auto-discover datasets from ZFS on this page load.';
+        }
         return [];
     }
 
-    $datasets = [];
     foreach ($output as $line) {
         $dataset = trimValue($line);
         if ($dataset === '' || !isValidDatasetName($dataset)) {
@@ -171,6 +233,53 @@ function listZfsDatasets(&$errorMessage = null)
     return $list;
 }
 
+function sortDatasetRows($rows)
+{
+    usort($rows, function ($a, $b) {
+        $poolCompare = strnatcasecmp((string) ($a['pool'] ?? ''), (string) ($b['pool'] ?? ''));
+        if ($poolCompare !== 0) {
+            return $poolCompare;
+        }
+
+        $datasetCompare = strnatcasecmp((string) ($a['dataset'] ?? ''), (string) ($b['dataset'] ?? ''));
+        if ($datasetCompare !== 0) {
+            return $datasetCompare;
+        }
+
+        if (($a['available'] ?? false) === ($b['available'] ?? false)) {
+            return 0;
+        }
+
+        return ($a['available'] ?? false) ? -1 : 1;
+    });
+
+    return $rows;
+}
+
+function buildDatasetPools($datasetRows)
+{
+    $poolMap = [];
+
+    foreach ($datasetRows as $row) {
+        $pool = (string) ($row['pool'] ?? '');
+        if ($pool === '') {
+            continue;
+        }
+
+        if (!isset($poolMap[$pool])) {
+            $poolMap[$pool] = ['total' => 0, 'selected' => 0];
+        }
+
+        $poolMap[$pool]['total']++;
+        if (!empty($row['selected'])) {
+            $poolMap[$pool]['selected']++;
+        }
+    }
+
+    ksort($poolMap, SORT_NATURAL | SORT_FLAG_CASE);
+    return $poolMap;
+}
+
 function buildDatasetRows($availableDatasets, $configuredDatasetMap)
 {
     $rows = [];
@@ -179,6 +288,7 @@ function buildDatasetRows($availableDatasets, $configuredDatasetMap)
     foreach ($availableDatasets as $dataset) {
         $rows[] = [
             'dataset' => $dataset,
+            'pool' => datasetPoolName($dataset),
             'selected' => isset($configuredDatasetMap[$dataset]),
             'threshold' => isset($configuredDatasetMap[$dataset]) ? $configuredDatasetMap[$dataset] : '100G',
             'available' => true,
@@ -193,13 +303,14 @@ function buildDatasetRows($availableDatasets, $configuredDatasetMap)
 
         $rows[] = [
             'dataset' => $dataset,
+            'pool' => datasetPoolName($dataset),
             'selected' => true,
             'threshold' => $threshold,
             'available' => false,
         ];
     }
 
-    return $rows;
+    return sortDatasetRows($rows);
 }
 
 function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThresholds, $availableDatasets, $configuredDatasetMap)
@@ -225,13 +336,14 @@ function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThreshol
 
         $rows[] = [
             'dataset' => $dataset,
+            'pool' => datasetPoolName($dataset),
             'selected' => isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1',
             'threshold' => strtoupper(str_replace(' ', '', $threshold)),
             'available' => isset($availableSet[$dataset]),
         ];
     }
 
-    return $rows;
+    return sortDatasetRows($rows);
 }
 
 function buildDatasetsCsvFromPost($postedNames, $postedSelected, $postedThresholds, &$errors)
@@ -463,6 +575,7 @@ $configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $datasetParseWarni
 $datasetDiscoveryError = null;
 $availableDatasets = listZfsDatasets($datasetDiscoveryError);
 $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap);
+$datasetPools = buildDatasetPools($datasetRows);
 
 if (!empty($datasetParseWarnings)) {
     foreach ($datasetParseWarnings as $warning) {
@@ -492,6 +605,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $postDatasetThresholds = (isset($_POST['dataset_threshold']) && is_array($_POST['dataset_threshold'])) ? $_POST['dataset_threshold'] : [];
 
     $datasetRows = buildDatasetRowsFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $availableDatasets, $configuredDatasetMap);
+    $datasetPools = buildDatasetPools($datasetRows);
 
     if (count($postDatasetNames) === 0) {
         $errors[] = 'Dataset selection data was not submitted. Refresh the page and try again.';
@@ -563,6 +677,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $postSaveWarnings = [];
                 $configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $postSaveWarnings);
                 $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap);
+                $datasetPools = buildDatasetPools($datasetRows);
             }
         }
     }
@@ -665,13 +780,52 @@ if ($resolvedCron === '') {
 
 .zfsas-dataset-toolbar {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
   margin-top: 12px;
+  flex-wrap: wrap;
+  padding: 10px;
+  border: 1px solid #e1e8ef;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.zfsas-pool-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.zfsas-pool-filter label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.zfsas-pool-filter .zfsas-select {
+  min-width: 230px;
+  width: auto;
 }
 
 .zfsas-dataset-count {
   margin-left: auto;
+  font-weight: 600;
+}
+
+.zfsas-pool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 99px;
+  background: #eaf2ff;
+  border: 1px solid #bfd3ff;
+  color: #1f4b8c;
+}
+
+.zfsas-row-hidden {
+  display: none;
 }
 
 .zfsas-table-wrap {
@@ -711,6 +865,12 @@ if ($resolvedCron === '') {
 
 .zfsas-table code {
   font-family: Consolas, Menlo, Monaco, monospace;
+}
+
+.zfsas-dataset-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .zfsas-badge {
@@ -757,8 +917,12 @@ if ($resolvedCron === '') {
     grid-template-columns: 1fr;
   }
 
-  .zfsas-dataset-toolbar {
-    flex-wrap: wrap;
+  .zfsas-pool-filter {
+    width: 100%;
+  }
+
+  .zfsas-pool-filter .zfsas-select {
+    width: 100%;
   }
 
   .zfsas-dataset-count {
@@ -810,6 +974,19 @@ if ($resolvedCron === '') {
         </div>
       <?php else : ?>
         <div class="zfsas-dataset-toolbar">
+          <div class="zfsas-pool-filter">
+            <label for="dataset_pool_filter">Pool</label>
+            <select id="dataset_pool_filter" class="zfsas-select">
+              <option value="__all">All pools</option>
+              <?php foreach ($datasetPools as $poolName => $poolStats) : ?>
+                <option value="<?php echo h($poolName); ?>">
+                  <?php echo h($poolName); ?> (<?php echo (int) $poolStats['total']; ?>)
+                </option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <button type="button" class="btn" id="dataset_select_visible">Select shown</button>
+          <button type="button" class="btn" id="dataset_clear_visible">Clear shown</button>
           <button type="button" class="btn" id="dataset_select_all">Select all</button>
           <button type="button" class="btn" id="dataset_clear_all">Clear all</button>
           <div class="zfsas-help zfsas-dataset-count" id="dataset_count"></div>
@@ -826,16 +1003,21 @@ if ($resolvedCron === '') {
             </thead>
             <tbody>
               <?php foreach ($datasetRows as $index => $row) : ?>
-                <tr>
+                <tr class="zfsas-dataset-row" data-pool="<?php echo h($row['pool']); ?>">
                   <td class="zfsas-center">
                     <input type="hidden" name="dataset_name[<?php echo (int) $index; ?>]" value="<?php echo h($row['dataset']); ?>">
                     <input class="zfsas-dataset-checkbox" type="checkbox" name="dataset_selected[<?php echo (int) $index; ?>]" value="1" <?php echo $row['selected'] ? 'checked' : ''; ?>>
                   </td>
                   <td>
-                    <code><?php echo h($row['dataset']); ?></code>
-                    <?php if (!$row['available']) : ?>
-                      <span class="zfsas-badge">Not currently detected</span>
-                    <?php endif; ?>
+                    <div class="zfsas-dataset-cell">
+                      <div>
+                        <code><?php echo h($row['dataset']); ?></code>
+                        <span class="zfsas-pool-chip"><?php echo h($row['pool']); ?></span>
+                        <?php if (!$row['available']) : ?>
+                          <span class="zfsas-badge">Not currently detected</span>
+                        <?php endif; ?>
+                      </div>
+                    </div>
                   </td>
                   <td>
                     <input class="zfsas-input" name="dataset_threshold[<?php echo (int) $index; ?>]" value="<?php echo h($row['threshold']); ?>">
@@ -1027,6 +1209,22 @@ if ($resolvedCron === '') {
     byId('schedule_preview').textContent = previewText();
   }
 
+  function rowIsVisible(row) {
+    return !row.classList.contains('zfsas-row-hidden');
+  }
+
+  function applyPoolFilter() {
+    var poolFilter = byId('dataset_pool_filter');
+    var selectedPool = poolFilter ? poolFilter.value : '__all';
+    var rows = document.querySelectorAll('.zfsas-dataset-row');
+
+    rows.forEach(function (row) {
+      var rowPool = row.getAttribute('data-pool') || '';
+      var shouldShow = (selectedPool === '__all' || rowPool === selectedPool);
+      row.classList.toggle('zfsas-row-hidden', !shouldShow);
+    });
+  }
+
   function refreshDatasetCount() {
     var countLabel = byId('dataset_count');
     if (!countLabel) {
@@ -1040,18 +1238,36 @@ if ($resolvedCron === '') {
     }
 
     var selected = 0;
+    var visible = 0;
+    var visibleSelected = 0;
     boxes.forEach(function (box) {
+      var row = box.closest('.zfsas-dataset-row');
+      var isVisible = row ? rowIsVisible(row) : true;
+
+      if (isVisible) {
+        visible++;
+      }
+
       if (box.checked) {
         selected++;
+        if (isVisible) {
+          visibleSelected++;
+        }
       }
     });
 
-    countLabel.textContent = selected + ' selected of ' + boxes.length + ' datasets.';
+    countLabel.textContent = selected + ' selected of ' + boxes.length + ' datasets (' + visibleSelected + ' of ' + visible + ' shown).';
   }
 
-  function setAllDatasetChecks(checked) {
+  function setAllDatasetChecks(checked, visibleOnly) {
     var boxes = document.querySelectorAll('.zfsas-dataset-checkbox');
     boxes.forEach(function (box) {
+      if (visibleOnly) {
+        var row = box.closest('.zfsas-dataset-row');
+        if (row && !rowIsVisible(row)) {
+          return;
+        }
+      }
       box.checked = checked;
     });
     refreshDatasetCount();
@@ -1068,14 +1284,36 @@ if ($resolvedCron === '') {
   var selectAllBtn = byId('dataset_select_all');
   if (selectAllBtn) {
     selectAllBtn.addEventListener('click', function () {
-      setAllDatasetChecks(true);
+      setAllDatasetChecks(true, false);
     });
   }
 
   var clearAllBtn = byId('dataset_clear_all');
   if (clearAllBtn) {
     clearAllBtn.addEventListener('click', function () {
-      setAllDatasetChecks(false);
+      setAllDatasetChecks(false, false);
+    });
+  }
+
+  var selectVisibleBtn = byId('dataset_select_visible');
+  if (selectVisibleBtn) {
+    selectVisibleBtn.addEventListener('click', function () {
+      setAllDatasetChecks(true, true);
+    });
+  }
+
+  var clearVisibleBtn = byId('dataset_clear_visible');
+  if (clearVisibleBtn) {
+    clearVisibleBtn.addEventListener('click', function () {
+      setAllDatasetChecks(false, true);
+    });
+  }
+
+  var poolFilter = byId('dataset_pool_filter');
+  if (poolFilter) {
+    poolFilter.addEventListener('change', function () {
+      applyPoolFilter();
+      refreshDatasetCount();
     });
   }
 
@@ -1084,6 +1322,7 @@ if ($resolvedCron === '') {
     box.addEventListener('change', refreshDatasetCount);
   });
 
+  applyPoolFilter();
   refreshScheduleUI();
   refreshDatasetCount();
 })();

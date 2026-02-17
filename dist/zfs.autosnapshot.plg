@@ -1,7 +1,9 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.12" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.13" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.17.12 (2026-02-16)
+### 2026.02.17.13 (2026-02-16)
+- Improved dataset discovery to scan each pool individually and include both filesystems and zvols.
+- Redesigned dataset picker with pool filter dropdown, cleaner grouping, and quick select controls.
 - Fixed script execution format: install/remove `Run="/bin/bash"` blocks now use explicit `<INLINE><![CDATA[...]]></INLINE>`.
 - Simplified WebUI registration to a single `Menu="Utilities"` page (same model as User Scripts).
 - Fixed package download block to use explicit `&lt;URL&gt;` and `&lt;MD5&gt;` nodes required by current Unraid plugin installer.
@@ -12,18 +14,18 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.12-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.12-noarch-1.txz</URL>
-    <MD5>507a9dfb800bc60ab89c4dd5ae305ef3</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.13-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.13-noarch-1.txz</URL>
+    <MD5>e5b6f44764bafd01d6723b27627e473a</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
     <INLINE><![CDATA[
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.17.12-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.17.13-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="507a9dfb800bc60ab89c4dd5ae305ef3"
+PKG_MD5="e5b6f44764bafd01d6723b27627e473a"
 
 mkdir -p "${PKG_DIR}"
 

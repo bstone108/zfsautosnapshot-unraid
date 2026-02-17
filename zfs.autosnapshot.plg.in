@@ -2,6 +2,8 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Improved dataset discovery to scan each pool individually and include both filesystems and zvols.
+- Redesigned dataset picker with pool filter dropdown, cleaner grouping, and quick select controls.
 - Fixed script execution format: install/remove `Run="/bin/bash"` blocks now use explicit `<INLINE><![CDATA[...]]></INLINE>`.
 - Simplified WebUI registration to a single `Menu="Utilities"` page (same model as User Scripts).
 - Fixed package download block to use explicit `&lt;URL&gt;` and `&lt;MD5&gt;` nodes required by current Unraid plugin installer.
