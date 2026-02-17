@@ -1,7 +1,8 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.11" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.12" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.17.11 (2026-02-16)
+### 2026.02.17.12 (2026-02-16)
+- Fixed script execution format: install/remove `Run="/bin/bash"` blocks now use explicit `<INLINE><![CDATA[...]]></INLINE>`.
 - Simplified WebUI registration to a single `Menu="Utilities"` page (same model as User Scripts).
 - Fixed package download block to use explicit `&lt;URL&gt;` and `&lt;MD5&gt;` nodes required by current Unraid plugin installer.
 - Added resilient installer fallback: plugin install script now downloads and MD5-verifies package directly before `upgradepkg`.
@@ -11,15 +12,15 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.11-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.11-noarch-1.txz</URL>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.12-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.12-noarch-1.txz</URL>
     <MD5>507a9dfb800bc60ab89c4dd5ae305ef3</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
-    <![CDATA[
+    <INLINE><![CDATA[
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.17.11-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.17.12-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
 PKG_MD5="507a9dfb800bc60ab89c4dd5ae305ef3"
@@ -53,11 +54,11 @@ if ! verify_md5; then
 fi
 
 upgradepkg --install-new "${PKG_PATH}";
-    ]]>
+    ]]></INLINE>
   </FILE>
 
   <FILE Run="/bin/bash" Method="remove">
-    <![CDATA[
+    <INLINE><![CDATA[
 if [ -x /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/pre-remove.sh ]; then
   /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/pre-remove.sh || true
 fi
@@ -66,6 +67,6 @@ removepkg zfs-autosnapshot >/dev/null 2>&1 || true
 rm -f /boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-*-noarch-1.txz
 rm -f /boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-*-noarch-1.txz.md5
 rmdir /boot/config/plugins/zfs.autosnapshot 2>/dev/null || true
-    ]]>
+    ]]></INLINE>
   </FILE>
 </PLUGIN>
