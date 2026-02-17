@@ -2,17 +2,17 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name "zfs.autosnapshot">
 <!ENTITY author "Brandon Stone">
-<!ENTITY version "2026.02.17.2">
+<!ENTITY version "2026.02.17.3">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg">
-<!ENTITY package "zfs-autosnapshot-2026.02.17.2-noarch-1.txz">
-<!ENTITY packageMD5 "30f2f3f5b8cad9e36825c51a9e72fff7">
+<!ENTITY package "zfs-autosnapshot-2026.02.17.3-noarch-1.txz">
+<!ENTITY packageMD5 "ce1c8969be68984d759a9faf0f71a31d">
 <!ENTITY packageURL "https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/&package;">
 ]>
 <PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;">
   <CHANGES>
-### 2026.02.17.2 (2026-02-16)
-- Added dedicated 128x128 plugin tile icon asset.
-- Settings page registration fix with Utilities icon tile.
+### 2026.02.17.3 (2026-02-16)
+- Fixed page registration by switching to `ZFSAutoSnapshot.page` naming.
+- Added icon assets in both `images/` and `icons/` for UI compatibility.
 - Web UI for dataset checkbox selection and retention settings.
 - Plain-English scheduling (hourly/daily/weekly/custom) with cron sync.
 - Time-based and space-based cleanup plus fresh snapshot creation.

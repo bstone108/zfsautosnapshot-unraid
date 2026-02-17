@@ -1,5 +1,6 @@
 Menu="Utilities"
 Icon="zfs-autosnapshot.png"
+Tag="zfs-autosnapshot.png"
 Title="ZFS Auto Snapshot"
 ---
 <?php
