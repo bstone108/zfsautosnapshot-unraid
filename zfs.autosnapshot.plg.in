@@ -11,6 +11,7 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Added dedicated 128x128 plugin tile icon asset.
 - Settings page registration fix with Utilities icon tile.
 - Web UI for dataset checkbox selection and retention settings.
 - Plain-English scheduling (hourly/daily/weekly/custom) with cron sync.
