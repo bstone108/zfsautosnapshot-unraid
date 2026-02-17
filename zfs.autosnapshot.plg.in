@@ -2,6 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Fixed generated cron entry format for Unraid/BusyBox (`/etc/cron.d`) by removing the unsupported username column.
 - Adjusted Datasets card layout so the Dry Run checkbox sits on its own line under Snapshot prefix (prevents overlap).
 - Added new schedule mode: run every N minutes (1-59), alongside existing hourly/daily/weekly/custom options.
 - Improved dataset discovery to scan each pool individually and include both filesystems and zvols.

@@ -156,7 +156,8 @@ fi
 
 {
   echo "# Managed by ${PLUGIN_NAME}; edit ${CONFIG_FILE}"
-  echo "${CRON_SCHEDULE_EFFECTIVE} root ${RUN_CMD} >> /var/log/zfs_autosnapshot.log 2>&1"
+  # Unraid uses BusyBox crond format in /etc/cron.d: no username column.
+  echo "${CRON_SCHEDULE_EFFECTIVE} ${RUN_CMD} >> /var/log/zfs_autosnapshot.log 2>&1"
 } > "$CRON_FILE"
 
 chmod 0644 "$CRON_FILE"
