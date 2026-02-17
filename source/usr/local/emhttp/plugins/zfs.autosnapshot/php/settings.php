@@ -1192,8 +1192,11 @@ if ($resolvedCron === '') {
           <input type="checkbox" id="dry_run" name="dry_run" value="1" <?php echo ($config['DRY_RUN'] === '1') ? 'checked' : ''; ?>>
           <span>Dry run (preview only, no snapshot create/delete)</span>
         </label>
+        <div style="margin-top: 6px;">
+          <a href="#live_run_log" class="btn">View Live Log</a>
+        </div>
         <div class="zfsas-help">
-          Leave this unchecked for normal operation.
+          Leave this unchecked for normal operation. In Dry Run mode, use Live Run Log to see each action that would be taken.
         </div>
       </div>
     </div>
@@ -1301,7 +1304,7 @@ if ($resolvedCron === '') {
       </div>
     </div>
 
-    <div class="zfsas-card">
+    <div class="zfsas-card" id="live_run_log">
       <h3>Live Run Log</h3>
       <div class="zfsas-help">
         Real-time output from <code><?php echo h($logFile); ?></code>. In Dry Run mode, look for <code>[DRY_RUN]</code> lines to see what would have been changed.

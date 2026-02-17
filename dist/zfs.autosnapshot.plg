@@ -1,7 +1,8 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.19" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.17.20" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.17.19 (2026-02-16)
+### 2026.02.17.20 (2026-02-16)
+- Added a direct "View Live Log" control under Dry Run and anchored the log panel for easier discovery.
 - Added a real-time log viewer in the WebUI so Dry Run output is visible live (including `[DRY_RUN]` actions).
 - Updated the Prefix help text to show the actual configured prefix value and clearer wording.
 - Installer now forces a cron sync immediately after package install so schedule changes apply without requiring a manual Save.
@@ -20,18 +21,18 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.19-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.19-noarch-1.txz</URL>
-    <MD5>eb522ad5126fb777c0d6d9fa9665a9fd</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.17.20-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.17.20-noarch-1.txz</URL>
+    <MD5>c76a4ff76d83949e99f8f1c9dbecea47</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
     <INLINE><![CDATA[
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.17.19-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.17.20-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="eb522ad5126fb777c0d6d9fa9665a9fd"
+PKG_MD5="c76a4ff76d83949e99f8f1c9dbecea47"
 
 mkdir -p "${PKG_DIR}"
 
