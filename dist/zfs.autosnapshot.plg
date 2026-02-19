@@ -1,7 +1,11 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.19.3" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.19.4" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.19.3 (2026-02-19)
+### 2026.02.19.4 (2026-02-19)
+- Added a "Run Now" button in settings for one-click manual execution.
+- Added dual log mode in WebUI: concise latest-run summary by default, with a debug toggle for the verbose log.
+- Added "Download Current Log" in WebUI for either summary or debug view.
+- Snapshot engine now writes a one-run summary file (`/var/log/zfs_autosnapshot.last.log`) with created/deleted totals by category.
 - Fixed a low-space cleanup crash (`sort` broken pipe) that could stop a run early while deleting old snapshots.
 - Installed Plugins page now uses the custom plugin icon instead of the generic icon.
 - Boot reliability fix: cron schedule is now auto-synced on server startup/array mount via `event/disks_mounted`.
@@ -35,9 +39,9 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.19.3-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.19.3-noarch-1.txz</URL>
-    <MD5>63653becd3b02eb643c6f7d409a7b0ca</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.19.4-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.19.4-noarch-1.txz</URL>
+    <MD5>542e076358a26d4b3ada774a845655c5</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -45,10 +49,10 @@
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.19.3-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.19.4-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="63653becd3b02eb643c6f7d409a7b0ca"
+PKG_MD5="542e076358a26d4b3ada774a845655c5"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then

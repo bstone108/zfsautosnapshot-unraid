@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
 
 # =============================================================================
 # ZFS Automatic Snapshot Script for Unraid
@@ -31,8 +31,23 @@ KEEP_WEEKLY_UNTIL_DAYS=183
 LOCKFILE="/tmp/zfs_autosnapshot.lock"
 LOCKDIR="/tmp/zfs_autosnapshot.lockdir"
 LOG_FILE="${LOG_FILE:-/var/log/zfs_autosnapshot.log}"
+SUMMARY_LOG_FILE="${SUMMARY_LOG_FILE:-/var/log/zfs_autosnapshot.last.log}"
 LOG_RUN_MARKER="[RUN_START]"
 KEEP_LOG_RUNS="${KEEP_LOG_RUNS:-2}"
+
+RUN_STARTED_AT_EPOCH=0
+RUN_STARTED_AT_HUMAN=""
+RUN_MODE="normal"
+RUN_DATASET_COUNT=0
+RUN_POOL_COUNT=0
+RUN_ERROR_CONTEXT=""
+
+COUNT_CREATED=0
+COUNT_DELETED_TOTAL=0
+COUNT_DELETED_AGE=0
+COUNT_DELETED_DAILY=0
+COUNT_DELETED_WEEKLY=0
+COUNT_DELETED_SPACE=0
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -51,21 +66,55 @@ die() {
   exit 1
 }
 
+record_error_context() {
+  local line="$1"
+  local cmd="$2"
+  RUN_ERROR_CONTEXT="line ${line}: ${cmd}"
+}
+
+increment_delete_counter() {
+  local reason="$1"
+
+  COUNT_DELETED_TOTAL=$((COUNT_DELETED_TOTAL + 1))
+
+  case "$reason" in
+    age_window)
+      COUNT_DELETED_AGE=$((COUNT_DELETED_AGE + 1))
+      ;;
+    daily_consolidation)
+      COUNT_DELETED_DAILY=$((COUNT_DELETED_DAILY + 1))
+      ;;
+    weekly_consolidation)
+      COUNT_DELETED_WEEKLY=$((COUNT_DELETED_WEEKLY + 1))
+      ;;
+    space_pressure)
+      COUNT_DELETED_SPACE=$((COUNT_DELETED_SPACE + 1))
+      ;;
+  esac
+}
+
 do_destroy() {
   local snap="$1"
+  local reason="${2:-unknown}"
+
   if (( DRY_RUN )); then
     log "[DRY_RUN] zfs destroy '$snap'"
+    increment_delete_counter "$reason"
   else
     zfs destroy "$snap"
+    increment_delete_counter "$reason"
   fi
 }
 
 do_snapshot() {
   local snap="$1"
+
   if (( DRY_RUN )); then
     log "[DRY_RUN] zfs snapshot '$snap'"
+    COUNT_CREATED=$((COUNT_CREATED + 1))
   else
     zfs snapshot "$snap"
+    COUNT_CREATED=$((COUNT_CREATED + 1))
   fi
 }
 
@@ -172,6 +221,69 @@ prune_log_to_last_runs() {
   rm -f "$tmp"
 }
 
+write_run_summary() {
+  local exit_code="$1"
+  local ended_at_human now_epoch duration_seconds tmp_file
+  local created_label deleted_label
+
+  [[ -n "$RUN_STARTED_AT_HUMAN" ]] || return 0
+
+  ended_at_human="$(date +'%Y-%m-%d %H:%M:%S %Z')"
+  now_epoch="$(date +%s)"
+  duration_seconds=$((now_epoch - RUN_STARTED_AT_EPOCH))
+
+  if (( DRY_RUN )); then
+    created_label="Snapshots planned to create"
+    deleted_label="Snapshots planned to delete"
+  else
+    created_label="Snapshots created"
+    deleted_label="Snapshots deleted"
+  fi
+
+  tmp_file="$(mktemp "${SUMMARY_LOG_FILE}.tmp.XXXXXX")" || return 0
+
+  {
+    echo "ZFS Auto Snapshot - Latest Run Summary"
+    echo "Started: ${RUN_STARTED_AT_HUMAN}"
+    echo "Finished: ${ended_at_human}"
+    echo "Duration: ${duration_seconds}s"
+    echo "Mode: ${RUN_MODE}"
+    if (( exit_code == 0 )); then
+      echo "Result: Success"
+    else
+      echo "Result: Failed (exit code ${exit_code})"
+      if [[ -n "$RUN_ERROR_CONTEXT" ]]; then
+        echo "Failure point: ${RUN_ERROR_CONTEXT}"
+      fi
+    fi
+    echo "Datasets configured: ${RUN_DATASET_COUNT}"
+    echo "Pools evaluated: ${RUN_POOL_COUNT}"
+    echo
+    echo "${created_label}: ${COUNT_CREATED}"
+    echo "${deleted_label}: ${COUNT_DELETED_TOTAL}"
+    echo "  Deleted by age retention (outside oldest window): ${COUNT_DELETED_AGE}"
+    echo "  Deleted by daily consolidation: ${COUNT_DELETED_DAILY}"
+    echo "  Deleted by weekly consolidation: ${COUNT_DELETED_WEEKLY}"
+    echo "  Deleted by low-space cleanup: ${COUNT_DELETED_SPACE}"
+  } > "$tmp_file"
+
+  if mv -f "$tmp_file" "$SUMMARY_LOG_FILE" 2>/dev/null; then
+    chmod 0644 "$SUMMARY_LOG_FILE" 2>/dev/null || true
+  else
+    rm -f "$tmp_file"
+  fi
+}
+
+on_exit() {
+  local exit_code="$?"
+  set +e
+
+  if (( RUN_STARTED_AT_EPOCH > 0 )); then
+    write_run_summary "$exit_code" || true
+    prune_log_to_last_runs "$LOG_FILE" "$LOG_RUN_MARKER" "$KEEP_LOG_RUNS" || true
+  fi
+}
+
 # -----------------------------------------------------------------------------
 # Acquire exclusive lock (non-blocking)
 #   Prefer flock. Fallback to mkdir lock if flock is unavailable.
@@ -221,7 +333,7 @@ time_clean_dataset() {
 
     if (( age > KEEP_WEEKLY_UNTIL_SECONDS )); then
       log "  Deleting (older than ${KEEP_WEEKLY_UNTIL_DAYS}d): $snap_name"
-      do_destroy "$snap_name"
+      do_destroy "$snap_name" "age_window"
       continue
     fi
 
@@ -233,7 +345,7 @@ time_clean_dataset() {
         log "  Keeping weekly latest: $snap_name"
       else
         log "  Deleting weekly duplicate: $snap_name"
-        do_destroy "$snap_name"
+        do_destroy "$snap_name" "weekly_consolidation"
       fi
       continue
     fi
@@ -246,7 +358,7 @@ time_clean_dataset() {
         log "  Keeping daily latest: $snap_name"
       else
         log "  Deleting daily duplicate: $snap_name"
-        do_destroy "$snap_name"
+        do_destroy "$snap_name" "daily_consolidation"
       fi
       continue
     fi
@@ -297,6 +409,9 @@ fi
 
 acquire_lock
 
+trap 'record_error_context "$LINENO" "$BASH_COMMAND"' ERR
+trap on_exit EXIT
+
 KEEP_ALL_FOR_SECONDS=$((KEEP_ALL_FOR_DAYS * 86400))
 KEEP_DAILY_UNTIL_SECONDS=$((KEEP_DAILY_UNTIL_DAYS * 86400))
 KEEP_WEEKLY_UNTIL_SECONDS=$((KEEP_WEEKLY_UNTIL_DAYS * 86400))
@@ -307,7 +422,15 @@ if (( DRY_RUN )); then
 else
   run_mode="normal"
 fi
+
+RUN_STARTED_AT_EPOCH="$NOW_EPOCH"
+RUN_STARTED_AT_HUMAN="$(date +'%Y-%m-%d %H:%M:%S %Z')"
+RUN_MODE="$run_mode"
+
 log "${LOG_RUN_MARKER} ts=$(date +'%Y-%m-%d %H:%M:%S %Z') pid=$$ mode=${run_mode}"
+log "Config: datasets='${DATASETS}' prefix='${PREFIX}' dry_run=${DRY_RUN}"
+log "Retention(days): keep_all=${KEEP_ALL_FOR_DAYS} keep_daily_until=${KEEP_DAILY_UNTIL_DAYS} keep_weekly_until=${KEEP_WEEKLY_UNTIL_DAYS}"
+log "Logs: debug='${LOG_FILE}' summary='${SUMMARY_LOG_FILE}'"
 
 declare -a pool_names=()
 declare -a pool_thresholds=()
@@ -324,6 +447,10 @@ for pair in "${pairs[@]}"; do
   time_clean_dataset "$ds"
 done
 
+RUN_DATASET_COUNT="${#pairs[@]}"
+RUN_POOL_COUNT="${#pool_names[@]}"
+log "Prepared ${RUN_DATASET_COUNT} dataset entries across ${RUN_POOL_COUNT} pool(s)."
+
 # Phase B: space-based cleanup for each pool
 for i in "${!pool_names[@]}"; do
   pool="${pool_names[$i]}"
@@ -333,6 +460,7 @@ for i in "${!pool_names[@]}"; do
     avail="$(get_pool_avail "$pool")"
     freeing="$(get_pool_freeing "$pool")"
     effective_avail=$((avail + freeing))
+    log "Pool $pool check: avail=${avail} freeing=${freeing} effective=${effective_avail} min_required=${min_free}"
 
     if (( effective_avail >= min_free )); then
       log "Pool $pool OK: effective_avail=$effective_avail bytes (>= $min_free)."
@@ -362,7 +490,7 @@ for i in "${!pool_names[@]}"; do
     fi
 
     log "Pool $pool low on space -> deleting oldest eligible snapshot: $oldest_snap"
-    do_destroy "$oldest_snap"
+    do_destroy "$oldest_snap" "space_pressure"
   done
 done
 
@@ -377,6 +505,3 @@ for pair in "${pairs[@]}"; do
 done
 
 log "Snapshot management complete."
-
-# Keep log size in check: retain only the last N runs worth of entries.
-prune_log_to_last_runs "$LOG_FILE" "$LOG_RUN_MARKER" "$KEEP_LOG_RUNS"

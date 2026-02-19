@@ -1,5 +1,6 @@
 <?php
-$logFile = '/var/log/zfs_autosnapshot.log';
+$debugLogFile = '/var/log/zfs_autosnapshot.log';
+$summaryLogFile = '/var/log/zfs_autosnapshot.last.log';
 
 function sendJson($payload, $statusCode = 200)
 {
@@ -51,7 +52,43 @@ function tailFileLines($path, $lineCount, $maxBytes, &$wasTruncated = false)
     return $text;
 }
 
+function resolveLogTypeAndFile($requestedType, $summaryLogFile, $debugLogFile)
+{
+    $type = strtolower(trim((string) $requestedType));
+    if ($type === 'debug') {
+        return ['debug', $debugLogFile, 'zfs_autosnapshot_debug.log'];
+    }
+
+    return ['summary', $summaryLogFile, 'zfs_autosnapshot_last_run.log'];
+}
+
+list($logType, $logFile, $downloadName) = resolveLogTypeAndFile($_GET['type'] ?? 'summary', $summaryLogFile, $debugLogFile);
+
+$download = isset($_GET['download']) && (string) $_GET['download'] === '1';
+if ($download) {
+    if (!is_file($logFile) || !is_readable($logFile)) {
+        if (!headers_sent()) {
+            http_response_code(404);
+            header('Content-Type: text/plain; charset=UTF-8');
+            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+            header('Pragma: no-cache');
+        }
+        echo "Requested log file is not available.\n";
+        exit;
+    }
+
+    if (!headers_sent()) {
+        header('Content-Type: text/plain; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="' . $downloadName . '"');
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+    }
+    readfile($logFile);
+    exit;
+}
+
 $lineCount = (int) ($_GET['lines'] ?? 400);
+$maxBytes = ($logType === 'debug') ? 500000 : 50000;
 $exists = is_file($logFile);
 $readable = is_readable($logFile);
 $mtime = ($exists ? (int) @filemtime($logFile) : 0);
@@ -60,11 +97,12 @@ $truncated = false;
 $content = '';
 
 if ($exists && $readable) {
-    $content = tailFileLines($logFile, $lineCount, 200000, $truncated);
+    $content = tailFileLines($logFile, $lineCount, $maxBytes, $truncated);
 }
 
 sendJson([
     'ok' => true,
+    'type' => $logType,
     'exists' => $exists,
     'readable' => $readable,
     'mtime' => $mtime,

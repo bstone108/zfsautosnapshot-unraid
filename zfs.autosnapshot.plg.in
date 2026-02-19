@@ -2,6 +2,10 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Added a "Run Now" button in settings for one-click manual execution.
+- Added dual log mode in WebUI: concise latest-run summary by default, with a debug toggle for the verbose log.
+- Added "Download Current Log" in WebUI for either summary or debug view.
+- Snapshot engine now writes a one-run summary file (`/var/log/zfs_autosnapshot.last.log`) with created/deleted totals by category.
 - Fixed a low-space cleanup crash (`sort` broken pipe) that could stop a run early while deleting old snapshots.
 - Installed Plugins page now uses the custom plugin icon instead of the generic icon.
 - Boot reliability fix: cron schedule is now auto-synced on server startup/array mount via `event/disks_mounted`.

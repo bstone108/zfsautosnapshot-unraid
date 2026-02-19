@@ -4,7 +4,9 @@ $configDir = "/boot/config/plugins/{$pluginName}";
 $configFile = "{$configDir}/zfs_autosnapshot.conf";
 $syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
 $logApiUrl = "/plugins/{$pluginName}/php/log-tail.php";
-$logFile = '/var/log/zfs_autosnapshot.log';
+$runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
+$debugLogFile = '/var/log/zfs_autosnapshot.log';
+$summaryLogFile = '/var/log/zfs_autosnapshot.last.log';
 $logPollIntervalMs = 2000;
 
 $defaults = [
@@ -677,20 +679,23 @@ function renderConfig($config)
 
 $apiAction = strtolower(trimValue($_GET['zfsas_api'] ?? ''));
 if ($apiAction === 'log_tail') {
+    $logType = strtolower(trimValue($_GET['type'] ?? 'summary'));
+    $targetLogFile = ($logType === 'debug') ? $debugLogFile : $summaryLogFile;
     $lineCount = (int) ($_GET['lines'] ?? 300);
-    $exists = is_file($logFile);
-    $readable = is_readable($logFile);
-    $mtime = ($exists ? (int) @filemtime($logFile) : 0);
-    $size = ($exists ? (int) @filesize($logFile) : 0);
+    $exists = is_file($targetLogFile);
+    $readable = is_readable($targetLogFile);
+    $mtime = ($exists ? (int) @filemtime($targetLogFile) : 0);
+    $size = ($exists ? (int) @filesize($targetLogFile) : 0);
     $truncated = false;
     $content = '';
 
     if ($exists && $readable) {
-        $content = tailFileLines($logFile, $lineCount, 200000, $truncated);
+        $content = tailFileLines($targetLogFile, $lineCount, ($logType === 'debug') ? 500000 : 50000, $truncated);
     }
 
     sendJson([
         'ok' => true,
+        'type' => $logType,
         'exists' => $exists,
         'readable' => $readable,
         'mtime' => $mtime,
@@ -1121,7 +1126,20 @@ if ($resolvedCron === '') {
 .zfsas-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
   margin-top: 12px;
+}
+
+.zfsas-manual-status {
+  margin-right: auto;
+  font-size: 12px;
+  color: #4f5a66;
+}
+
+.zfsas-manual-status.error {
+  color: #8f2d2a;
 }
 
 @media (max-width: 900px) {
@@ -1150,6 +1168,11 @@ if ($resolvedCron === '') {
 
   .zfsas-log-status {
     margin-left: 0;
+    width: 100%;
+  }
+
+  .zfsas-manual-status {
+    margin-right: 0;
     width: 100%;
   }
 }
@@ -1380,17 +1403,22 @@ if ($resolvedCron === '') {
     </div>
 
     <div class="zfsas-actions">
+      <div id="manual_run_status" class="zfsas-manual-status">Manual run is ready.</div>
+      <button type="button" class="btn" id="manual_run">Run Now</button>
       <button type="submit" class="btn btn-primary">Save Settings</button>
     </div>
 
     <div class="zfsas-card" id="live_run_log">
-      <h3>Live Run Log</h3>
+      <h3>Run Output</h3>
       <div class="zfsas-help">
-        Real-time output from <code><?php echo h($logFile); ?></code>. In Dry Run mode, look for <code>[DRY_RUN]</code> lines to see what would have been changed.
+        Default view shows a concise one-run summary from <code><?php echo h($summaryLogFile); ?></code>.
+        Use "Show Debug Log" to inspect the verbose debug log at <code><?php echo h($debugLogFile); ?></code>.
       </div>
       <div class="zfsas-log-toolbar">
+        <button type="button" class="btn" id="log_view_toggle">Show Debug Log</button>
         <button type="button" class="btn" id="log_toggle">Pause Live View</button>
         <button type="button" class="btn" id="log_refresh">Refresh Now</button>
+        <button type="button" class="btn" id="log_download">Download Current Log</button>
         <select id="log_lines" class="zfsas-select">
           <option value="200">Last 200 lines</option>
           <option value="400" selected>Last 400 lines</option>
@@ -1412,6 +1440,8 @@ if ($resolvedCron === '') {
 
   var logPollIntervalMs = <?php echo (int) $logPollIntervalMs; ?>;
   var logApiUrl = <?php echo json_encode($logApiUrl); ?>;
+  var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
+  var logView = 'summary';
   var logPaused = false;
   var logTimer = null;
   var logFingerprint = '';
@@ -1551,13 +1581,49 @@ if ($resolvedCron === '') {
     statusEl.classList.toggle('error', !!isError);
   }
 
-  function buildLogApiUrl() {
+  function setManualRunStatus(message, isError) {
+    var statusEl = byId('manual_run_status');
+    if (!statusEl) {
+      return;
+    }
+
+    statusEl.textContent = message;
+    statusEl.classList.toggle('error', !!isError);
+  }
+
+  function currentLogViewLabel() {
+    return (logView === 'debug') ? 'debug log' : 'run summary';
+  }
+
+  function refreshLogViewControls() {
+    var toggleBtn = byId('log_view_toggle');
+    var linesEl = byId('log_lines');
+
+    if (toggleBtn) {
+      toggleBtn.textContent = (logView === 'debug') ? 'Show Run Summary' : 'Show Debug Log';
+    }
+
+    if (linesEl) {
+      linesEl.disabled = (logView === 'summary');
+    }
+  }
+
+  function buildLogApiUrl(download) {
     var linesEl = byId('log_lines');
     var lines = linesEl ? parseInt(linesEl.value, 10) : 400;
     if (isNaN(lines) || lines < 50) {
       lines = 400;
     }
-    return logApiUrl + '?lines=' + encodeURIComponent(lines) + '&_=' + Date.now();
+
+    var url = logApiUrl
+      + '?type=' + encodeURIComponent(logView)
+      + '&lines=' + encodeURIComponent(lines);
+
+    if (download) {
+      return url + '&download=1&_=' + Date.now();
+    }
+
+    return url + '&_=' + Date.now();
   }
 
   function requestJson(url, onSuccess, onError) {
@@ -1593,6 +1659,40 @@ if ($resolvedCron === '') {
     xhr.send();
   }
 
+  function requestJsonPost(url, onSuccess, onError) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', url, true);
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
+
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) {
+        return;
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        onError(new Error('HTTP ' + xhr.status));
+        return;
+      }
+
+      var payload;
+      try {
+        payload = JSON.parse(xhr.responseText);
+      } catch (parseError) {
+        onError(new Error('Invalid JSON response.'));
+        return;
+      }
+
+      onSuccess(payload);
+    };
+
+    xhr.onerror = function () {
+      onError(new Error('Network error.'));
+    };
+
+    xhr.send('');
+  }
+
   function fetchLiveLog(forceScrollToBottom) {
     var outputEl = byId('log_output');
     if (!outputEl) {
@@ -1600,10 +1700,10 @@ if ($resolvedCron === '') {
     }
 
     var shouldFollowTail = !!forceScrollToBottom || (outputEl.scrollTop + outputEl.clientHeight >= outputEl.scrollHeight - 40);
-    setLogStatus(logPaused ? 'Paused.' : 'Updating...', false);
+    setLogStatus((logPaused ? 'Paused' : 'Updating') + ' ' + currentLogViewLabel() + '...', false);
 
     requestJson(
-      buildLogApiUrl(),
+      buildLogApiUrl(false),
       function (data) {
         if (!data || data.ok !== true) {
           setLogStatus('Log refresh failed: Unexpected response payload.', true);
@@ -1612,15 +1712,23 @@ if ($resolvedCron === '') {
 
         var content = '';
         if (!data.exists) {
-          content = 'Log file does not exist yet. Wait for the next scheduled run or click Save Settings to apply schedule changes.';
+          if (logView === 'debug') {
+            content = 'Debug log does not exist yet. Start a run and this view will populate.';
+          } else {
+            content = 'Run summary is not available yet. Start a run and this view will populate.';
+          }
         } else if (!data.readable) {
-          content = 'Log file exists but is not readable by the web UI process.';
+          content = 'Selected log file exists but is not readable by the web UI process.';
         } else if (!data.content) {
-          content = 'Log file is currently empty.';
+          if (logView === 'debug') {
+            content = 'Debug log is currently empty.';
+          } else {
+            content = 'Run summary is currently empty.';
+          }
         } else {
           content = data.content;
           if (data.truncated) {
-            content = '[Showing the latest portion of the log]\n' + content;
+            content = '[Showing the latest portion of the selected log]\n' + content;
           }
         }
 
@@ -1635,7 +1743,7 @@ if ($resolvedCron === '') {
         }
 
         var prefix = logPaused ? 'Paused' : 'Live';
-        setLogStatus(prefix + ' | Last refresh: ' + new Date().toLocaleTimeString(), false);
+        setLogStatus(prefix + ' ' + currentLogViewLabel() + ' | Last refresh: ' + new Date().toLocaleTimeString(), false);
       },
       function (error) {
         setLogStatus('Log refresh failed: ' + error.message, true);
@@ -1718,10 +1826,27 @@ if ($resolvedCron === '') {
     });
   }
 
+  var logViewToggleBtn = byId('log_view_toggle');
+  if (logViewToggleBtn) {
+    logViewToggleBtn.addEventListener('click', function () {
+      logView = (logView === 'debug') ? 'summary' : 'debug';
+      logFingerprint = '';
+      refreshLogViewControls();
+      fetchLiveLog(true);
+    });
+  }
+
   var logRefreshBtn = byId('log_refresh');
   if (logRefreshBtn) {
     logRefreshBtn.addEventListener('click', function () {
       fetchLiveLog(true);
+    });
+  }
+
+  var logDownloadBtn = byId('log_download');
+  if (logDownloadBtn) {
+    logDownloadBtn.addEventListener('click', function () {
+      window.location.href = buildLogApiUrl(true);
     });
   }
 
@@ -1732,9 +1857,53 @@ if ($resolvedCron === '') {
     });
   }
 
+  var manualRunBtn = byId('manual_run');
+  var manualRunBusy = false;
+  if (manualRunBtn) {
+    manualRunBtn.addEventListener('click', function () {
+      if (manualRunBusy) {
+        return;
+      }
+
+      manualRunBusy = true;
+      manualRunBtn.disabled = true;
+      setManualRunStatus('Starting manual run...', false);
+
+      requestJsonPost(
+        runApiUrl,
+        function (data) {
+          manualRunBusy = false;
+          manualRunBtn.disabled = false;
+
+          if (!data || data.ok !== true) {
+            setManualRunStatus('Manual run start failed: Unexpected response.', true);
+            return;
+          }
+
+          var message = (typeof data.message === 'string' && data.message.length > 0)
+            ? data.message
+            : 'Manual run started.';
+
+          setManualRunStatus(message, false);
+          logPaused = false;
+          if (logToggleBtn) {
+            logToggleBtn.textContent = 'Pause Live View';
+          }
+          fetchLiveLog(true);
+        },
+        function (error) {
+          manualRunBusy = false;
+          manualRunBtn.disabled = false;
+          setManualRunStatus('Manual run start failed: ' + error.message, true);
+        }
+      );
+    });
+  }
+
   applyPoolFilter();
   refreshScheduleUI();
   refreshDatasetCount();
+  refreshLogViewControls();
 
   if (byId('log_output')) {
     fetchLiveLog(true);

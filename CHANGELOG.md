@@ -5,6 +5,14 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.19.4 (2026-02-19)
+
+- Added a new "Run Now" button beside Save Settings for one-click manual runs.
+- Added a Latest Run Summary view (default): short, one-run results only.
+- Added a Debug Log view: verbose technical details.
+- Added a "Download Current Log" button that downloads whichever log view is active.
+- Latest Run Summary now shows created/deleted totals for each cleanup category and is replaced every run (never appended).
+
 ### 2026.02.19.3 (2026-02-19)
 
 - Fixed a low-space cleanup bug that could stop the run early with a sorting/broken-pipe error while deleting old snapshots.
