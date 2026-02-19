@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.19.3 (2026-02-19)
+
+- Fixed a low-space cleanup bug that could stop the run early with a sorting/broken-pipe error while deleting old snapshots.
+
 ### 2026.02.19.2 (2026-02-19)
 
 - Fixed plugin icon on the Installed Plugins page so it now shows the custom icon instead of the generic one.

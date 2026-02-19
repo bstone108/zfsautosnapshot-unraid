@@ -2,6 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Fixed a low-space cleanup crash (`sort` broken pipe) that could stop a run early while deleting old snapshots.
 - Installed Plugins page now uses the custom plugin icon instead of the generic icon.
 - Boot reliability fix: cron schedule is now auto-synced on server startup/array mount via `event/disks_mounted`.
 - Log retention improvement: each run writes a `[RUN_START]` marker and prunes the log to keep only the latest 2 runs.

@@ -120,6 +120,25 @@ upsert_pool_threshold() {
   pool_thresholds+=("$threshold")
 }
 
+pick_oldest_snapshot() {
+  local snapshot_lines="$1"
+
+  # Find the minimum creation epoch without sort|head to avoid SIGPIPE exits
+  # under "set -o pipefail" when only the first row is needed.
+  printf '%s\n' "$snapshot_lines" | awk -F '\t' '
+    NF >= 2 && $2 ~ /^[0-9]+$/ {
+      if (!found || $2 < min_epoch) {
+        min_epoch = $2
+        oldest_snap = $1
+        found = 1
+      }
+    }
+    END {
+      if (found) print oldest_snap
+    }
+  '
+}
+
 prune_log_to_last_runs() {
   local file="$1"
   local marker="$2"
@@ -335,8 +354,7 @@ for i in "${!pool_names[@]}"; do
       break
     fi
 
-    oldest_line="$(printf '%s' "$snapshot_list" | awk -F '\t' 'NF >= 2' | sort -k2n | head -n 1)"
-    oldest_snap="${oldest_line%%$'\t'*}"
+    oldest_snap="$(pick_oldest_snapshot "$snapshot_list")"
 
     if [[ -z "$oldest_snap" ]]; then
       log "Pool $pool low on space, but couldn't parse an eligible snapshot entry."
