@@ -1,197 +1,160 @@
 # Changelog
 
-All notable changes to this project are documented in this file.
+This file is written for everyday users in plain English.
+It answers one question: "What changed for me?"
 
-This changelog was backfilled from commit history and release artifacts on 2026-02-19.
-
-## Released Versions
+## Public Releases
 
 ### 2026.02.19.1 (2026-02-18)
 
-- Boot reliability fix: cron schedule is now auto-synced on startup/array mount via `event/disks_mounted`.
-- Commit: `315756d`
+- Improved reboot reliability: your schedule is now re-applied automatically after startup.
 
 ### 2026.02.17.30 (2026-02-18)
 
-- Log retention improvement: each run writes a `[RUN_START]` marker and prunes the log to keep only the latest 2 runs.
-- Commit: `ccd81b0`
+- Added automatic log cleanup so the run log keeps only the most recent run history.
 
 ### 2026.02.17.29 (2026-02-16)
 
-- Protected disabled schedule state during install/upgrade.
-- Commit: `eb7b166`
+- Fixed an issue where "Schedule Disabled" might not stay disabled during install/update.
 
 ### 2026.02.17.28 (2026-02-16)
 
-- Install/upgrade now refreshes cron runtime so existing schedules activate without a manual Save.
-- Commit: `5d4e854`
+- Install/update now applies scheduling immediately, without requiring a manual save.
 
 ### 2026.02.17.27 (2026-02-16)
 
-- Schedule apply/disable now restarts `crond` to ensure changes take effect immediately.
-- Commit: `d9f4bbf`
+- Changing schedule settings now takes effect right away.
 
 ### 2026.02.17.26 (2026-02-16)
 
-- Fixed AppleDouble/macOS metadata pollution on fresh installs.
-- Commit: `f448d27`
+- Fixed a fresh-install problem caused by extra metadata files from macOS.
 
 ### 2026.02.17.25 (2026-02-16)
 
-- Hardened fresh-install package registration checks.
-- Commit: `8572759`
+- Improved first-time install reliability checks.
 
 ### 2026.02.17.24 (2026-02-16)
 
-- Moved Save Settings button above the live log viewer.
-- Commit: `0c15357`
+- Moved "Save Settings" above the live log area for easier use.
 
 ### 2026.02.17.23 (2026-02-16)
 
-- Fixed live-log invalid JSON by introducing a dedicated endpoint.
-- Commit: `8131210`
+- Fixed live log viewer errors that showed invalid responses.
 
 ### 2026.02.17.22 (2026-02-16)
 
-- Fixed live-log polling path/transport.
-- Removed the extra non-working log button.
-- Commit: `32a7cba`
+- Fixed live log refresh issues.
+- Removed a non-working extra log button.
 
 ### 2026.02.17.21 (2026-02-16)
 
-- Added installed version display on the settings page.
-- Commit: `49ab5f7`
+- Added plugin version display on the settings page.
 
 ### 2026.02.17.20 (2026-02-16)
 
-- Improved live log visibility/placement under Dry Run.
-- Commit: `7e0c0cb`
+- Made the live log section easier to find on the page.
 
 ### 2026.02.17.19 (2026-02-16)
 
-- Added real-time dry-run/live run log viewer in the WebUI.
-- Commit: `7b645c8`
+- Added a real-time run log viewer to the WebUI.
 
 ### 2026.02.17.18 (2026-02-16)
 
-- Safety helper text now shows the configured snapshot prefix value.
-- Commit: `29cb6a6`
+- Safety text now clearly shows the snapshot prefix you configured.
 
 ### 2026.02.17.17 (2026-02-16)
 
-- Forced cron sync during plugin install.
-- Commit: `cadeec2`
+- Installer now applies your schedule automatically.
 
 ### 2026.02.17.16 (2026-02-16)
 
-- Fixed generated cron format for Unraid BusyBox `/etc/cron.d`.
-- Commit: `8004115`
+- Fixed scheduled runs not launching because of cron format issues.
 
 ### 2026.02.17.15 (2026-02-16)
 
-- Fixed overlap of Snapshot Prefix and Dry Run controls by moving Dry Run below prefix.
-- Commit: `b7985f8`
+- Fixed overlap between the Snapshot Prefix field and Dry Run option.
 
 ### 2026.02.17.14 (2026-02-16)
 
-- Added every-N-minutes schedule mode.
-- Continued dataset UI improvements with pool filtering.
-- Commit: `8b674e6`
+- Added "Every N minutes" scheduling.
+- Continued improving dataset selection layout.
 
 ### 2026.02.17.13 (2026-02-16)
 
-- Improved dataset discovery and pool-filtered dataset picker.
-- Commit: `c5e387b`
+- Improved dataset discovery and pool-based filtering in the selector.
 
 ### 2026.02.17.12 (2026-02-16)
 
-- Switched install/remove runtime blocks to explicit `<INLINE>` execution for plugin manager compatibility.
-- Commit: `a6d3aad`
+- Improved install compatibility and reliability.
 
 ### 2026.02.17.11 (2026-02-16)
 
-- Simplified UI registration to a single Utilities page.
-- Commit: `74e03a2`
+- Simplified UI placement to a single Utilities entry.
 
 ### 2026.02.17.10 (2026-02-16)
 
-- Added direct package download fallback in installer.
-- Commit: `70b1723`
+- Improved install reliability with an additional package download path.
 
 ### 2026.02.17.9 (2026-02-16)
 
-- Fixed plugin `<FILE>` payload schema to use explicit `URL`/`MD5` nodes.
-- Commit: `8cf6e9a`
+- Fixed package download/verification handling during install.
 
 ### 2026.02.17.7 (2026-02-16)
 
-- Forced reinstall release bump during installer debugging.
-- Commit: `e26aa81`
+- Re-release used during installer reliability fixes.
 
 ### 2026.02.17.6 (2026-02-16)
 
-- Fixed install script paths by removing unresolved XML entities in runtime scripts.
-- Commit: `c225e19`
+- Fixed install script path handling.
 
 ### 2026.02.17.4 (2026-02-16)
 
-- Reworked UI registration to xmenu + child settings page (later simplified in subsequent releases).
-- Commit: `10f86ee`
+- Reworked settings page registration/layout.
 
 ### 2026.02.17.3 (2026-02-16)
 
-- Fixed Unraid page registration and icon compatibility.
-- Commit: `048ce3b`
+- Fixed plugin page visibility and icon compatibility.
 
 ### 2026.02.17.2 (2026-02-16)
 
 - Added custom plugin icon.
-- Commit: `d58a9a9`
 
 ### 2026.02.17.1 (2026-02-16)
 
 - Fixed settings page tile registration.
-- Commit: `d64796d`
 
 ### 2026.02.17 (2026-02-16)
 
-- First public release packaging and GitHub publish prep.
-- Commit: `969613f`
+- First published release.
 
-## Historical Internal Build Labels
+## Early Internal Build Labels
 
-These labels appeared in early `dist` artifacts during rapid initial development and are kept here for traceability.
+These were internal pre-release labels from the first day of development and can be ignored by most users.
 
 ### 2026.02.17-verified (2026-02-16)
 
-- Internal scaffold-era build label.
-- Commit: `d4fad38`
+- Internal pre-release build label.
 
 ### 2026.02.17-datasets-ui (2026-02-16)
 
-- Internal scaffold-era build label.
-- Commit: `d4fad38`
+- Internal pre-release build label.
 
 ### 2026.02.16-webui2 (2026-02-16)
 
-- Internal scaffold-era build label.
-- Commit: `d4fad38`
+- Internal pre-release build label.
 
 ### 2026.02.16-webui (2026-02-16)
 
-- Internal scaffold-era build label.
-- Commit: `d4fad38`
+- Internal pre-release build label.
 
 ### 2026.02.16-ui (2026-02-16)
 
-- Internal scaffold-era build label.
-- Commit: `d4fad38`
+- Internal pre-release build label.
 
 ### 2026.02.16 (2026-02-16)
 
-- Initial Unraid ZFS autosnapshot plugin scaffold.
-- Commit: `d4fad38`
+- Initial project scaffold.
 
 ## Notes
 
-- Version numbers `2026.02.17.5` and `2026.02.17.8` were skipped and have no corresponding release artifacts in repository history.
+- Version numbers `2026.02.17.5` and `2026.02.17.8` were skipped (no release published with those numbers).
