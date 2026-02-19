@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.19.2 (2026-02-19)
+
+- Fixed plugin icon on the Installed Plugins page so it now shows the custom icon instead of the generic one.
+
 ### 2026.02.19.1 (2026-02-18)
 
 - Improved reboot reliability: your schedule is now re-applied automatically after startup.

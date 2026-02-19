@@ -1,7 +1,8 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.19.1" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.19.2" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.19.1 (2026-02-18)
+### 2026.02.19.2 (2026-02-18)
+- Installed Plugins page now uses the custom plugin icon instead of the generic icon.
 - Boot reliability fix: cron schedule is now auto-synced on server startup/array mount via `event/disks_mounted`.
 - Log retention improvement: each run writes a `[RUN_START]` marker and prunes the log to keep only the latest 2 runs.
 - Disabled-schedule safeguard: install/upgrade now explicitly removes the plugin cron file when `SCHEDULE_MODE=disabled`.
@@ -33,8 +34,8 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.19.1-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.19.1-noarch-1.txz</URL>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.19.2-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.19.2-noarch-1.txz</URL>
     <MD5>65c8b3fd44f3984ec36a9ce26d1d21fc</MD5>
   </FILE>
 
@@ -43,7 +44,7 @@
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.19.1-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.19.2-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
 PKG_MD5="65c8b3fd44f3984ec36a9ce26d1d21fc"
