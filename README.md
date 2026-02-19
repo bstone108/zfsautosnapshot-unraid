@@ -35,6 +35,10 @@ Plugin URL:
 
 `https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg`
 
+## Changelog
+
+Detailed release history lives in `CHANGELOG.md`.
+
 ## Scheduling
 
 The plugin supports human-friendly schedule modes:
