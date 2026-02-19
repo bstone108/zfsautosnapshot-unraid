@@ -2,6 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Log retention improvement: each run writes a `[RUN_START]` marker and prunes the log to keep only the latest 2 runs.
 - Disabled-schedule safeguard: install/upgrade now explicitly removes the plugin cron file when `SCHEDULE_MODE=disabled`.
 - Install/upgrade now always refreshes cron runtime (`update_cron` + `crond` restart), so existing schedules activate without pressing Save.
 - Scheduler reliability fix: every schedule apply/disable now refreshes cron runtime and restarts `crond`.

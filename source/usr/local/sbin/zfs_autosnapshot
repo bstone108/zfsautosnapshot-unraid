@@ -30,6 +30,9 @@ KEEP_WEEKLY_UNTIL_DAYS=183
 
 LOCKFILE="/tmp/zfs_autosnapshot.lock"
 LOCKDIR="/tmp/zfs_autosnapshot.lockdir"
+LOG_FILE="${LOG_FILE:-/var/log/zfs_autosnapshot.log}"
+LOG_RUN_MARKER="[RUN_START]"
+KEEP_LOG_RUNS="${KEEP_LOG_RUNS:-2}"
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -115,6 +118,39 @@ upsert_pool_threshold() {
 
   pool_names+=("$pool")
   pool_thresholds+=("$threshold")
+}
+
+prune_log_to_last_runs() {
+  local file="$1"
+  local marker="$2"
+  local keep_runs="$3"
+  local start_line tmp
+
+  [[ -f "$file" ]] || return 0
+  [[ "$keep_runs" =~ ^[0-9]+$ ]] || return 0
+  (( keep_runs >= 1 )) || return 0
+
+  start_line="$(awk -v marker="$marker" -v keep="$keep_runs" '
+    index($0, marker) == 1 { marks[++count] = NR }
+    END {
+      if (count >= keep) print marks[count - keep + 1];
+      else print 1;
+    }
+  ' "$file" 2>/dev/null || echo 1)"
+
+  [[ "$start_line" =~ ^[0-9]+$ ]] || start_line=1
+
+  tmp="$(mktemp "${file}.tmp.XXXXXX")" || return 0
+  if ! sed -n "${start_line},\$p" "$file" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  if : > "$file" 2>/dev/null; then
+    cat "$tmp" > "$file" 2>/dev/null || true
+  fi
+
+  rm -f "$tmp"
 }
 
 # -----------------------------------------------------------------------------
@@ -247,6 +283,13 @@ KEEP_DAILY_UNTIL_SECONDS=$((KEEP_DAILY_UNTIL_DAYS * 86400))
 KEEP_WEEKLY_UNTIL_SECONDS=$((KEEP_WEEKLY_UNTIL_DAYS * 86400))
 NOW_EPOCH="$(date +%s)"
 
+if (( DRY_RUN )); then
+  run_mode="dry-run"
+else
+  run_mode="normal"
+fi
+log "${LOG_RUN_MARKER} ts=$(date +'%Y-%m-%d %H:%M:%S %Z') pid=$$ mode=${run_mode}"
+
 declare -a pool_names=()
 declare -a pool_thresholds=()
 
@@ -316,3 +359,6 @@ for pair in "${pairs[@]}"; do
 done
 
 log "Snapshot management complete."
+
+# Keep log size in check: retain only the last N runs worth of entries.
+prune_log_to_last_runs "$LOG_FILE" "$LOG_RUN_MARKER" "$KEEP_LOG_RUNS"
