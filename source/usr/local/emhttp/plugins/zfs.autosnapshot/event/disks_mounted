@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+
+PLUGIN_DIR="/usr/local/emhttp/plugins/zfs.autosnapshot"
+SYNC_SCRIPT="${PLUGIN_DIR}/scripts/sync-cron.sh"
+
+if [[ -x "$SYNC_SCRIPT" ]]; then
+  "$SYNC_SCRIPT" || true
+fi
+
+exit 0
