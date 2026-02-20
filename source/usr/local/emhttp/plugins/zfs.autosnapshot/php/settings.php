@@ -5,8 +5,6 @@ $configFile = "{$configDir}/zfs_autosnapshot.conf";
 $syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
 $logApiUrl = "/plugins/{$pluginName}/php/log-tail.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
-$debugLogFile = '/var/log/zfs_autosnapshot.log';
-$summaryLogFile = '/var/log/zfs_autosnapshot.last.log';
 $logPollIntervalMs = 2000;
 
 $defaults = [
@@ -73,56 +71,6 @@ function normalizeThreshold($value)
     }
 
     return $match[1] . $match[2];
-}
-
-function sendJson($payload, $statusCode = 200)
-{
-    if (!headers_sent()) {
-        http_response_code((int) $statusCode);
-        header('Content-Type: application/json; charset=UTF-8');
-        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-        header('Pragma: no-cache');
-    }
-
-    echo json_encode($payload);
-    exit;
-}
-
-function tailFileLines($path, $lineCount, $maxBytes, &$wasTruncated = false)
-{
-    $wasTruncated = false;
-
-    $lineCount = (int) $lineCount;
-    if ($lineCount < 50) {
-        $lineCount = 50;
-    } elseif ($lineCount > 2000) {
-        $lineCount = 2000;
-    }
-
-    $maxBytes = (int) $maxBytes;
-    if ($maxBytes < 1024) {
-        $maxBytes = 1024;
-    }
-
-    $output = [];
-    $exitCode = 0;
-    @exec('tail -n ' . $lineCount . ' ' . escapeshellarg($path) . ' 2>/dev/null', $output, $exitCode);
-
-    if ($exitCode !== 0) {
-        return '';
-    }
-
-    $text = implode("\n", $output);
-    if ($text !== '') {
-        $text .= "\n";
-    }
-
-    if (strlen($text) > $maxBytes) {
-        $text = substr($text, -$maxBytes);
-        $wasTruncated = true;
-    }
-
-    return $text;
 }
 
 function detectInstalledPluginVersion($pluginName)
@@ -427,6 +375,10 @@ function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThreshol
         if ($dataset === '' || isset($seen[$dataset])) {
             continue;
         }
+
+        if (!isValidDatasetName($dataset)) {
+            continue;
+        }
         $seen[$dataset] = true;
 
         $threshold = trimValue($postedThresholds[$index] ?? '');
@@ -562,6 +514,11 @@ function cronHasFiveFields($cron)
     return is_array($parts) && count($parts) === 5;
 }
 
+function cronHasSafeCharacters($cron)
+{
+    return preg_match('/^[A-Za-z0-9*\/,\- ]+$/', trim((string) $cron)) === 1;
+}
+
 function buildCronFromSettings($config, &$errors)
 {
     $mode = strtolower(trim((string) ($config['SCHEDULE_MODE'] ?? 'disabled')));
@@ -623,6 +580,10 @@ function buildCronFromSettings($config, &$errors)
             $errors[] = 'Custom cron expression must have exactly 5 fields.';
             return '';
         }
+        if (!cronHasSafeCharacters($cron)) {
+            $errors[] = 'Custom cron expression contains unsupported characters.';
+            return '';
+        }
         return $cron;
     }
 
@@ -675,34 +636,6 @@ function renderConfig($config)
     $lines[] = '';
 
     return implode("\n", $lines);
-}
-
-$apiAction = strtolower(trimValue($_GET['zfsas_api'] ?? ''));
-if ($apiAction === 'log_tail') {
-    $logType = strtolower(trimValue($_GET['type'] ?? 'summary'));
-    $targetLogFile = ($logType === 'debug') ? $debugLogFile : $summaryLogFile;
-    $lineCount = (int) ($_GET['lines'] ?? 300);
-    $exists = is_file($targetLogFile);
-    $readable = is_readable($targetLogFile);
-    $mtime = ($exists ? (int) @filemtime($targetLogFile) : 0);
-    $size = ($exists ? (int) @filesize($targetLogFile) : 0);
-    $truncated = false;
-    $content = '';
-
-    if ($exists && $readable) {
-        $content = tailFileLines($targetLogFile, $lineCount, ($logType === 'debug') ? 500000 : 50000, $truncated);
-    }
-
-    sendJson([
-        'ok' => true,
-        'type' => $logType,
-        'exists' => $exists,
-        'readable' => $readable,
-        'mtime' => $mtime,
-        'size' => $size,
-        'truncated' => $truncated,
-        'content' => $content,
-    ]);
 }
 
 $installedVersion = detectInstalledPluginVersion($pluginName);
@@ -1294,7 +1227,7 @@ if ($resolvedCron === '') {
           <span>Dry run (preview only, no snapshot create/delete)</span>
         </label>
         <div class="zfsas-help">
-          Leave this unchecked for normal operation. In Dry Run mode, use Live Run Log to see each action that would be taken.
+          Leave this unchecked for normal operation. In Dry Run mode, use Debug Log view to see each action that would be taken.
         </div>
       </div>
     </div>
@@ -1626,6 +1559,16 @@ if ($resolvedCron === '') {
     return url + '&_=' + Date.now();
   }
 
+  function buildLogFingerprint(data, content) {
+    var head = content.slice(0, 128);
+    var tail = content.slice(-128);
+    return String(data.mtime || 0)
+      + ':' + String(data.size || 0)
+      + ':' + String(content.length)
+      + ':' + head
+      + ':' + tail;
+  }
+
   function requestJson(url, onSuccess, onError) {
     var xhr = new XMLHttpRequest();
     xhr.open('GET', url, true);
@@ -1665,6 +1608,20 @@ if ($resolvedCron === '') {
     xhr.setRequestHeader('Accept', 'application/json');
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
 
+    var csrfToken = '';
+    if (typeof window.csrf_token === 'string' && window.csrf_token.length > 0) {
+      csrfToken = window.csrf_token;
+    } else {
+      var csrfInput = document.querySelector('input[name=\"csrf_token\"]');
+      if (csrfInput && typeof csrfInput.value === 'string' && csrfInput.value.length > 0) {
+        csrfToken = csrfInput.value;
+      }
+    }
+
+    if (csrfToken !== '') {
+      xhr.setRequestHeader('X-CSRF-Token', csrfToken);
+    }
+
     xhr.onreadystatechange = function () {
       if (xhr.readyState !== 4) {
         return;
@@ -1679,7 +1636,12 @@ if ($resolvedCron === '') {
       try {
         payload = JSON.parse(xhr.responseText);
       } catch (parseError) {
-        onError(new Error('Invalid JSON response.'));
+        var raw = String(xhr.responseText || '').trim();
+        if (raw.charAt(0) === '<') {
+          onError(new Error('Session expired or security token was rejected. Reload the page and try again.'));
+        } else {
+          onError(new Error('Invalid JSON response.'));
+        }
         return;
       }
 
@@ -1690,7 +1652,12 @@ if ($resolvedCron === '') {
       onError(new Error('Network error.'));
     };
 
-    xhr.send('');
+    var body = '';
+    if (csrfToken !== '') {
+      body = 'csrf_token=' + encodeURIComponent(csrfToken);
+    }
+
+    xhr.send(body);
   }
 
   function fetchLiveLog(forceScrollToBottom) {
@@ -1732,7 +1699,7 @@ if ($resolvedCron === '') {
           }
         }
 
-        var fingerprint = String(data.mtime || 0) + ':' + String(data.size || 0) + ':' + String(content.length);
+        var fingerprint = buildLogFingerprint(data, content);
         if (fingerprint !== logFingerprint || forceScrollToBottom) {
           outputEl.textContent = content;
           logFingerprint = fingerprint;

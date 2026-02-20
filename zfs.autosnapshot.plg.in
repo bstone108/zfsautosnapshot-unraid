@@ -2,6 +2,11 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Fixed Run Now failures caused by missing CSRF token handling, including clearer session-expired guidance.
+- Hardened config loading for the snapshot engine and scheduler by replacing shell sourcing with safe key/value parsing.
+- Added stricter safety validation for prefix/config values, with plain-English failure guidance in the latest run summary.
+- Improved lock cleanup reliability and low-space cleanup resilience when pool availability checks fail.
+- Removed obsolete legacy settings-page log API code and improved log refresh change detection reliability.
 - Added a "Run Now" button in settings for one-click manual execution.
 - Added dual log mode in WebUI: concise latest-run summary by default, with a debug toggle for the verbose log.
 - Added "Download Current Log" in WebUI for either summary or debug view.

@@ -5,6 +5,22 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.20.1 (2026-02-20)
+
+- Fixed the Run Now button failing with "Invalid JSON response" by sending the required Unraid security token on manual-run requests.
+- Added clearer Run Now failure messaging when your session expires or security token is rejected.
+- Added protection against overlapping manual runs by reporting when a run is already in progress.
+- Hardened config parsing in the snapshot engine and scheduler (no direct shell sourcing of config values).
+- Added stricter safety checks so unsafe prefix/config values fail fast with plain-English guidance in the Latest Run Summary.
+- Improved lock cleanup reliability by merging exit handling into one path.
+- Improved low-space cleanup resilience by skipping pools that fail availability checks instead of aborting the whole run.
+- Removed obsolete legacy log API code from the settings page backend.
+- Improved log refresh change detection reliability in the WebUI.
+
+## Planned For Testing Branch
+
+- Evaluate replacing poll-based log refresh with true streaming log transport (only if stability is maintained).
+
 ### 2026.02.19.4 (2026-02-19)
 
 - Added a new "Run Now" button beside Save Settings for one-click manual runs.

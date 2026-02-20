@@ -41,6 +41,10 @@ RUN_MODE="normal"
 RUN_DATASET_COUNT=0
 RUN_POOL_COUNT=0
 RUN_ERROR_CONTEXT=""
+RUN_USER_ERROR=""
+RUN_USER_ACTION=""
+RUN_SUMMARY_ENABLED=0
+LOCK_FALLBACK_HELD=0
 
 COUNT_CREATED=0
 COUNT_DELETED_TOTAL=0
@@ -55,126 +59,237 @@ COUNT_DELETED_SPACE=0
 log() { echo "$@"; }
 
 trim() {
-  local s="$1"
-  s="${s#"${s%%[![:space:]]*}"}"
-  s="${s%"${s##*[![:space:]]}"}"
-  printf '%s' "$s"
+	local s="$1"
+	s="${s#"${s%%[![:space:]]*}"}"
+	s="${s%"${s##*[![:space:]]}"}"
+	printf '%s' "$s"
+}
+
+set_user_failure() {
+	local what="$1"
+	local action="$2"
+	RUN_USER_ERROR="$what"
+	RUN_USER_ACTION="$action"
 }
 
 die() {
-  log "ERROR: $*" >&2
-  exit 1
+	local message="$*"
+
+	if [[ -z "$RUN_USER_ERROR" ]]; then
+		RUN_USER_ERROR="$message"
+	fi
+
+	if [[ -z "$RUN_USER_ACTION" ]]; then
+		RUN_USER_ACTION="Open ZFS Auto Snapshot settings, fix the configuration, then run again."
+	fi
+
+	log "ERROR: $message" >&2
+	exit 1
+}
+
+fail_config() {
+	local message="$1"
+	local action="$2"
+	set_user_failure "$message" "$action"
+	die "$message"
 }
 
 record_error_context() {
-  local line="$1"
-  local cmd="$2"
-  RUN_ERROR_CONTEXT="line ${line}: ${cmd}"
+	local line="$1"
+	local cmd="$2"
+	RUN_ERROR_CONTEXT="line ${line}: ${cmd}"
+
+	if [[ -z "$RUN_USER_ERROR" ]]; then
+		RUN_USER_ERROR="The run stopped unexpectedly because an internal command failed."
+	fi
+
+	if [[ -z "$RUN_USER_ACTION" ]]; then
+		RUN_USER_ACTION="Open the Debug Log, fix the reported command problem, then run again."
+	fi
+}
+
+parse_config_value() {
+	local raw="$1"
+	local value
+
+	value="$(trim "$raw")"
+	[[ -n "$value" ]] || {
+		printf ''
+		return 0
+	}
+
+	if [[ "$value" == \"*\" && "$value" == *\" && ${#value} -ge 2 ]]; then
+		value="${value:1:${#value}-2}"
+		value="${value//\\\\/\\}"
+		value="${value//\\\"/\"}"
+		printf '%s' "$value"
+		return 0
+	fi
+
+	if [[ "$value" == \'*\' && "$value" == *\' && ${#value} -ge 2 ]]; then
+		value="${value:1:${#value}-2}"
+		printf '%s' "$value"
+		return 0
+	fi
+
+	value="${value%%#*}"
+	value="$(trim "$value")"
+	printf '%s' "$value"
+}
+
+apply_config_key() {
+	local key="$1"
+	local value="$2"
+
+	case "$key" in
+	DATASETS | PREFIX | DRY_RUN | KEEP_ALL_FOR_DAYS | KEEP_DAILY_UNTIL_DAYS | KEEP_WEEKLY_UNTIL_DAYS | LOCKFILE | LOCKDIR | LOG_FILE | SUMMARY_LOG_FILE | KEEP_LOG_RUNS)
+		if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+			return 0
+		fi
+		printf -v "$key" '%s' "$value"
+		;;
+	esac
+}
+
+load_config_file() {
+	local path="$1"
+	local line key raw value
+
+	[[ -f "$path" ]] || return 0
+
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		[[ "$line" =~ ^[[:space:]]*# ]] && continue
+		[[ "$line" =~ ^[[:space:]]*$ ]] && continue
+
+		if [[ "$line" =~ ^[[:space:]]*([A-Z0-9_]+)[[:space:]]*=(.*)$ ]]; then
+			key="${BASH_REMATCH[1]}"
+			raw="${BASH_REMATCH[2]}"
+			value="$(parse_config_value "$raw")"
+			apply_config_key "$key" "$value"
+		fi
+	done <"$path"
+}
+
+require_numeric_in_range() {
+	local name="$1"
+	local value="$2"
+	local min="$3"
+	local max="$4"
+
+	[[ "$value" =~ ^[0-9]+$ ]] || fail_config "${name} must be an integer." "Set ${name} to a whole number between ${min} and ${max}."
+
+	if ((value < min || value > max)); then
+		fail_config "${name} is out of range (${value})." "Set ${name} between ${min} and ${max}."
+	fi
 }
 
 increment_delete_counter() {
-  local reason="$1"
+	local reason="$1"
 
-  COUNT_DELETED_TOTAL=$((COUNT_DELETED_TOTAL + 1))
+	COUNT_DELETED_TOTAL=$((COUNT_DELETED_TOTAL + 1))
 
-  case "$reason" in
-    age_window)
-      COUNT_DELETED_AGE=$((COUNT_DELETED_AGE + 1))
-      ;;
-    daily_consolidation)
-      COUNT_DELETED_DAILY=$((COUNT_DELETED_DAILY + 1))
-      ;;
-    weekly_consolidation)
-      COUNT_DELETED_WEEKLY=$((COUNT_DELETED_WEEKLY + 1))
-      ;;
-    space_pressure)
-      COUNT_DELETED_SPACE=$((COUNT_DELETED_SPACE + 1))
-      ;;
-  esac
+	case "$reason" in
+	age_window)
+		COUNT_DELETED_AGE=$((COUNT_DELETED_AGE + 1))
+		;;
+	daily_consolidation)
+		COUNT_DELETED_DAILY=$((COUNT_DELETED_DAILY + 1))
+		;;
+	weekly_consolidation)
+		COUNT_DELETED_WEEKLY=$((COUNT_DELETED_WEEKLY + 1))
+		;;
+	space_pressure)
+		COUNT_DELETED_SPACE=$((COUNT_DELETED_SPACE + 1))
+		;;
+	esac
 }
 
 do_destroy() {
-  local snap="$1"
-  local reason="${2:-unknown}"
+	local snap="$1"
+	local reason="${2:-unknown}"
 
-  if (( DRY_RUN )); then
-    log "[DRY_RUN] zfs destroy '$snap'"
-    increment_delete_counter "$reason"
-  else
-    zfs destroy "$snap"
-    increment_delete_counter "$reason"
-  fi
+	if ((DRY_RUN)); then
+		log "[DRY_RUN] zfs destroy '$snap'"
+		increment_delete_counter "$reason"
+	else
+		zfs destroy "$snap"
+		increment_delete_counter "$reason"
+	fi
 }
 
 do_snapshot() {
-  local snap="$1"
+	local snap="$1"
 
-  if (( DRY_RUN )); then
-    log "[DRY_RUN] zfs snapshot '$snap'"
-    COUNT_CREATED=$((COUNT_CREATED + 1))
-  else
-    zfs snapshot "$snap"
-    COUNT_CREATED=$((COUNT_CREATED + 1))
-  fi
+	if ((DRY_RUN)); then
+		log "[DRY_RUN] zfs snapshot '$snap'"
+		COUNT_CREATED=$((COUNT_CREATED + 1))
+	else
+		zfs snapshot "$snap"
+		COUNT_CREATED=$((COUNT_CREATED + 1))
+	fi
 }
 
 # Convert "100G", "500MB", "2T", etc. into bytes (1024-based).
 threshold_to_bytes() {
-  local raw="$1"
-  local upper num unit
+	local raw="$1"
+	local upper num unit
 
-  upper="$(echo "$raw" | tr '[:lower:]' '[:upper:]')"
-  upper="${upper%B}"
+	upper="$(echo "$raw" | tr '[:lower:]' '[:upper:]')"
+	upper="${upper%B}"
 
-  num="${upper%%[!0-9]*}"
-  unit="${upper#$num}"
+	num="${upper%%[!0-9]*}"
+	unit="${upper#"$num"}"
 
-  if [[ -z "$num" || ! "$num" =~ ^[0-9]+$ ]]; then
-    die "Bad threshold '$raw' (expected like 500M, 100G, 2T)"
-  fi
+	if [[ -z "$num" || ! "$num" =~ ^[0-9]+$ ]]; then
+		fail_config "Bad threshold '$raw'." "Use thresholds like 500M, 100G, or 2T."
+	fi
 
-  case "$unit" in
-    K) echo $((num * 1024)) ;;
-    M) echo $((num * 1024 * 1024)) ;;
-    G) echo $((num * 1024 * 1024 * 1024)) ;;
-    T) echo $((num * 1024 * 1024 * 1024 * 1024)) ;;
-    *) die "Bad unit in '$raw' (use K, M, G, or T, optional B: GB/TB)" ;;
-  esac
+	case "$unit" in
+	K) echo $((num * 1024)) ;;
+	M) echo $((num * 1024 * 1024)) ;;
+	G) echo $((num * 1024 * 1024 * 1024)) ;;
+	T) echo $((num * 1024 * 1024 * 1024 * 1024)) ;;
+	*) fail_config "Bad unit in '$raw'." "Use K, M, G, or T (optional trailing B)." ;;
+	esac
 }
 
-get_pool_avail() { zfs list -o avail -H -p "$1"; }
+get_pool_avail() {
+	local value
+	value="$(zfs list -o avail -H -p "$1" 2>/dev/null || true)"
+	[[ "$value" =~ ^[0-9]+$ ]] && echo "$value" || echo ""
+}
 
 # "freeing" may be missing or "-". Treat as 0 if not numeric.
 get_pool_freeing() {
-  local value
-  value="$(zpool get -H -o value freeing "$1" 2>/dev/null || true)"
-  [[ "$value" =~ ^[0-9]+$ ]] && echo "$value" || echo 0
+	local value
+	value="$(zpool get -H -o value freeing "$1" 2>/dev/null || true)"
+	[[ "$value" =~ ^[0-9]+$ ]] && echo "$value" || echo 0
 }
 
 upsert_pool_threshold() {
-  local pool="$1"
-  local threshold="$2"
-  local i
+	local pool="$1"
+	local threshold="$2"
+	local i
 
-  for i in "${!pool_names[@]}"; do
-    if [[ "${pool_names[$i]}" == "$pool" ]]; then
-      if (( threshold > pool_thresholds[$i] )); then
-        pool_thresholds[$i]="$threshold"
-      fi
-      return 0
-    fi
-  done
+	for i in "${!pool_names[@]}"; do
+		if [[ "${pool_names[$i]}" == "$pool" ]]; then
+			if ((threshold > pool_thresholds[i])); then
+				pool_thresholds[i]=$threshold
+			fi
+			return 0
+		fi
+	done
 
-  pool_names+=("$pool")
-  pool_thresholds+=("$threshold")
+	pool_names+=("$pool")
+	pool_thresholds+=("$threshold")
 }
 
 pick_oldest_snapshot() {
-  local snapshot_lines="$1"
+	local snapshot_lines="$1"
 
-  # Find the minimum creation epoch without sort|head to avoid SIGPIPE exits
-  # under "set -o pipefail" when only the first row is needed.
-  printf '%s\n' "$snapshot_lines" | awk -F '\t' '
+	# Find the minimum creation epoch without sort|head to avoid SIGPIPE exits
+	# under "set -o pipefail" when only the first row is needed.
+	printf '%s\n' "$snapshot_lines" | awk -F '\t' '
     NF >= 2 && $2 ~ /^[0-9]+$/ {
       if (!found || $2 < min_epoch) {
         min_epoch = $2
@@ -189,16 +304,16 @@ pick_oldest_snapshot() {
 }
 
 prune_log_to_last_runs() {
-  local file="$1"
-  local marker="$2"
-  local keep_runs="$3"
-  local start_line tmp
+	local file="$1"
+	local marker="$2"
+	local keep_runs="$3"
+	local start_line tmp
 
-  [[ -f "$file" ]] || return 0
-  [[ "$keep_runs" =~ ^[0-9]+$ ]] || return 0
-  (( keep_runs >= 1 )) || return 0
+	[[ -f "$file" ]] || return 0
+	[[ "$keep_runs" =~ ^[0-9]+$ ]] || return 0
+	((keep_runs >= 1)) || return 0
 
-  start_line="$(awk -v marker="$marker" -v keep="$keep_runs" '
+	start_line="$(awk -v marker="$marker" -v keep="$keep_runs" '
     index($0, marker) == 1 { marks[++count] = NR }
     END {
       if (count >= keep) print marks[count - keep + 1];
@@ -206,82 +321,90 @@ prune_log_to_last_runs() {
     }
   ' "$file" 2>/dev/null || echo 1)"
 
-  [[ "$start_line" =~ ^[0-9]+$ ]] || start_line=1
+	[[ "$start_line" =~ ^[0-9]+$ ]] || start_line=1
 
-  tmp="$(mktemp "${file}.tmp.XXXXXX")" || return 0
-  if ! sed -n "${start_line},\$p" "$file" > "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    return 0
-  fi
+	tmp="$(mktemp "${file}.tmp.XXXXXX")" || return 0
+	if ! sed -n "${start_line},\$p" "$file" >"$tmp" 2>/dev/null; then
+		rm -f "$tmp"
+		return 0
+	fi
 
-  if : > "$file" 2>/dev/null; then
-    cat "$tmp" > "$file" 2>/dev/null || true
-  fi
+	if : >"$file" 2>/dev/null; then
+		cat "$tmp" >"$file" 2>/dev/null || true
+	fi
 
-  rm -f "$tmp"
+	rm -f "$tmp"
 }
 
 write_run_summary() {
-  local exit_code="$1"
-  local ended_at_human now_epoch duration_seconds tmp_file
-  local created_label deleted_label
+	local exit_code="$1"
+	local ended_at_human now_epoch duration_seconds tmp_file
+	local created_label deleted_label
 
-  [[ -n "$RUN_STARTED_AT_HUMAN" ]] || return 0
+	[[ -n "$RUN_STARTED_AT_HUMAN" ]] || return 0
 
-  ended_at_human="$(date +'%Y-%m-%d %H:%M:%S %Z')"
-  now_epoch="$(date +%s)"
-  duration_seconds=$((now_epoch - RUN_STARTED_AT_EPOCH))
+	ended_at_human="$(date +'%Y-%m-%d %H:%M:%S %Z')"
+	now_epoch="$(date +%s)"
+	duration_seconds=$((now_epoch - RUN_STARTED_AT_EPOCH))
 
-  if (( DRY_RUN )); then
-    created_label="Snapshots planned to create"
-    deleted_label="Snapshots planned to delete"
-  else
-    created_label="Snapshots created"
-    deleted_label="Snapshots deleted"
-  fi
+	if ((DRY_RUN)); then
+		created_label="Snapshots planned to create"
+		deleted_label="Snapshots planned to delete"
+	else
+		created_label="Snapshots created"
+		deleted_label="Snapshots deleted"
+	fi
 
-  tmp_file="$(mktemp "${SUMMARY_LOG_FILE}.tmp.XXXXXX")" || return 0
+	tmp_file="$(mktemp "${SUMMARY_LOG_FILE}.tmp.XXXXXX")" || return 0
 
-  {
-    echo "ZFS Auto Snapshot - Latest Run Summary"
-    echo "Started: ${RUN_STARTED_AT_HUMAN}"
-    echo "Finished: ${ended_at_human}"
-    echo "Duration: ${duration_seconds}s"
-    echo "Mode: ${RUN_MODE}"
-    if (( exit_code == 0 )); then
-      echo "Result: Success"
-    else
-      echo "Result: Failed (exit code ${exit_code})"
-      if [[ -n "$RUN_ERROR_CONTEXT" ]]; then
-        echo "Failure point: ${RUN_ERROR_CONTEXT}"
-      fi
-    fi
-    echo "Datasets configured: ${RUN_DATASET_COUNT}"
-    echo "Pools evaluated: ${RUN_POOL_COUNT}"
-    echo
-    echo "${created_label}: ${COUNT_CREATED}"
-    echo "${deleted_label}: ${COUNT_DELETED_TOTAL}"
-    echo "  Deleted by age retention (outside oldest window): ${COUNT_DELETED_AGE}"
-    echo "  Deleted by daily consolidation: ${COUNT_DELETED_DAILY}"
-    echo "  Deleted by weekly consolidation: ${COUNT_DELETED_WEEKLY}"
-    echo "  Deleted by low-space cleanup: ${COUNT_DELETED_SPACE}"
-  } > "$tmp_file"
+	{
+		echo "ZFS Auto Snapshot - Latest Run Summary"
+		echo "Started: ${RUN_STARTED_AT_HUMAN}"
+		echo "Finished: ${ended_at_human}"
+		echo "Duration: ${duration_seconds}s"
+		echo "Mode: ${RUN_MODE}"
 
-  if mv -f "$tmp_file" "$SUMMARY_LOG_FILE" 2>/dev/null; then
-    chmod 0644 "$SUMMARY_LOG_FILE" 2>/dev/null || true
-  else
-    rm -f "$tmp_file"
-  fi
+		if ((exit_code == 0)); then
+			echo "Result: Success"
+		else
+			echo "Result: Failed (exit code ${exit_code})"
+			echo "What went wrong: ${RUN_USER_ERROR:-The run stopped due to an unexpected internal error.}"
+			echo "What to do: ${RUN_USER_ACTION:-Open the Debug Log, fix the issue, then run again.}"
+			if [[ -n "$RUN_ERROR_CONTEXT" ]]; then
+				echo "Failure point: ${RUN_ERROR_CONTEXT}"
+			fi
+		fi
+
+		echo "Datasets configured: ${RUN_DATASET_COUNT}"
+		echo "Pools evaluated: ${RUN_POOL_COUNT}"
+		echo
+		echo "${created_label}: ${COUNT_CREATED}"
+		echo "${deleted_label}: ${COUNT_DELETED_TOTAL}"
+		echo "  Deleted by age retention (outside oldest window): ${COUNT_DELETED_AGE}"
+		echo "  Deleted by daily consolidation: ${COUNT_DELETED_DAILY}"
+		echo "  Deleted by weekly consolidation: ${COUNT_DELETED_WEEKLY}"
+		echo "  Deleted by low-space cleanup: ${COUNT_DELETED_SPACE}"
+	} >"$tmp_file"
+
+	if mv -f "$tmp_file" "$SUMMARY_LOG_FILE" 2>/dev/null; then
+		chmod 0644 "$SUMMARY_LOG_FILE" 2>/dev/null || true
+	else
+		rm -f "$tmp_file"
+	fi
 }
 
 on_exit() {
-  local exit_code="$?"
-  set +e
+	local exit_code="$?"
+	set +e
 
-  if (( RUN_STARTED_AT_EPOCH > 0 )); then
-    write_run_summary "$exit_code" || true
-    prune_log_to_last_runs "$LOG_FILE" "$LOG_RUN_MARKER" "$KEEP_LOG_RUNS" || true
-  fi
+	if ((LOCK_FALLBACK_HELD)); then
+		rm -rf "$LOCKDIR" 2>/dev/null || true
+	fi
+
+	if ((RUN_SUMMARY_ENABLED)); then
+		write_run_summary "$exit_code" || true
+		prune_log_to_last_runs "$LOG_FILE" "$LOG_RUN_MARKER" "$KEEP_LOG_RUNS" || true
+	fi
 }
 
 # -----------------------------------------------------------------------------
@@ -289,145 +412,183 @@ on_exit() {
 #   Prefer flock. Fallback to mkdir lock if flock is unavailable.
 # -----------------------------------------------------------------------------
 acquire_lock() {
-  if command -v flock >/dev/null 2>&1; then
-    exec 200>"$LOCKFILE"
-    if ! flock -n 200; then
-      log "Another instance is already running (lock: $LOCKFILE). Exiting."
-      exit 0
-    fi
-    echo "$$" 1>&200
-  else
-    if ! mkdir "$LOCKDIR" 2>/dev/null; then
-      log "Another instance is already running (lock: $LOCKDIR). Exiting."
-      exit 0
-    fi
-    echo "$$" > "$LOCKDIR/pid"
-    trap 'rm -rf "$LOCKDIR"' EXIT
-  fi
+	if command -v flock >/dev/null 2>&1; then
+		exec 200>"$LOCKFILE"
+		if ! flock -n 200; then
+			log "Another instance is already running (lock: $LOCKFILE). Exiting."
+			exit 0
+		fi
+		echo "$$" 1>&200
+	else
+		if ! mkdir "$LOCKDIR" 2>/dev/null; then
+			log "Another instance is already running (lock: $LOCKDIR). Exiting."
+			exit 0
+		fi
+		echo "$$" >"$LOCKDIR/pid"
+		LOCK_FALLBACK_HELD=1
+	fi
 }
 
 # -----------------------------------------------------------------------------
 # Time-based retention cleanup for one dataset
 # -----------------------------------------------------------------------------
 time_clean_dataset() {
-  local ds="$1"
-  log "Time-based cleanup for dataset: $ds"
+	local ds="$1"
+	log "Time-based cleanup for dataset: $ds"
 
-  # Output format: name<TAB>creation_epoch (newest first)
-  local snaps
-  snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$ds" | grep -F "@${PREFIX}" || true)"
+	# Output format: name<TAB>creation_epoch (newest first)
+	local snaps
+	snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$ds" | grep -F "@${PREFIX}" || true)"
 
-  if [[ -z "$snaps" ]]; then
-    log "  No ${PREFIX} snapshots found."
-    return 0
-  fi
+	if [[ -z "$snaps" ]]; then
+		log "  No ${PREFIX} snapshots found."
+		return 0
+	fi
 
-  # Keep seen day/week keys in newline-delimited sets for broad Bash compatibility.
-  local kept_day=$'\n'
-  local kept_week=$'\n'
+	# Keep seen day/week keys in newline-delimited sets for broad Bash compatibility.
+	local kept_day=$'\n'
+	local kept_week=$'\n'
 
-  while IFS=$'\t' read -r snap_name snap_created; do
-    [[ -z "$snap_name" || -z "$snap_created" ]] && continue
+	while IFS=$'\t' read -r snap_name snap_created; do
+		[[ -z "$snap_name" || -z "$snap_created" ]] && continue
 
-    local age=$((NOW_EPOCH - snap_created))
+		local age=$((NOW_EPOCH - snap_created))
 
-    if (( age > KEEP_WEEKLY_UNTIL_SECONDS )); then
-      log "  Deleting (older than ${KEEP_WEEKLY_UNTIL_DAYS}d): $snap_name"
-      do_destroy "$snap_name" "age_window"
-      continue
-    fi
+		if ((age > KEEP_WEEKLY_UNTIL_SECONDS)); then
+			log "  Deleting (older than ${KEEP_WEEKLY_UNTIL_DAYS}d): $snap_name"
+			do_destroy "$snap_name" "age_window"
+			continue
+		fi
 
-    if (( age > KEEP_DAILY_UNTIL_SECONDS )); then
-      local week_key
-      week_key="$(date -d @"$snap_created" +%Y-%W)"
-      if [[ "$kept_week" != *$'\n'"$week_key"$'\n'* ]]; then
-        kept_week+="$week_key"$'\n'
-        log "  Keeping weekly latest: $snap_name"
-      else
-        log "  Deleting weekly duplicate: $snap_name"
-        do_destroy "$snap_name" "weekly_consolidation"
-      fi
-      continue
-    fi
+		if ((age > KEEP_DAILY_UNTIL_SECONDS)); then
+			local week_key
+			week_key="$(date -d @"$snap_created" +%Y-%W)"
+			if [[ "$kept_week" != *$'\n'"$week_key"$'\n'* ]]; then
+				kept_week+="$week_key"$'\n'
+				log "  Keeping weekly latest: $snap_name"
+			else
+				log "  Deleting weekly duplicate: $snap_name"
+				do_destroy "$snap_name" "weekly_consolidation"
+			fi
+			continue
+		fi
 
-    if (( age > KEEP_ALL_FOR_SECONDS )); then
-      local day_key
-      day_key="$(date -d @"$snap_created" +%Y-%m-%d)"
-      if [[ "$kept_day" != *$'\n'"$day_key"$'\n'* ]]; then
-        kept_day+="$day_key"$'\n'
-        log "  Keeping daily latest: $snap_name"
-      else
-        log "  Deleting daily duplicate: $snap_name"
-        do_destroy "$snap_name" "daily_consolidation"
-      fi
-      continue
-    fi
+		if ((age > KEEP_ALL_FOR_SECONDS)); then
+			local day_key
+			day_key="$(date -d @"$snap_created" +%Y-%m-%d)"
+			if [[ "$kept_day" != *$'\n'"$day_key"$'\n'* ]]; then
+				kept_day+="$day_key"$'\n'
+				log "  Keeping daily latest: $snap_name"
+			else
+				log "  Deleting daily duplicate: $snap_name"
+				do_destroy "$snap_name" "daily_consolidation"
+			fi
+			continue
+		fi
 
-    log "  Keeping recent: $snap_name"
-  done <<< "$snaps"
+		log "  Keeping recent: $snap_name"
+	done <<<"$snaps"
 }
 
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
 if [[ -f "$CONFIG_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$CONFIG_FILE"
+	load_config_file "$CONFIG_FILE"
 fi
-
-if ! command -v zfs >/dev/null 2>&1 || ! command -v zpool >/dev/null 2>&1; then
-  die "zfs/zpool commands not found. Is ZFS installed and loaded on this Unraid system?"
-fi
-
-if (( KEEP_ALL_FOR_DAYS >= KEEP_DAILY_UNTIL_DAYS || KEEP_DAILY_UNTIL_DAYS >= KEEP_WEEKLY_UNTIL_DAYS )); then
-  die "Retention config invalid: KEEP_ALL_FOR_DAYS < KEEP_DAILY_UNTIL_DAYS < KEEP_WEEKLY_UNTIL_DAYS"
-fi
-
-IFS=',' read -r -a raw_pairs <<< "$DATASETS"
-declare -a pairs=()
-for raw_pair in "${raw_pairs[@]}"; do
-  pair="$(trim "$raw_pair")"
-  [[ -z "$pair" ]] && continue
-
-  if [[ "$pair" != *:* ]]; then
-    die "Bad DATASETS entry '$pair' (expected dataset:threshold)"
-  fi
-
-  ds="$(trim "${pair%:*}")"
-  thresh="$(trim "${pair##*:}")"
-
-  if [[ -z "$ds" || -z "$thresh" ]]; then
-    die "Bad DATASETS entry '$pair' (expected dataset:threshold)"
-  fi
-
-  pairs+=("$ds:$thresh")
-done
-
-if ((${#pairs[@]} == 0)); then
-  die "DATASETS is empty. Configure DATASETS in $CONFIG_FILE"
-fi
-
-acquire_lock
 
 trap 'record_error_context "$LINENO" "$BASH_COMMAND"' ERR
 trap on_exit EXIT
 
+acquire_lock
+
+RUN_SUMMARY_ENABLED=1
+RUN_STARTED_AT_EPOCH="$(date +%s)"
+RUN_STARTED_AT_HUMAN="$(date +'%Y-%m-%d %H:%M:%S %Z')"
+RUN_MODE="normal"
+if [[ "$DRY_RUN" == "1" ]]; then
+	RUN_MODE="dry-run"
+fi
+
+DATASETS="$(trim "$DATASETS")"
+PREFIX="$(trim "$PREFIX")"
+LOCKFILE="$(trim "$LOCKFILE")"
+LOCKDIR="$(trim "$LOCKDIR")"
+LOG_FILE="$(trim "$LOG_FILE")"
+SUMMARY_LOG_FILE="$(trim "$SUMMARY_LOG_FILE")"
+KEEP_LOG_RUNS="$(trim "$KEEP_LOG_RUNS")"
+
+if [[ -z "$PREFIX" ]]; then
+	fail_config "Snapshot prefix is empty, which is unsafe." "Set a non-empty prefix (example: autosnapshot-) so only this plugin's snapshots can be deleted."
+fi
+
+if [[ "$PREFIX" == *"@"* ]]; then
+	fail_config "Snapshot prefix cannot contain '@'." "Remove '@' from the prefix and save settings again."
+fi
+
+if [[ ! "$PREFIX" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+	fail_config "Snapshot prefix contains unsupported characters." "Use only letters, numbers, dot, underscore, colon, or dash in the prefix."
+fi
+
+if [[ "$DRY_RUN" != "0" && "$DRY_RUN" != "1" ]]; then
+	fail_config "DRY_RUN must be 0 or 1." "Set DRY_RUN to 0 for live mode or 1 for preview mode."
+fi
+
+if [[ -z "$LOCKFILE" || -z "$LOCKDIR" ]]; then
+	fail_config "Lock file settings are empty." "Reset lock settings to defaults and run again."
+fi
+
+if [[ -z "$LOG_FILE" || -z "$SUMMARY_LOG_FILE" ]]; then
+	fail_config "Log file paths are empty." "Set valid paths for LOG_FILE and SUMMARY_LOG_FILE."
+fi
+
+require_numeric_in_range "KEEP_LOG_RUNS" "$KEEP_LOG_RUNS" 1 50
+require_numeric_in_range "KEEP_ALL_FOR_DAYS" "$KEEP_ALL_FOR_DAYS" 1 36500
+require_numeric_in_range "KEEP_DAILY_UNTIL_DAYS" "$KEEP_DAILY_UNTIL_DAYS" 2 36500
+require_numeric_in_range "KEEP_WEEKLY_UNTIL_DAYS" "$KEEP_WEEKLY_UNTIL_DAYS" 3 36500
+
+if ((KEEP_ALL_FOR_DAYS >= KEEP_DAILY_UNTIL_DAYS || KEEP_DAILY_UNTIL_DAYS >= KEEP_WEEKLY_UNTIL_DAYS)); then
+	fail_config "Retention order is invalid." "Use this order: Keep all < Keep daily until < Keep weekly until."
+fi
+
+if ! command -v zfs >/dev/null 2>&1 || ! command -v zpool >/dev/null 2>&1; then
+	fail_config "zfs/zpool commands are not available." "Install/enable ZFS on this server, then run again."
+fi
+
+IFS=',' read -r -a raw_pairs <<<"$DATASETS"
+declare -a pairs=()
+for raw_pair in "${raw_pairs[@]}"; do
+	pair="$(trim "$raw_pair")"
+	[[ -z "$pair" ]] && continue
+
+	if [[ "$pair" != *:* ]]; then
+		fail_config "Bad DATASETS entry '$pair'." "Each entry must look like dataset:threshold (example: tank/media:100G)."
+	fi
+
+	ds="$(trim "${pair%:*}")"
+	thresh="$(trim "${pair##*:}")"
+
+	if [[ -z "$ds" || -z "$thresh" ]]; then
+		fail_config "Bad DATASETS entry '$pair'." "Each entry must include both dataset and threshold."
+	fi
+
+	if [[ ! "$ds" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+		fail_config "Dataset name '$ds' contains unsupported characters." "Use standard ZFS dataset paths like pool/name or pool/path/name."
+	fi
+
+	pairs+=("$ds:$thresh")
+done
+
+if ((${#pairs[@]} == 0)); then
+	fail_config "No datasets are configured." "Select at least one dataset in settings, then save."
+fi
+
+NOW_EPOCH="$(date +%s)"
 KEEP_ALL_FOR_SECONDS=$((KEEP_ALL_FOR_DAYS * 86400))
 KEEP_DAILY_UNTIL_SECONDS=$((KEEP_DAILY_UNTIL_DAYS * 86400))
 KEEP_WEEKLY_UNTIL_SECONDS=$((KEEP_WEEKLY_UNTIL_DAYS * 86400))
-NOW_EPOCH="$(date +%s)"
 
-if (( DRY_RUN )); then
-  run_mode="dry-run"
-else
-  run_mode="normal"
-fi
-
-RUN_STARTED_AT_EPOCH="$NOW_EPOCH"
-RUN_STARTED_AT_HUMAN="$(date +'%Y-%m-%d %H:%M:%S %Z')"
-RUN_MODE="$run_mode"
-
-log "${LOG_RUN_MARKER} ts=$(date +'%Y-%m-%d %H:%M:%S %Z') pid=$$ mode=${run_mode}"
+log "${LOG_RUN_MARKER} ts=$(date +'%Y-%m-%d %H:%M:%S %Z') pid=$$ mode=${RUN_MODE}"
 log "Config: datasets='${DATASETS}' prefix='${PREFIX}' dry_run=${DRY_RUN}"
 log "Retention(days): keep_all=${KEEP_ALL_FOR_DAYS} keep_daily_until=${KEEP_DAILY_UNTIL_DAYS} keep_weekly_until=${KEEP_WEEKLY_UNTIL_DAYS}"
 log "Logs: debug='${LOG_FILE}' summary='${SUMMARY_LOG_FILE}'"
@@ -437,14 +598,14 @@ declare -a pool_thresholds=()
 
 # Phase A: time-based cleanup + compute per-pool thresholds
 for pair in "${pairs[@]}"; do
-  ds="${pair%:*}"
-  thresh="${pair##*:}"
+	ds="${pair%:*}"
+	thresh="${pair##*:}"
 
-  pool="${ds%%/*}"
-  thresh_bytes="$(threshold_to_bytes "$thresh")"
-  upsert_pool_threshold "$pool" "$thresh_bytes"
+	pool="${ds%%/*}"
+	thresh_bytes="$(threshold_to_bytes "$thresh")"
+	upsert_pool_threshold "$pool" "$thresh_bytes"
 
-  time_clean_dataset "$ds"
+	time_clean_dataset "$ds"
 done
 
 RUN_DATASET_COUNT="${#pairs[@]}"
@@ -453,55 +614,60 @@ log "Prepared ${RUN_DATASET_COUNT} dataset entries across ${RUN_POOL_COUNT} pool
 
 # Phase B: space-based cleanup for each pool
 for i in "${!pool_names[@]}"; do
-  pool="${pool_names[$i]}"
-  min_free="${pool_thresholds[$i]}"
+	pool="${pool_names[$i]}"
+	min_free="${pool_thresholds[$i]}"
 
-  while :; do
-    avail="$(get_pool_avail "$pool")"
-    freeing="$(get_pool_freeing "$pool")"
-    effective_avail=$((avail + freeing))
-    log "Pool $pool check: avail=${avail} freeing=${freeing} effective=${effective_avail} min_required=${min_free}"
+	while :; do
+		avail="$(get_pool_avail "$pool")"
+		if [[ -z "$avail" ]]; then
+			log "Pool $pool check failed: unable to read available space. Skipping low-space cleanup for this pool."
+			break
+		fi
 
-    if (( effective_avail >= min_free )); then
-      log "Pool $pool OK: effective_avail=$effective_avail bytes (>= $min_free)."
-      break
-    fi
+		freeing="$(get_pool_freeing "$pool")"
+		effective_avail=$((avail + freeing))
+		log "Pool $pool check: avail=${avail} freeing=${freeing} effective=${effective_avail} min_required=${min_free}"
 
-    snapshot_list=""
-    for pair in "${pairs[@]}"; do
-      ds="${pair%:*}"
-      this_pool="${ds%%/*}"
-      [[ "$this_pool" != "$pool" ]] && continue
+		if ((effective_avail >= min_free)); then
+			log "Pool $pool OK: effective_avail=$effective_avail bytes (>= $min_free)."
+			break
+		fi
 
-      snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$ds" | grep -F "@${PREFIX}" || true)"
-      [[ -n "$snaps" ]] && snapshot_list+="$snaps"$'\n'
-    done
+		snapshot_list=""
+		for pair in "${pairs[@]}"; do
+			ds="${pair%:*}"
+			this_pool="${ds%%/*}"
+			[[ "$this_pool" != "$pool" ]] && continue
 
-    if [[ -z "$snapshot_list" ]]; then
-      log "Pool $pool low on space, but no ${PREFIX} snapshots remain for listed datasets."
-      break
-    fi
+			snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$ds" | grep -F "@${PREFIX}" || true)"
+			[[ -n "$snaps" ]] && snapshot_list+="$snaps"$'\n'
+		done
 
-    oldest_snap="$(pick_oldest_snapshot "$snapshot_list")"
+		if [[ -z "$snapshot_list" ]]; then
+			log "Pool $pool low on space, but no ${PREFIX} snapshots remain for listed datasets."
+			break
+		fi
 
-    if [[ -z "$oldest_snap" ]]; then
-      log "Pool $pool low on space, but couldn't parse an eligible snapshot entry."
-      break
-    fi
+		oldest_snap="$(pick_oldest_snapshot "$snapshot_list")"
 
-    log "Pool $pool low on space -> deleting oldest eligible snapshot: $oldest_snap"
-    do_destroy "$oldest_snap" "space_pressure"
-  done
+		if [[ -z "$oldest_snap" ]]; then
+			log "Pool $pool low on space, but couldn't parse an eligible snapshot entry."
+			break
+		fi
+
+		log "Pool $pool low on space -> deleting oldest eligible snapshot: $oldest_snap"
+		do_destroy "$oldest_snap" "space_pressure"
+	done
 done
 
 # Phase C: create new snapshots
 timestamp="$(date +%Y-%m-%d_%H-%M-%S)"
 
 for pair in "${pairs[@]}"; do
-  ds="${pair%:*}"
-  new_snap="$ds@${PREFIX}${timestamp}"
-  log "Creating snapshot: $new_snap"
-  do_snapshot "$new_snap"
+	ds="${pair%:*}"
+	new_snap="$ds@${PREFIX}${timestamp}"
+	log "Creating snapshot: $new_snap"
+	do_snapshot "$new_snap"
 done
 
 log "Snapshot management complete."
