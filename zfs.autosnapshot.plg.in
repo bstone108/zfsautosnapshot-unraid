@@ -2,6 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Testing branch experiment: log viewer now uses a live stream transport first, with automatic fallback to refresh mode if streaming fails.
 - Fixed Run Now failures caused by missing CSRF token handling, including clearer session-expired guidance.
 - Hardened config loading for the snapshot engine and scheduler by replacing shell sourcing with safe key/value parsing.
 - Added stricter safety validation for prefix/config values, with plain-English failure guidance in the latest run summary.

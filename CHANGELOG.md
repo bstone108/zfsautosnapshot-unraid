@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.20.2 (Testing Branch Only)
+
+- First testing-branch experiment: live log streaming transport (with automatic fallback to refresh mode if streaming fails).
+- No merge to main from this build without explicit approval.
+
 ### 2026.02.20.1 (2026-02-20)
 
 - Fixed the Run Now button failing with "Invalid JSON response" by sending the required Unraid security token on manual-run requests.

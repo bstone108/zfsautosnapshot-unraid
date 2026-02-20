@@ -4,6 +4,7 @@ $configDir = "/boot/config/plugins/{$pluginName}";
 $configFile = "{$configDir}/zfs_autosnapshot.conf";
 $syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
 $logApiUrl = "/plugins/{$pluginName}/php/log-tail.php";
+$logStreamApiUrl = "/plugins/{$pluginName}/php/log-stream.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
 $logPollIntervalMs = 2000;
 
@@ -1373,10 +1374,12 @@ if ($resolvedCron === '') {
 
   var logPollIntervalMs = <?php echo (int) $logPollIntervalMs; ?>;
   var logApiUrl = <?php echo json_encode($logApiUrl); ?>;
+  var logStreamApiUrl = <?php echo json_encode($logStreamApiUrl); ?>;
   var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
   var logView = 'summary';
   var logPaused = false;
   var logTimer = null;
+  var logStreamSource = null;
   var logFingerprint = '';
 
   function pad2(value) {
@@ -1559,6 +1562,19 @@ if ($resolvedCron === '') {
     return url + '&_=' + Date.now();
   }
 
+  function buildLogStreamUrl() {
+    var linesEl = byId('log_lines');
+    var lines = linesEl ? parseInt(linesEl.value, 10) : 400;
+    if (isNaN(lines) || lines < 50) {
+      lines = 400;
+    }
+
+    return logStreamApiUrl
+      + '?type=' + encodeURIComponent(logView)
+      + '&lines=' + encodeURIComponent(lines)
+      + '&_=' + Date.now();
+  }
+
   function buildLogFingerprint(data, content) {
     var head = content.slice(0, 128);
     var tail = content.slice(-128);
@@ -1567,6 +1583,54 @@ if ($resolvedCron === '') {
       + ':' + String(content.length)
       + ':' + head
       + ':' + tail;
+  }
+
+  function applyLogPayload(data, forceScrollToBottom) {
+    var outputEl = byId('log_output');
+    if (!outputEl) {
+      return;
+    }
+
+    if (!data || data.ok !== true) {
+      setLogStatus('Log refresh failed: Unexpected response payload.', true);
+      return;
+    }
+
+    var shouldFollowTail = !!forceScrollToBottom || (outputEl.scrollTop + outputEl.clientHeight >= outputEl.scrollHeight - 40);
+    var content = '';
+    if (!data.exists) {
+      if (logView === 'debug') {
+        content = 'Debug log does not exist yet. Start a run and this view will populate.';
+      } else {
+        content = 'Run summary is not available yet. Start a run and this view will populate.';
+      }
+    } else if (!data.readable) {
+      content = 'Selected log file exists but is not readable by the web UI process.';
+    } else if (!data.content) {
+      if (logView === 'debug') {
+        content = 'Debug log is currently empty.';
+      } else {
+        content = 'Run summary is currently empty.';
+      }
+    } else {
+      content = data.content;
+      if (data.truncated) {
+        content = '[Showing the latest portion of the selected log]\n' + content;
+      }
+    }
+
+    var fingerprint = buildLogFingerprint(data, content);
+    if (fingerprint !== logFingerprint || forceScrollToBottom) {
+      outputEl.textContent = content;
+      logFingerprint = fingerprint;
+    }
+
+    if (shouldFollowTail) {
+      outputEl.scrollTop = outputEl.scrollHeight;
+    }
+
+    var prefix = logPaused ? 'Paused' : 'Live';
+    setLogStatus(prefix + ' ' + currentLogViewLabel() + ' | Last refresh: ' + new Date().toLocaleTimeString(), false);
   }
 
   function requestJson(url, onSuccess, onError) {
@@ -1666,51 +1730,12 @@ if ($resolvedCron === '') {
       return;
     }
 
-    var shouldFollowTail = !!forceScrollToBottom || (outputEl.scrollTop + outputEl.clientHeight >= outputEl.scrollHeight - 40);
     setLogStatus((logPaused ? 'Paused' : 'Updating') + ' ' + currentLogViewLabel() + '...', false);
 
     requestJson(
       buildLogApiUrl(false),
       function (data) {
-        if (!data || data.ok !== true) {
-          setLogStatus('Log refresh failed: Unexpected response payload.', true);
-          return;
-        }
-
-        var content = '';
-        if (!data.exists) {
-          if (logView === 'debug') {
-            content = 'Debug log does not exist yet. Start a run and this view will populate.';
-          } else {
-            content = 'Run summary is not available yet. Start a run and this view will populate.';
-          }
-        } else if (!data.readable) {
-          content = 'Selected log file exists but is not readable by the web UI process.';
-        } else if (!data.content) {
-          if (logView === 'debug') {
-            content = 'Debug log is currently empty.';
-          } else {
-            content = 'Run summary is currently empty.';
-          }
-        } else {
-          content = data.content;
-          if (data.truncated) {
-            content = '[Showing the latest portion of the selected log]\n' + content;
-          }
-        }
-
-        var fingerprint = buildLogFingerprint(data, content);
-        if (fingerprint !== logFingerprint || forceScrollToBottom) {
-          outputEl.textContent = content;
-          logFingerprint = fingerprint;
-        }
-
-        if (shouldFollowTail) {
-          outputEl.scrollTop = outputEl.scrollHeight;
-        }
-
-        var prefix = logPaused ? 'Paused' : 'Live';
-        setLogStatus(prefix + ' ' + currentLogViewLabel() + ' | Last refresh: ' + new Date().toLocaleTimeString(), false);
+        applyLogPayload(data, forceScrollToBottom);
       },
       function (error) {
         setLogStatus('Log refresh failed: ' + error.message, true);
@@ -1718,10 +1743,15 @@ if ($resolvedCron === '') {
     );
   }
 
-  function startLogPolling() {
+  function stopLogPolling() {
     if (logTimer !== null) {
       clearInterval(logTimer);
+      logTimer = null;
     }
+  }
+
+  function startLogPolling() {
+    stopLogPolling();
 
     logTimer = setInterval(function () {
       if (logPaused) {
@@ -1729,6 +1759,66 @@ if ($resolvedCron === '') {
       }
       fetchLiveLog(false);
     }, logPollIntervalMs);
+  }
+
+  function stopLogStream() {
+    if (logStreamSource) {
+      logStreamSource.close();
+      logStreamSource = null;
+    }
+  }
+
+  function startLogStream() {
+    if (typeof window.EventSource !== 'function') {
+      return false;
+    }
+
+    stopLogStream();
+    stopLogPolling();
+
+    try {
+      logStreamSource = new EventSource(buildLogStreamUrl());
+    } catch (error) {
+      logStreamSource = null;
+      return false;
+    }
+
+    logStreamSource.onmessage = function (event) {
+      var payload;
+      try {
+        payload = JSON.parse(String(event.data || ''));
+      } catch (parseError) {
+        return;
+      }
+      applyLogPayload(payload, false);
+    };
+
+    logStreamSource.onerror = function () {
+      stopLogStream();
+      setLogStatus('Live stream interrupted. Falling back to refresh mode...', true);
+      startLogPolling();
+      fetchLiveLog(false);
+    };
+
+    return true;
+  }
+
+  function restartLogTransport(forceScrollToBottom) {
+    stopLogStream();
+    stopLogPolling();
+
+    if (logPaused) {
+      setLogStatus('Paused.', false);
+      return;
+    }
+
+    logFingerprint = '';
+    if (!startLogStream()) {
+      startLogPolling();
+      fetchLiveLog(!!forceScrollToBottom);
+    } else if (forceScrollToBottom) {
+      fetchLiveLog(true);
+    }
   }
 
   ['schedule_mode', 'schedule_every_minutes', 'schedule_every_hours', 'schedule_daily_hour', 'schedule_daily_minute', 'schedule_weekly_day', 'schedule_weekly_hour', 'schedule_weekly_minute', 'custom_cron_schedule'].forEach(function (id) {
@@ -1786,8 +1876,10 @@ if ($resolvedCron === '') {
       logPaused = !logPaused;
       logToggleBtn.textContent = logPaused ? 'Resume Live View' : 'Pause Live View';
       if (!logPaused) {
-        fetchLiveLog(true);
+        restartLogTransport(true);
       } else {
+        stopLogStream();
+        stopLogPolling();
         setLogStatus('Paused.', false);
       }
     });
@@ -1799,7 +1891,7 @@ if ($resolvedCron === '') {
       logView = (logView === 'debug') ? 'summary' : 'debug';
       logFingerprint = '';
       refreshLogViewControls();
-      fetchLiveLog(true);
+      restartLogTransport(true);
     });
   }
 
@@ -1820,7 +1912,7 @@ if ($resolvedCron === '') {
   var logLinesSelect = byId('log_lines');
   if (logLinesSelect) {
     logLinesSelect.addEventListener('change', function () {
-      fetchLiveLog(true);
+      restartLogTransport(true);
     });
   }
 
@@ -1856,7 +1948,7 @@ if ($resolvedCron === '') {
           if (logToggleBtn) {
             logToggleBtn.textContent = 'Pause Live View';
           }
-          fetchLiveLog(true);
+          restartLogTransport(true);
         },
         function (error) {
           manualRunBusy = false;
@@ -1873,15 +1965,12 @@ if ($resolvedCron === '') {
   refreshLogViewControls();
 
   if (byId('log_output')) {
-    fetchLiveLog(true);
-    startLogPolling();
+    restartLogTransport(true);
   }
 
   window.addEventListener('beforeunload', function () {
-    if (logTimer !== null) {
-      clearInterval(logTimer);
-      logTimer = null;
-    }
+    stopLogStream();
+    stopLogPolling();
   });
 })();
 </script>
