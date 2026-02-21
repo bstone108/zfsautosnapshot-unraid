@@ -1347,12 +1347,13 @@ if ($resolvedCron === '') {
       <div class="zfsas-help">
         Default view shows a concise one-run summary from <code><?php echo h($summaryLogFile); ?></code>.
         Use "Show Debug Log" to inspect the verbose debug log at <code><?php echo h($debugLogFile); ?></code>.
+        "Download Logs" exports both logs in one text file.
       </div>
       <div class="zfsas-log-toolbar">
         <button type="button" class="btn" id="log_view_toggle">Show Debug Log</button>
         <button type="button" class="btn" id="log_toggle">Pause Live View</button>
         <button type="button" class="btn" id="log_refresh">Refresh Now</button>
-        <button type="button" class="btn" id="log_download">Download Current Log</button>
+        <button type="button" class="btn" id="log_download">Download Logs</button>
         <select id="log_lines" class="zfsas-select">
           <option value="200">Last 200 lines</option>
           <option value="400" selected>Last 400 lines</option>
@@ -1545,6 +1546,10 @@ if ($resolvedCron === '') {
   }
 
   function buildLogApiUrl(download) {
+    if (download) {
+      return logApiUrl + '?download=1&_=' + Date.now();
+    }
+
     var linesEl = byId('log_lines');
     var lines = linesEl ? parseInt(linesEl.value, 10) : 400;
     if (isNaN(lines) || lines < 50) {
@@ -1554,10 +1559,6 @@ if ($resolvedCron === '') {
     var url = logApiUrl
       + '?type=' + encodeURIComponent(logView)
       + '&lines=' + encodeURIComponent(lines);
-
-    if (download) {
-      return url + '&download=1&_=' + Date.now();
-    }
 
     return url + '&_=' + Date.now();
   }

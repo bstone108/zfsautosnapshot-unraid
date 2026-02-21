@@ -56,34 +56,51 @@ function resolveLogTypeAndFile($requestedType, $summaryLogFile, $debugLogFile)
 {
     $type = strtolower(trim((string) $requestedType));
     if ($type === 'debug') {
-        return ['debug', $debugLogFile, 'zfs_autosnapshot_debug.log'];
+        return ['debug', $debugLogFile];
     }
 
-    return ['summary', $summaryLogFile, 'zfs_autosnapshot_last_run.log'];
+    return ['summary', $summaryLogFile];
 }
 
-list($logType, $logFile, $downloadName) = resolveLogTypeAndFile($_GET['type'] ?? 'summary', $summaryLogFile, $debugLogFile);
-
-$download = isset($_GET['download']) && (string) $_GET['download'] === '1';
-if ($download) {
-    if (!is_file($logFile) || !is_readable($logFile)) {
-        if (!headers_sent()) {
-            http_response_code(404);
-            header('Content-Type: text/plain; charset=UTF-8');
-            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-            header('Pragma: no-cache');
-        }
-        echo "Requested log file is not available.\n";
-        exit;
+function streamLogSection($title, $path)
+{
+    echo "===== {$title} ({$path}) =====\n";
+    if (!is_file($path)) {
+        echo "Log file is not present.\n";
+        return;
     }
+    if (!is_readable($path)) {
+        echo "Log file exists but is not readable.\n";
+        return;
+    }
+    readfile($path);
+    if (@filesize($path) > 0) {
+        echo "\n";
+    }
+}
 
+function downloadCombinedLogs($debugLogFile, $summaryLogFile)
+{
     if (!headers_sent()) {
         header('Content-Type: text/plain; charset=UTF-8');
-        header('Content-Disposition: attachment; filename="' . $downloadName . '"');
+        header('Content-Disposition: attachment; filename="zfs_autosnapshot_logs.txt"');
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');
     }
-    readfile($logFile);
+
+    echo "ZFS Auto Snapshot Log Export\n";
+    echo "Generated: " . gmdate('Y-m-d H:i:s') . " UTC\n\n";
+
+    streamLogSection('Debug Log', $debugLogFile);
+    echo "\n";
+    streamLogSection('Latest Run Summary', $summaryLogFile);
+}
+
+list($logType, $logFile) = resolveLogTypeAndFile($_GET['type'] ?? 'summary', $summaryLogFile, $debugLogFile);
+
+$download = isset($_GET['download']) && (string) $_GET['download'] === '1';
+if ($download) {
+    downloadCombinedLogs($debugLogFile, $summaryLogFile);
     exit;
 }
 

@@ -16,6 +16,7 @@ set -Eeuo pipefail
 
 CONFIG_DIR="/boot/config/plugins/zfs.autosnapshot"
 CONFIG_FILE="${CONFIG_FILE:-$CONFIG_DIR/zfs_autosnapshot.conf}"
+PLUGIN_NAME="zfs.autosnapshot"
 
 # -----------------------------------------------------------------------------
 # Defaults (can be overridden in config file)
@@ -221,7 +222,7 @@ do_destroy() {
 
 destroy_with_watchdog() {
 	local snap="$1"
-	local pid start now elapsed
+	local pid start now elapsed wait_rc
 
 	zfs destroy "$snap" &
 	pid=$!
@@ -238,16 +239,29 @@ destroy_with_watchdog() {
 			kill -9 "$pid" >/dev/null 2>&1 || true
 			wait "$pid" 2>/dev/null || true
 
+			RUN_ERROR_CONTEXT="zfs destroy timed out for '$snap' after ${DESTROY_HANG_TIMEOUT_SECONDS}s"
 			set_user_failure \
 				"Snapshot deletion did not finish within ${DESTROY_HANG_TIMEOUT_SECONDS} seconds, so this run stopped to avoid hanging." \
 				"Let I/O pressure drop, then wait for the next scheduled run (or run manually) to continue cleanup."
-			exit 1
+			die "Snapshot destroy timed out for '$snap' after ${DESTROY_HANG_TIMEOUT_SECONDS}s."
 		fi
 
 		sleep 1
 	done
 
-	wait "$pid"
+	if wait "$pid"; then
+		wait_rc=0
+	else
+		wait_rc=$?
+	fi
+
+	if ((wait_rc != 0)); then
+		RUN_ERROR_CONTEXT="zfs destroy failed for '$snap' (exit ${wait_rc})"
+		set_user_failure \
+			"Snapshot deletion failed for '$snap' because ZFS returned an internal error." \
+			"Check Tools > System Log for ZFS errors, run 'zpool status', then run again."
+		die "Snapshot destroy command failed for '$snap' (exit ${wait_rc})."
+	fi
 }
 
 do_snapshot() {
@@ -257,7 +271,13 @@ do_snapshot() {
 		log "[DRY_RUN] zfs snapshot '$snap'"
 		COUNT_CREATED=$((COUNT_CREATED + 1))
 	else
-		zfs snapshot "$snap"
+		if ! zfs snapshot "$snap"; then
+			RUN_ERROR_CONTEXT="zfs snapshot failed for '$snap'"
+			set_user_failure \
+				"Snapshot creation failed for '$snap'." \
+				"Check dataset health and free space, then run again."
+			die "Snapshot create command failed for '$snap'."
+		fi
 		COUNT_CREATED=$((COUNT_CREATED + 1))
 	fi
 }
@@ -297,6 +317,108 @@ get_pool_freeing() {
 	local value
 	value="$(zpool get -H -o value freeing "$1" 2>/dev/null || true)"
 	[[ "$value" =~ ^[0-9]+$ ]] && echo "$value" || echo 0
+}
+
+detect_plugin_version() {
+	local manifest_path version
+
+	for manifest_path in "/var/log/plugins/${PLUGIN_NAME}.plg" "/boot/config/plugins/${PLUGIN_NAME}.plg"; do
+		[[ -r "$manifest_path" ]] || continue
+		version="$(sed -n 's/.*<PLUGIN[^>]*version="\([^"]\+\)".*/\1/p' "$manifest_path" | head -n 1)"
+		version="$(trim "$version")"
+		if [[ -n "$version" ]]; then
+			echo "$version"
+			return 0
+		fi
+	done
+
+	echo "unknown"
+}
+
+detect_unraid_version() {
+	local value
+
+	if [[ -r /etc/unraid-version ]]; then
+		value="$(awk -F= '
+      /^[[:space:]]*version[[:space:]]*=/ {
+        gsub(/"/, "", $2)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+        print $2
+        exit
+      }
+    ' /etc/unraid-version 2>/dev/null || true)"
+		value="$(trim "$value")"
+		if [[ -n "$value" ]]; then
+			echo "$value"
+			return 0
+		fi
+
+		value="$(head -n 1 /etc/unraid-version 2>/dev/null || true)"
+		value="$(trim "$value")"
+		if [[ -n "$value" ]]; then
+			echo "$value"
+			return 0
+		fi
+	fi
+
+	if [[ -r /etc/os-release ]]; then
+		value="$(awk -F= '/^PRETTY_NAME=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null || true)"
+		value="$(trim "$value")"
+		if [[ -n "$value" ]]; then
+			echo "$value"
+			return 0
+		fi
+	fi
+
+	echo "unknown"
+}
+
+detect_zfs_version() {
+	local value
+	value="$(zfs version 2>/dev/null || zfs --version 2>/dev/null || true)"
+	value="$(printf '%s' "$value" | tr '\n' ';' | sed 's/;[[:space:]]*/; /g; s/[[:space:];]*$//')"
+	value="$(trim "$value")"
+	[[ -n "$value" ]] && echo "$value" || echo "unknown"
+}
+
+detect_zpool_version() {
+	local value
+	value="$(zpool version 2>/dev/null || zpool --version 2>/dev/null || true)"
+	value="$(printf '%s' "$value" | tr '\n' ';' | sed 's/;[[:space:]]*/; /g; s/[[:space:];]*$//')"
+	value="$(trim "$value")"
+	[[ -n "$value" ]] && echo "$value" || echo "unknown"
+}
+
+log_runtime_environment() {
+	local plugin_version unraid_version zfs_version zpool_version host_name
+	local kernel_info bash_info user_name user_id tz_name path_zfs path_zpool pool_overview line
+
+	plugin_version="$(detect_plugin_version)"
+	unraid_version="$(detect_unraid_version)"
+	zfs_version="$(detect_zfs_version)"
+	zpool_version="$(detect_zpool_version)"
+	host_name="$(hostname 2>/dev/null || echo unknown)"
+	kernel_info="$(uname -srmo 2>/dev/null || uname -sr 2>/dev/null || echo unknown)"
+	bash_info="${BASH_VERSION:-unknown}"
+	user_name="$(id -un 2>/dev/null || echo unknown)"
+	user_id="$(id -u 2>/dev/null || echo unknown)"
+	tz_name="$(date +%Z 2>/dev/null || echo unknown)"
+	path_zfs="$(command -v zfs 2>/dev/null || echo missing)"
+	path_zpool="$(command -v zpool 2>/dev/null || echo missing)"
+
+	log "Environment: host='${host_name}' user='${user_name}' uid='${user_id}' timezone='${tz_name}'"
+	log "Environment: kernel='${kernel_info}' bash='${bash_info}'"
+	log "Versions: plugin='${plugin_version}' unraid='${unraid_version}' zfs='${zfs_version}' zpool='${zpool_version}'"
+	log "Commands: zfs='${path_zfs}' zpool='${path_zpool}' script='${BASH_SOURCE[0]}'"
+
+	pool_overview="$(zpool list -H -o name,size,alloc,free,capacity,health 2>/dev/null || true)"
+	if [[ -n "$pool_overview" ]]; then
+		log "Pools(name size alloc free cap health):"
+		while IFS= read -r line; do
+			[[ -n "$line" ]] || continue
+			log "  ${line}"
+		done <<<"$pool_overview"
+	fi
 }
 
 upsert_pool_threshold() {
@@ -622,6 +744,7 @@ KEEP_DAILY_UNTIL_SECONDS=$((KEEP_DAILY_UNTIL_DAYS * 86400))
 KEEP_WEEKLY_UNTIL_SECONDS=$((KEEP_WEEKLY_UNTIL_DAYS * 86400))
 
 log "${LOG_RUN_MARKER} ts=$(date +'%Y-%m-%d %H:%M:%S %Z') pid=$$ mode=${RUN_MODE}"
+log_runtime_environment
 log "Config: datasets='${DATASETS}' prefix='${PREFIX}' dry_run=${DRY_RUN}"
 log "Retention(days): keep_all=${KEEP_ALL_FOR_DAYS} keep_daily_until=${KEEP_DAILY_UNTIL_DAYS} keep_weekly_until=${KEEP_WEEKLY_UNTIL_DAYS}"
 log "Logs: debug='${LOG_FILE}' summary='${SUMMARY_LOG_FILE}'"

@@ -1,7 +1,10 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.20.3" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.21.1" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.20.3 (2026-02-21)
+### 2026.02.21.1 (2026-02-21)
+- Fixed delete-error handling so internal ZFS destroy failures now stop cleanly with clear user guidance.
+- Added richer debug run diagnostics: plugin/Unraid/ZFS versions, kernel/host/user info, and pool overview.
+- Changed log downloads to export both logs together (Debug + Latest Run Summary) in one text file.
 - Added a delete watchdog: if one snapshot deletion runs longer than 120 seconds, the run exits with clear guidance so the next schedule can retry.
 - Testing branch experiment: log viewer now uses a live stream transport first, with automatic fallback to refresh mode if streaming fails.
 - Fixed Run Now failures caused by missing CSRF token handling, including clearer session-expired guidance.
@@ -11,7 +14,7 @@
 - Removed obsolete legacy settings-page log API code and improved log refresh change detection reliability.
 - Added a "Run Now" button in settings for one-click manual execution.
 - Added dual log mode in WebUI: concise latest-run summary by default, with a debug toggle for the verbose log.
-- Added "Download Current Log" in WebUI for either summary or debug view.
+- Added combined log download support in WebUI.
 - Snapshot engine now writes a one-run summary file (`/var/log/zfs_autosnapshot.last.log`) with created/deleted totals by category.
 - Fixed a low-space cleanup crash (`sort` broken pipe) that could stop a run early while deleting old snapshots.
 - Installed Plugins page now uses the custom plugin icon instead of the generic icon.
@@ -46,9 +49,9 @@
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.20.3-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.02.20.3-noarch-1.txz</URL>
-    <MD5>6f647c827187c4caf51693d676540edb</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.21.1-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.02.21.1-noarch-1.txz</URL>
+    <MD5>701796e0283207550b1b541d4a427b73</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -56,10 +59,10 @@
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.20.3-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.21.1-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="6f647c827187c4caf51693d676540edb"
+PKG_MD5="701796e0283207550b1b541d4a427b73"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then

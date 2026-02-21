@@ -2,6 +2,9 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Fixed delete-error handling so internal ZFS destroy failures now stop cleanly with clear user guidance.
+- Added richer debug run diagnostics: plugin/Unraid/ZFS versions, kernel/host/user info, and pool overview.
+- Changed log downloads to export both logs together (Debug + Latest Run Summary) in one text file.
 - Added a delete watchdog: if one snapshot deletion runs longer than 120 seconds, the run exits with clear guidance so the next schedule can retry.
 - Testing branch experiment: log viewer now uses a live stream transport first, with automatic fallback to refresh mode if streaming fails.
 - Fixed Run Now failures caused by missing CSRF token handling, including clearer session-expired guidance.
@@ -11,7 +14,7 @@
 - Removed obsolete legacy settings-page log API code and improved log refresh change detection reliability.
 - Added a "Run Now" button in settings for one-click manual execution.
 - Added dual log mode in WebUI: concise latest-run summary by default, with a debug toggle for the verbose log.
-- Added "Download Current Log" in WebUI for either summary or debug view.
+- Added combined log download support in WebUI.
 - Snapshot engine now writes a one-run summary file (`/var/log/zfs_autosnapshot.last.log`) with created/deleted totals by category.
 - Fixed a low-space cleanup crash (`sort` broken pipe) that could stop a run early while deleting old snapshots.
 - Installed Plugins page now uses the custom plugin icon instead of the generic icon.

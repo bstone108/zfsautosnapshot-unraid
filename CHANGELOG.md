@@ -5,6 +5,13 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.21.1 (Testing Branch Only)
+
+- Fixed a run-stopping bug where internal ZFS delete failures could end the run without clear guidance.
+- Snapshot delete failures now stop cleanly with plain-English "what happened" and "what to do next" in the Latest Run Summary.
+- Added richer debug run details (plugin version, Unraid version, ZFS versions, kernel, host/user info, and pool health overview).
+- Changed log download behavior: one click now exports both logs together (Debug Log + Latest Run Summary) in a single text file.
+
 ### 2026.02.20.3 (Testing Branch Only)
 
 - Added a snapshot-delete watchdog: if a single delete runs longer than 2 minutes, the run exits so the next scheduled run can retry.
