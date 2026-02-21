@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.21.4 (2026-02-21)
+
+- Updated official support metadata to use the Unraid forum support thread.
+- This completes the support-link requirement expected by Community Applications.
+
 ### 2026.02.21.2 (2026-02-21)
 
 - Improved publishing compatibility for plugin catalogs and Community Applications.
