@@ -39,6 +39,12 @@ Plugin URL:
 
 Detailed release history lives in `CHANGELOG.md`.
 
+## Support
+
+Issue tracker:
+
+`https://github.com/bstone108/zfsautosnapshot-unraid/issues`
+
 ## Scheduling
 
 The plugin supports human-friendly schedule modes:
@@ -76,6 +82,7 @@ This creates:
 
 - `dist/zfs-autosnapshot-<version>-noarch-1.txz`
 - `dist/zfs.autosnapshot.plg`
+- `dist/zfs-autosnapshot.png`
 - `zfs.autosnapshot.plg` (copied to repo root)
 
 Host both files at `<base_url>`, then install in Unraid using the generated `.plg` URL.
