@@ -41,9 +41,9 @@ Detailed release history lives in `CHANGELOG.md`.
 
 ## Support
 
-Issue tracker:
+Support thread:
 
-`https://github.com/bstone108/zfsautosnapshot-unraid/issues`
+`https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/`
 
 ## Scheduling
 
