@@ -5,6 +5,13 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.21.3 (Testing Branch Only)
+
+- Added Community Applications publishing metadata improvements to the testing branch.
+- Fixed plugin icon publishing path so plugin catalogs can load the custom icon reliably.
+- Testing release artifacts now include a standalone icon file in `dist/`.
+- Added explicit support URL metadata in the plugin manifest.
+
 ### 2026.02.21.1 (Testing Branch Only)
 
 - Fixed a run-stopping bug where internal ZFS delete failures could end the run without clear guidance.
