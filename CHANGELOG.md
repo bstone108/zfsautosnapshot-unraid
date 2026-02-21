@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.21.5 (Testing Branch Only)
+
+- Updated plugin support metadata to use the official Unraid forum support thread.
+- This improves Community Applications support-link compliance for the testing branch.
+
 ### 2026.02.21.3 (Testing Branch Only)
 
 - Added Community Applications publishing metadata improvements to the testing branch.
