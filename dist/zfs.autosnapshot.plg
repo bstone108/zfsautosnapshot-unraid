@@ -1,52 +1,23 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.20.1" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.02.21.2" icon="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
-### 2026.02.20.1 (2026-02-19)
-- Fixed Run Now failures caused by missing CSRF token handling, including clearer session-expired guidance.
-- Hardened config loading for the snapshot engine and scheduler by replacing shell sourcing with safe key/value parsing.
-- Added stricter safety validation for prefix/config values, with plain-English failure guidance in the latest run summary.
-- Improved lock cleanup reliability and low-space cleanup resilience when pool availability checks fail.
-- Removed obsolete legacy settings-page log API code and improved log refresh change detection reliability.
-- Added a "Run Now" button in settings for one-click manual execution.
-- Added dual log mode in WebUI: concise latest-run summary by default, with a debug toggle for the verbose log.
-- Added "Download Current Log" in WebUI for either summary or debug view.
-- Snapshot engine now writes a one-run summary file (`/var/log/zfs_autosnapshot.last.log`) with created/deleted totals by category.
-- Fixed a low-space cleanup crash (`sort` broken pipe) that could stop a run early while deleting old snapshots.
-- Installed Plugins page now uses the custom plugin icon instead of the generic icon.
-- Boot reliability fix: cron schedule is now auto-synced on server startup/array mount via `event/disks_mounted`.
-- Log retention improvement: each run writes a `[RUN_START]` marker and prunes the log to keep only the latest 2 runs.
-- Disabled-schedule safeguard: install/upgrade now explicitly removes the plugin cron file when `SCHEDULE_MODE=disabled`.
-- Install/upgrade now always refreshes cron runtime (`update_cron` + `crond` restart), so existing schedules activate without pressing Save.
-- Scheduler reliability fix: every schedule apply/disable now refreshes cron runtime and restarts `crond`.
-- Fixed macOS metadata pollution on fresh installs: build now disables AppleDouble archive metadata and post-install removes stray `._*` files.
-- Hardened fresh-install behavior: installer now enforces package install success and verifies package registration in `/var/log/packages`.
-- Added uninstall fallback cleanup for systems missing package DB entries from earlier installs.
-- Moved the Save Settings button above the Live Run Log panel for quicker access.
-- Fixed Live Run Log "Invalid JSON response" by moving log reads to a dedicated JSON endpoint (`/plugins/.../php/log-tail.php`).
-- Removed the extra "View Live Log" button under Dry Run.
-- Improved Live Run Log polling compatibility by using XHR transport.
-- Added the installed plugin version badge at the top of the settings page for quick verification.
-- Added a real-time log viewer in the WebUI so Dry Run output is visible live (including `[DRY_RUN]` actions).
-- Updated the Prefix help text to show the actual configured prefix value and clearer wording.
-- Installer now forces a cron sync immediately after package install so schedule changes apply without requiring a manual Save.
-- Fixed generated cron entry format for Unraid/BusyBox (`/etc/cron.d`) by removing the unsupported username column.
-- Adjusted Datasets card layout so the Dry Run checkbox sits on its own line under Snapshot prefix (prevents overlap).
-- Added new schedule mode: run every N minutes (1-59), alongside existing hourly/daily/weekly/custom options.
-- Improved dataset discovery to scan each pool individually and include both filesystems and zvols.
-- Redesigned dataset picker with pool filter dropdown, cleaner grouping, and quick select controls.
-- Fixed script execution format: install/remove `Run="/bin/bash"` blocks now use explicit `<INLINE><![CDATA[...]]></INLINE>`.
-- Simplified WebUI registration to a single `Menu="Utilities"` page (same model as User Scripts).
-- Fixed package download block to use explicit `&lt;URL&gt;` and `&lt;MD5&gt;` nodes required by current Unraid plugin installer.
-- Added resilient installer fallback: plugin install script now downloads and MD5-verifies package directly before `upgradepkg`.
-- Fixed install/remove script paths to use literal values (avoids unresolved XML entities in CDATA).
-- Web UI for dataset checkbox selection and retention settings.
-- Plain-English scheduling (minutes/hourly/daily/weekly/custom) with cron sync.
-- Time-based and space-based cleanup plus fresh snapshot creation.
+### 2026.02.21.2 (2026-02-21)
+- Publish-ready metadata update for plugin catalogs and Community Applications indexing.
+- Icon resolution is now explicit with an absolute icon URL in the plugin manifest.
+- Release packaging now includes a standalone icon file in `dist/` beside the `.plg`.
+- Added clear plugin description and support URL metadata for catalog consumers.
+- Core behavior remains unchanged: safe prefix-scoped deletions, retention cleanup, space-pressure cleanup, and scheduled snapshot creation.
   </CHANGES>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.20.1-noarch-1.txz" Min="6.11.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.20.1-noarch-1.txz</URL>
-    <MD5>4f3dfe07849f1d54f3f283f113d11938</MD5>
+  <DESCRIPTION>
+ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle management for Unraid. It keeps recent snapshots, consolidates older ones by day/week, and cleans up for low-space pressure using your configured prefix safeguards.
+  </DESCRIPTION>
+
+  <SUPPORT>https://github.com/bstone108/zfsautosnapshot-unraid/issues</SUPPORT>
+
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.02.21.2-noarch-1.txz" Min="6.11.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.02.21.2-noarch-1.txz</URL>
+    <MD5>7d8c9bee6502020928079f88ecaa2a8c</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -54,10 +25,10 @@
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.02.20.1-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.02.21.2-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="4f3dfe07849f1d54f3f283f113d11938"
+PKG_MD5="7d8c9bee6502020928079f88ecaa2a8c"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then

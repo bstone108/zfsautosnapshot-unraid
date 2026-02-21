@@ -5,6 +5,13 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.21.2 (2026-02-21)
+
+- Improved publishing compatibility for plugin catalogs and Community Applications.
+- Fixed plugin icon sourcing so the custom icon can resolve consistently outside the settings page.
+- Added clearer plugin metadata (description and support link) used by catalog consumers.
+- Release artifacts now include a standalone icon file next to the `.plg` and `.txz`.
+
 ### 2026.02.20.1 (2026-02-20)
 
 - Fixed the Run Now button failing with "Invalid JSON response" by sending the required Unraid security token on manual-run requests.
