@@ -2,6 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Added a delete watchdog: if one snapshot deletion runs longer than 120 seconds, the run exits with clear guidance so the next schedule can retry.
 - Testing branch experiment: log viewer now uses a live stream transport first, with automatic fallback to refresh mode if streaming fails.
 - Fixed Run Now failures caused by missing CSRF token handling, including clearer session-expired guidance.
 - Hardened config loading for the snapshot engine and scheduler by replacing shell sourcing with safe key/value parsing.

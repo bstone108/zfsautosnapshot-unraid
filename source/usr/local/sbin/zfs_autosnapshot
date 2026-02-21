@@ -34,6 +34,8 @@ LOG_FILE="${LOG_FILE:-/var/log/zfs_autosnapshot.log}"
 SUMMARY_LOG_FILE="${SUMMARY_LOG_FILE:-/var/log/zfs_autosnapshot.last.log}"
 LOG_RUN_MARKER="[RUN_START]"
 KEEP_LOG_RUNS="${KEEP_LOG_RUNS:-2}"
+# If a single snapshot destroy runs longer than this, treat it as hung and exit.
+DESTROY_HANG_TIMEOUT_SECONDS=120
 
 RUN_STARTED_AT_EPOCH=0
 RUN_STARTED_AT_HUMAN=""
@@ -212,9 +214,40 @@ do_destroy() {
 		log "[DRY_RUN] zfs destroy '$snap'"
 		increment_delete_counter "$reason"
 	else
-		zfs destroy "$snap"
+		destroy_with_watchdog "$snap"
 		increment_delete_counter "$reason"
 	fi
+}
+
+destroy_with_watchdog() {
+	local snap="$1"
+	local pid start now elapsed
+
+	zfs destroy "$snap" &
+	pid=$!
+	start="$(date +%s)"
+
+	while kill -0 "$pid" 2>/dev/null; do
+		now="$(date +%s)"
+		elapsed=$((now - start))
+
+		if ((elapsed >= DESTROY_HANG_TIMEOUT_SECONDS)); then
+			log "Snapshot destroy timed out after ${DESTROY_HANG_TIMEOUT_SECONDS}s: $snap"
+			kill "$pid" >/dev/null 2>&1 || true
+			sleep 1
+			kill -9 "$pid" >/dev/null 2>&1 || true
+			wait "$pid" 2>/dev/null || true
+
+			set_user_failure \
+				"Snapshot deletion did not finish within ${DESTROY_HANG_TIMEOUT_SECONDS} seconds, so this run stopped to avoid hanging." \
+				"Let I/O pressure drop, then wait for the next scheduled run (or run manually) to continue cleanup."
+			exit 1
+		fi
+
+		sleep 1
+	done
+
+	wait "$pid"
 }
 
 do_snapshot() {

@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.20.3 (Testing Branch Only)
+
+- Added a snapshot-delete watchdog: if a single delete runs longer than 2 minutes, the run exits so the next scheduled run can retry.
+- Intended to prevent a single hung deletion from blocking future scheduled runs.
+
 ### 2026.02.20.2 (Testing Branch Only)
 
 - First testing-branch experiment: live log streaming transport (with automatic fallback to refresh mode if streaming fails).
