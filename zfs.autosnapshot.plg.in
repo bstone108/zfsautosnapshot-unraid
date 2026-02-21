@@ -1,5 +1,5 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="__BASE_URL__/zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
 - Fixed delete-error handling so internal ZFS destroy failures now stop cleanly with clear user guidance.
@@ -48,6 +48,12 @@
 - Plain-English scheduling (minutes/hourly/daily/weekly/custom) with cron sync.
 - Time-based and space-based cleanup plus fresh snapshot creation.
   </CHANGES>
+
+  <DESCRIPTION>
+ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle management for Unraid. It keeps recent snapshots, consolidates older ones by day/week, and cleans up for low-space pressure using your configured prefix safeguards.
+  </DESCRIPTION>
+
+  <SUPPORT>https://github.com/bstone108/zfsautosnapshot-unraid/issues</SUPPORT>
 
   <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-__VERSION__-noarch-1.txz" Min="6.11.0">
     <URL>__BASE_URL__/zfs-autosnapshot-__VERSION__-noarch-1.txz</URL>

@@ -23,6 +23,8 @@ TEMPLATE="$ROOT_DIR/zfs.autosnapshot.plg.in"
 PKG_FILE="zfs-autosnapshot-${VERSION}-noarch-1.txz"
 PKG_PATH="$DIST_DIR/$PKG_FILE"
 PLG_PATH="$DIST_DIR/zfs.autosnapshot.plg"
+ICON_SRC="$SRC_DIR/usr/local/emhttp/plugins/zfs.autosnapshot/images/zfs-autosnapshot.png"
+ICON_DIST_PATH="$DIST_DIR/zfs-autosnapshot.png"
 
 mkdir -p "$DIST_DIR"
 
@@ -33,6 +35,11 @@ fi
 
 if [[ ! -f "$TEMPLATE" ]]; then
   echo "Missing plugin template: $TEMPLATE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$ICON_SRC" ]]; then
+  echo "Missing icon file: $ICON_SRC" >&2
   exit 1
 fi
 
@@ -75,11 +82,13 @@ sed \
   "$TEMPLATE" > "$PLG_PATH"
 
 cp -f "$PLG_PATH" "$ROOT_DIR/zfs.autosnapshot.plg"
+cp -f "$ICON_SRC" "$ICON_DIST_PATH"
 
 cat <<MSG
 Built release artifacts:
   $PKG_PATH
   $PLG_PATH
+  $ICON_DIST_PATH
   $ROOT_DIR/zfs.autosnapshot.plg
 
 Package MD5:
