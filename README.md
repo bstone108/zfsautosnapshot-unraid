@@ -35,6 +35,8 @@ Plugin URL:
 
 `https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg`
 
+Minimum Unraid version: `6.12.0` (first release series with native ZFS pools).
+
 ## Changelog
 
 Detailed release history lives in `CHANGELOG.md`.

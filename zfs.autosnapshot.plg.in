@@ -15,7 +15,7 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-__VERSION__-noarch-1.txz" Min="6.11.0">
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-__VERSION__-noarch-1.txz" Min="6.12.0">
     <URL>__BASE_URL__/zfs-autosnapshot-__VERSION__-noarch-1.txz</URL>
     <MD5>__PKG_MD5__</MD5>
   </FILE>
