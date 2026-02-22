@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.02.21.7 (Testing Branch Only)
+
+- Raised minimum supported Unraid version to `6.12.0` to match native ZFS availability.
+- Updated release metadata/docs accordingly.
+
 ### 2026.02.21.5 (Testing Branch Only)
 
 - Updated plugin support metadata to use the official Unraid forum support thread.
