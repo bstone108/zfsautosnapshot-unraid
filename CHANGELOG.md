@@ -5,6 +5,14 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.03.02.4 (Testing Branch Only)
+
+- Added safer automatic cleanup so the plugin now protects held or leased snapshots, always keeps the newest autosnapshot for each dataset, and skips deletes that cannot actually reclaim space.
+- Added zero-change snapshot housekeeping to remove older duplicate no-change snapshots while keeping the newest autosnapshot in place.
+- Improved low-space behavior so the plugin stops instead of churning through deletions when reclaim is blocked.
+- Improved the Installed Plugins page with a working custom icon, support link, cleaner description text, and a packaged README for display.
+- Removed machine name, username, UID, and timezone details from the debug log while keeping version and pool diagnostics.
+
 ### 2026.03.02.3 (Testing Branch Only)
 
 - Fixed Installed Plugins page metadata so the plugin now ships a plain-English description directly in the manifest.
