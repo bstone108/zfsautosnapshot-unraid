@@ -5,26 +5,60 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
-### 2026.03.02.1 (2026-03-02)
+### 2026.03.02.4 (2026-03-02)
 
-- New release packages now install with proper `root:root` ownership instead of carrying macOS build-machine ownership metadata.
+- Added safer automatic cleanup so the plugin now protects held or leased snapshots, always keeps the newest autosnapshot for each dataset, and skips deletes that cannot actually reclaim space.
+- Added zero-change snapshot housekeeping to remove older duplicate no-change snapshots while keeping the newest autosnapshot in place.
+- Improved low-space behavior so the plugin stops instead of churning through deletions when reclaim is blocked.
+- Improved the Installed Plugins page with a working custom icon, support link, cleaner description text, and a packaged README for display.
+- Removed machine name, username, UID, and timezone details from the debug log while keeping version and pool diagnostics.
 
-### 2026.02.21.6 (2026-02-21)
+### 2026.03.02.3 (Testing Branch Only)
+
+- Fixed Installed Plugins page metadata so the plugin now ships a plain-English description directly in the manifest.
+- Added an explicit support-forum link in the plugin manifest for the Installed Plugins page.
+- Switched the Installed Plugins page icon reference to the plugin's local web path instead of the remote raw GitHub image URL.
+
+### 2026.03.02.2 (Testing Branch Only)
+
+- New testing release packages now install with proper `root:root` ownership instead of carrying macOS build-machine ownership metadata.
+- Moved runtime lock handling out of world-writable `/tmp` and into a protected root-owned runtime directory.
+- Hard locked the debug/summary log locations so the plugin no longer trusts custom lock/log path overrides from config edits.
+- Tightened log-file safety checks and permissions while keeping the verbose debug information available in the WebUI and downloads.
+
+### 2026.02.21.7 (Testing Branch Only)
 
 - Raised minimum supported Unraid version to `6.12.0` to match native ZFS availability.
 - Updated release metadata/docs accordingly.
 
-### 2026.02.21.4 (2026-02-21)
+### 2026.02.21.5 (Testing Branch Only)
 
-- Updated official support metadata to use the Unraid forum support thread.
-- This completes the support-link requirement expected by Community Applications.
+- Updated plugin support metadata to use the official Unraid forum support thread.
+- This improves Community Applications support-link compliance for the testing branch.
 
-### 2026.02.21.2 (2026-02-21)
+### 2026.02.21.3 (Testing Branch Only)
 
-- Improved publishing compatibility for plugin catalogs and Community Applications.
-- Fixed plugin icon sourcing so the custom icon can resolve consistently outside the settings page.
-- Added clearer plugin metadata (description and support link) used by catalog consumers.
-- Release artifacts now include a standalone icon file next to the `.plg` and `.txz`.
+- Added Community Applications publishing metadata improvements to the testing branch.
+- Fixed plugin icon publishing path so plugin catalogs can load the custom icon reliably.
+- Testing release artifacts now include a standalone icon file in `dist/`.
+- Added explicit support URL metadata in the plugin manifest.
+
+### 2026.02.21.1 (Testing Branch Only)
+
+- Fixed a run-stopping bug where internal ZFS delete failures could end the run without clear guidance.
+- Snapshot delete failures now stop cleanly with plain-English "what happened" and "what to do next" in the Latest Run Summary.
+- Added richer debug run details (plugin version, Unraid version, ZFS versions, kernel, host/user info, and pool health overview).
+- Changed log download behavior: one click now exports both logs together (Debug Log + Latest Run Summary) in a single text file.
+
+### 2026.02.20.3 (Testing Branch Only)
+
+- Added a snapshot-delete watchdog: if a single delete runs longer than 2 minutes, the run exits so the next scheduled run can retry.
+- Intended to prevent a single hung deletion from blocking future scheduled runs.
+
+### 2026.02.20.2 (Testing Branch Only)
+
+- First testing-branch experiment: live log streaming transport (with automatic fallback to refresh mode if streaming fails).
+- No merge to main from this build without explicit approval.
 
 ### 2026.02.20.1 (2026-02-20)
 

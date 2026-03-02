@@ -1,8 +1,11 @@
 <?php
 $scriptPath = '/usr/local/sbin/zfs_autosnapshot';
 $debugLogFile = '/var/log/zfs_autosnapshot.log';
-$lockFile = '/tmp/zfs_autosnapshot.lock';
-$lockDir = '/tmp/zfs_autosnapshot.lockdir';
+$runtimeDir = '/var/run/zfs-autosnapshot';
+$lockFile = $runtimeDir . '/zfs_autosnapshot.lock';
+$lockDir = $runtimeDir . '/zfs_autosnapshot.lockdir';
+
+umask(0077);
 
 function sendJson($payload, $statusCode = 200)
 {
@@ -11,10 +14,81 @@ function sendJson($payload, $statusCode = 200)
         header('Content-Type: application/json; charset=UTF-8');
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');
+        header('X-Content-Type-Options: nosniff');
     }
 
     echo json_encode($payload);
     exit;
+}
+
+function ensureRuntimeDir($runtimeDir)
+{
+    clearstatcache(true, $runtimeDir);
+
+    if (is_link($runtimeDir)) {
+        return 'Runtime directory path is unsafe.';
+    }
+
+    if (file_exists($runtimeDir) && !is_dir($runtimeDir)) {
+        return 'Runtime directory path is not a directory.';
+    }
+
+    if (!file_exists($runtimeDir) && !@mkdir($runtimeDir, 0700, true) && !is_dir($runtimeDir)) {
+        return 'Unable to create runtime directory.';
+    }
+
+    @chmod($runtimeDir, 0700);
+    @chown($runtimeDir, 0);
+    @chgrp($runtimeDir, 0);
+    return null;
+}
+
+function ensureSafeRegularFile($path, $mode)
+{
+    clearstatcache(true, $path);
+
+    if (is_link($path)) {
+        return 'Requested file path is unsafe.';
+    }
+
+    $parent = dirname($path);
+    clearstatcache(true, $parent);
+
+    if (is_link($parent) || !is_dir($parent)) {
+        return 'Requested file parent directory is unsafe.';
+    }
+
+    if (file_exists($path) && !is_file($path)) {
+        return 'Requested file path is not a regular file.';
+    }
+
+    if (!file_exists($path) && !@touch($path)) {
+        return 'Unable to create the requested file.';
+    }
+
+    @chmod($path, $mode);
+    @chown($path, 0);
+    @chgrp($path, 0);
+    return null;
+}
+
+function isSafeRuntimePath($path, $expectDirectory = false)
+{
+    clearstatcache(true, $path);
+
+    if (is_link($path)) {
+        return false;
+    }
+
+    if (!file_exists($path)) {
+        return true;
+    }
+
+    if ($expectDirectory) {
+        return is_dir($path);
+    }
+
+    return is_file($path);
 }
 
 function isRunInProgress($lockFile, $lockDir)
@@ -54,6 +128,28 @@ if (!is_file($scriptPath) || !is_executable($scriptPath)) {
     sendJson([
         'ok' => false,
         'error' => 'Snapshot script is missing or not executable.',
+    ], 500);
+}
+
+$runtimeError = ensureRuntimeDir($runtimeDir);
+if ($runtimeError !== null) {
+    sendJson([
+        'ok' => false,
+        'error' => $runtimeError,
+    ], 500);
+}
+
+if (($logError = ensureSafeRegularFile($debugLogFile, 0600)) !== null) {
+    sendJson([
+        'ok' => false,
+        'error' => $logError,
+    ], 500);
+}
+
+if (!isSafeRuntimePath($lockFile, false) || !isSafeRuntimePath($lockDir, true)) {
+    sendJson([
+        'ok' => false,
+        'error' => 'Snapshot runtime paths are unsafe. Check the server filesystem and try again.',
     ], 500);
 }
 

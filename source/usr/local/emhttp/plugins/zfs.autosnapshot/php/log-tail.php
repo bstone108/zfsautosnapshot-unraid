@@ -9,10 +9,30 @@ function sendJson($payload, $statusCode = 200)
         header('Content-Type: application/json; charset=UTF-8');
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');
+        header('X-Content-Type-Options: nosniff');
     }
 
     echo json_encode($payload);
     exit;
+}
+
+function isSafeLogPath($path)
+{
+    clearstatcache(true, $path);
+
+    if (!is_string($path) || $path === '') {
+        return false;
+    }
+
+    if (is_link($path)) {
+        return false;
+    }
+
+    if (file_exists($path) && !is_file($path)) {
+        return false;
+    }
+
+    return true;
 }
 
 function tailFileLines($path, $lineCount, $maxBytes, &$wasTruncated = false)
@@ -56,41 +76,64 @@ function resolveLogTypeAndFile($requestedType, $summaryLogFile, $debugLogFile)
 {
     $type = strtolower(trim((string) $requestedType));
     if ($type === 'debug') {
-        return ['debug', $debugLogFile, 'zfs_autosnapshot_debug.log'];
+        return ['debug', $debugLogFile];
     }
 
-    return ['summary', $summaryLogFile, 'zfs_autosnapshot_last_run.log'];
+    return ['summary', $summaryLogFile];
 }
 
-list($logType, $logFile, $downloadName) = resolveLogTypeAndFile($_GET['type'] ?? 'summary', $summaryLogFile, $debugLogFile);
+function streamLogSection($title, $path)
+{
+    echo "===== {$title} =====\n";
+    if (!isSafeLogPath($path)) {
+        echo "Log file path is unavailable because it failed safety checks.\n";
+        return;
+    }
+    if (!is_file($path)) {
+        echo "Log file is not present.\n";
+        return;
+    }
+    if (!is_readable($path)) {
+        echo "Log file exists but is not readable.\n";
+        return;
+    }
+    readfile($path);
+    if (@filesize($path) > 0) {
+        echo "\n";
+    }
+}
+
+function downloadCombinedLogs($debugLogFile, $summaryLogFile)
+{
+    if (!headers_sent()) {
+        header('Content-Type: text/plain; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="zfs_autosnapshot_logs.txt"');
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        header('X-Content-Type-Options: nosniff');
+    }
+
+    echo "ZFS Auto Snapshot Log Export\n";
+    echo "Generated: " . gmdate('Y-m-d H:i:s') . " UTC\n\n";
+
+    streamLogSection('Debug Log', $debugLogFile);
+    echo "\n";
+    streamLogSection('Latest Run Summary', $summaryLogFile);
+}
+
+list($logType, $logFile) = resolveLogTypeAndFile($_GET['type'] ?? 'summary', $summaryLogFile, $debugLogFile);
 
 $download = isset($_GET['download']) && (string) $_GET['download'] === '1';
 if ($download) {
-    if (!is_file($logFile) || !is_readable($logFile)) {
-        if (!headers_sent()) {
-            http_response_code(404);
-            header('Content-Type: text/plain; charset=UTF-8');
-            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-            header('Pragma: no-cache');
-        }
-        echo "Requested log file is not available.\n";
-        exit;
-    }
-
-    if (!headers_sent()) {
-        header('Content-Type: text/plain; charset=UTF-8');
-        header('Content-Disposition: attachment; filename="' . $downloadName . '"');
-        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-        header('Pragma: no-cache');
-    }
-    readfile($logFile);
+    downloadCombinedLogs($debugLogFile, $summaryLogFile);
     exit;
 }
 
 $lineCount = (int) ($_GET['lines'] ?? 400);
 $maxBytes = ($logType === 'debug') ? 500000 : 50000;
-$exists = is_file($logFile);
-$readable = is_readable($logFile);
+$safe = isSafeLogPath($logFile);
+$exists = ($safe && is_file($logFile));
+$readable = ($exists && is_readable($logFile));
 $mtime = ($exists ? (int) @filemtime($logFile) : 0);
 $size = ($exists ? (int) @filesize($logFile) : 0);
 $truncated = false;
@@ -105,6 +148,7 @@ sendJson([
     'type' => $logType,
     'exists' => $exists,
     'readable' => $readable,
+    'unsafe' => !$safe,
     'mtime' => $mtime,
     'size' => $size,
     'truncated' => $truncated,

@@ -1,5 +1,6 @@
 #!/bin/bash
 set -Eeuo pipefail
+umask 077
 
 # =============================================================================
 # ZFS Automatic Snapshot Script for Unraid
@@ -16,6 +17,8 @@ set -Eeuo pipefail
 
 CONFIG_DIR="/boot/config/plugins/zfs.autosnapshot"
 CONFIG_FILE="${CONFIG_FILE:-$CONFIG_DIR/zfs_autosnapshot.conf}"
+PLUGIN_NAME="zfs.autosnapshot"
+RUNTIME_DIR="/var/run/zfs-autosnapshot"
 
 # -----------------------------------------------------------------------------
 # Defaults (can be overridden in config file)
@@ -28,12 +31,15 @@ KEEP_ALL_FOR_DAYS=14
 KEEP_DAILY_UNTIL_DAYS=30
 KEEP_WEEKLY_UNTIL_DAYS=183
 
-LOCKFILE="/tmp/zfs_autosnapshot.lock"
-LOCKDIR="/tmp/zfs_autosnapshot.lockdir"
-LOG_FILE="${LOG_FILE:-/var/log/zfs_autosnapshot.log}"
-SUMMARY_LOG_FILE="${SUMMARY_LOG_FILE:-/var/log/zfs_autosnapshot.last.log}"
+LOCKFILE="${RUNTIME_DIR}/zfs_autosnapshot.lock"
+LOCKDIR="${RUNTIME_DIR}/zfs_autosnapshot.lockdir"
+LOG_FILE="/var/log/zfs_autosnapshot.log"
+SUMMARY_LOG_FILE="/var/log/zfs_autosnapshot.last.log"
+LEASE_STATE_FILE="${CONFIG_DIR}/snapshot_leases.tsv"
 LOG_RUN_MARKER="[RUN_START]"
 KEEP_LOG_RUNS="${KEEP_LOG_RUNS:-2}"
+# If a single snapshot destroy runs longer than this, treat it as hung and exit.
+DESTROY_HANG_TIMEOUT_SECONDS=120
 
 RUN_STARTED_AT_EPOCH=0
 RUN_STARTED_AT_HUMAN=""
@@ -52,6 +58,23 @@ COUNT_DELETED_AGE=0
 COUNT_DELETED_DAILY=0
 COUNT_DELETED_WEEKLY=0
 COUNT_DELETED_SPACE=0
+COUNT_DELETED_ZERO_CHANGE=0
+COUNT_SKIPPED_HELD=0
+COUNT_SKIPPED_NON_RECLAIMABLE=0
+COUNT_LOW_SPACE_UNRESOLVED=0
+
+# shellcheck disable=SC2034  # tracked through indirect helpers
+ACTIVE_LEASE_SNAPSHOTS=$'\n'
+# shellcheck disable=SC2034  # tracked through indirect helpers
+SKIPPED_HELD_SNAPSHOTS=$'\n'
+# shellcheck disable=SC2034  # tracked through indirect helpers
+SKIPPED_NON_RECLAIMABLE_SNAPSHOTS=$'\n'
+# shellcheck disable=SC2034  # tracked through indirect helpers
+LOW_SPACE_UNRESOLVED_POOLS=$'\n'
+# shellcheck disable=SC2034  # tracked through indirect helpers
+LOW_SPACE_UNRESOLVED_NOTES=$'\n'
+# shellcheck disable=SC2034  # tracked through indirect helpers
+PROTECTED_LATEST_SNAPSHOTS=$'\n'
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -142,7 +165,7 @@ apply_config_key() {
 	local value="$2"
 
 	case "$key" in
-	DATASETS | PREFIX | DRY_RUN | KEEP_ALL_FOR_DAYS | KEEP_DAILY_UNTIL_DAYS | KEEP_WEEKLY_UNTIL_DAYS | LOCKFILE | LOCKDIR | LOG_FILE | SUMMARY_LOG_FILE | KEEP_LOG_RUNS)
+	DATASETS | PREFIX | DRY_RUN | KEEP_ALL_FOR_DAYS | KEEP_DAILY_UNTIL_DAYS | KEEP_WEEKLY_UNTIL_DAYS | KEEP_LOG_RUNS)
 		if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
 			return 0
 		fi
@@ -183,6 +206,83 @@ require_numeric_in_range() {
 	fi
 }
 
+ensure_existing_directory() {
+	local path="$1"
+	local label="$2"
+
+	if [[ -z "$path" ]]; then
+		fail_config "${label} path is empty." "Reset ${label} to its default location and run again."
+	fi
+
+	if [[ -L "$path" ]]; then
+		fail_config "${label} path '$path' is a symlink, which is unsafe." "Remove the symlink and restore a normal directory."
+	fi
+
+	if [[ ! -d "$path" ]]; then
+		fail_config "${label} path '$path' is missing." "Create the directory or restore the default path, then run again."
+	fi
+}
+
+ensure_secure_directory() {
+	local path="$1"
+	local mode="$2"
+	local label="$3"
+
+	if [[ -z "$path" ]]; then
+		fail_config "${label} path is empty." "Reset ${label} to its default location and run again."
+	fi
+
+	if [[ -L "$path" ]]; then
+		fail_config "${label} path '$path' is a symlink, which is unsafe." "Remove the symlink and restore a normal directory."
+	fi
+
+	if [[ -e "$path" && ! -d "$path" ]]; then
+		fail_config "${label} path '$path' is not a directory." "Remove the unexpected file and try again."
+	fi
+
+	if [[ ! -d "$path" ]]; then
+		mkdir -p "$path" || fail_config "Unable to create ${label} '$path'." "Check filesystem permissions, then run again."
+	fi
+
+	chmod "$mode" "$path" 2>/dev/null || true
+	chown root:root "$path" 2>/dev/null || true
+}
+
+ensure_secure_file() {
+	local path="$1"
+	local mode="$2"
+	local label="$3"
+	local parent
+
+	if [[ -z "$path" ]]; then
+		fail_config "${label} path is empty." "Reset ${label} to its default location and run again."
+	fi
+
+	parent="$(dirname "$path")"
+	ensure_existing_directory "$parent" "${label} parent directory"
+
+	if [[ -L "$path" ]]; then
+		fail_config "${label} '$path' is a symlink, which is unsafe." "Remove the symlink and try again."
+	fi
+
+	if [[ -e "$path" && ! -f "$path" ]]; then
+		fail_config "${label} '$path' is not a regular file." "Remove the unexpected path and try again."
+	fi
+
+	: >>"$path" || fail_config "Unable to open ${label} '$path'." "Check filesystem permissions, then run again."
+	chmod "$mode" "$path" 2>/dev/null || true
+	chown root:root "$path" 2>/dev/null || true
+}
+
+prepare_runtime_state() {
+	ensure_secure_directory "$RUNTIME_DIR" 0700 "Runtime directory"
+	ensure_secure_file "$LOCKFILE" 0600 "Lock file"
+	ensure_existing_directory "$(dirname "$LOG_FILE")" "Debug log directory"
+	ensure_existing_directory "$(dirname "$SUMMARY_LOG_FILE")" "Summary log directory"
+	ensure_secure_file "$LOG_FILE" 0600 "Debug log"
+	ensure_secure_file "$SUMMARY_LOG_FILE" 0600 "Run summary log"
+}
+
 increment_delete_counter() {
 	local reason="$1"
 
@@ -201,6 +301,9 @@ increment_delete_counter() {
 	space_pressure)
 		COUNT_DELETED_SPACE=$((COUNT_DELETED_SPACE + 1))
 		;;
+	zero_change_housekeeping)
+		COUNT_DELETED_ZERO_CHANGE=$((COUNT_DELETED_ZERO_CHANGE + 1))
+		;;
 	esac
 }
 
@@ -212,8 +315,52 @@ do_destroy() {
 		log "[DRY_RUN] zfs destroy '$snap'"
 		increment_delete_counter "$reason"
 	else
-		zfs destroy "$snap"
+		destroy_with_watchdog "$snap"
 		increment_delete_counter "$reason"
+	fi
+}
+
+destroy_with_watchdog() {
+	local snap="$1"
+	local pid start now elapsed wait_rc
+
+	zfs destroy "$snap" &
+	pid=$!
+	start="$(date +%s)"
+
+	while kill -0 "$pid" 2>/dev/null; do
+		now="$(date +%s)"
+		elapsed=$((now - start))
+
+		if ((elapsed >= DESTROY_HANG_TIMEOUT_SECONDS)); then
+			log "Snapshot destroy timed out after ${DESTROY_HANG_TIMEOUT_SECONDS}s: $snap"
+			kill "$pid" >/dev/null 2>&1 || true
+			sleep 1
+			kill -9 "$pid" >/dev/null 2>&1 || true
+			wait "$pid" 2>/dev/null || true
+
+			RUN_ERROR_CONTEXT="zfs destroy timed out for '$snap' after ${DESTROY_HANG_TIMEOUT_SECONDS}s"
+			set_user_failure \
+				"Snapshot deletion did not finish within ${DESTROY_HANG_TIMEOUT_SECONDS} seconds, so this run stopped to avoid hanging." \
+				"Let I/O pressure drop, then wait for the next scheduled run (or run manually) to continue cleanup."
+			die "Snapshot destroy timed out for '$snap' after ${DESTROY_HANG_TIMEOUT_SECONDS}s."
+		fi
+
+		sleep 1
+	done
+
+	if wait "$pid"; then
+		wait_rc=0
+	else
+		wait_rc=$?
+	fi
+
+	if ((wait_rc != 0)); then
+		RUN_ERROR_CONTEXT="zfs destroy failed for '$snap' (exit ${wait_rc})"
+		set_user_failure \
+			"Snapshot deletion failed for '$snap' because ZFS returned an internal error." \
+			"Check Tools > System Log for ZFS errors, run 'zpool status', then run again."
+		die "Snapshot destroy command failed for '$snap' (exit ${wait_rc})."
 	fi
 }
 
@@ -224,7 +371,13 @@ do_snapshot() {
 		log "[DRY_RUN] zfs snapshot '$snap'"
 		COUNT_CREATED=$((COUNT_CREATED + 1))
 	else
-		zfs snapshot "$snap"
+		if ! zfs snapshot "$snap"; then
+			RUN_ERROR_CONTEXT="zfs snapshot failed for '$snap'"
+			set_user_failure \
+				"Snapshot creation failed for '$snap'." \
+				"Check dataset health and free space, then run again."
+			die "Snapshot create command failed for '$snap'."
+		fi
 		COUNT_CREATED=$((COUNT_CREATED + 1))
 	fi
 }
@@ -264,6 +417,263 @@ get_pool_freeing() {
 	local value
 	value="$(zpool get -H -o value freeing "$1" 2>/dev/null || true)"
 	[[ "$value" =~ ^[0-9]+$ ]] && echo "$value" || echo 0
+}
+
+newline_set_contains() {
+	local haystack="$1"
+	local needle="$2"
+	[[ "$haystack" == *$'\n'"$needle"$'\n'* ]]
+}
+
+remember_newline_entry() {
+	local var_name="$1"
+	local value="$2"
+	local current="${!var_name:-$'\n'}"
+
+	if newline_set_contains "$current" "$value"; then
+		return 1
+	fi
+
+	printf -v "$var_name" '%s%s\n' "$current" "$value"
+	return 0
+}
+
+emit_newline_entries() {
+	local haystack="$1"
+	printf '%s' "$haystack" | sed '/^[[:space:]]*$/d'
+}
+
+record_skipped_held_snapshot() {
+	local snap="$1"
+
+	if remember_newline_entry SKIPPED_HELD_SNAPSHOTS "$snap"; then
+		COUNT_SKIPPED_HELD=$((COUNT_SKIPPED_HELD + 1))
+	fi
+}
+
+record_skipped_non_reclaimable_snapshot() {
+	local snap="$1"
+
+	if remember_newline_entry SKIPPED_NON_RECLAIMABLE_SNAPSHOTS "$snap"; then
+		COUNT_SKIPPED_NON_RECLAIMABLE=$((COUNT_SKIPPED_NON_RECLAIMABLE + 1))
+	fi
+}
+
+remember_protected_latest_snapshot() {
+	local snap="$1"
+	remember_newline_entry PROTECTED_LATEST_SNAPSHOTS "$snap" >/dev/null 2>&1 || true
+}
+
+record_low_space_unresolved_pool() {
+	local pool="$1"
+	local note="$2"
+
+	if remember_newline_entry LOW_SPACE_UNRESOLVED_POOLS "$pool"; then
+		COUNT_LOW_SPACE_UNRESOLVED=$((COUNT_LOW_SPACE_UNRESOLVED + 1))
+	fi
+
+	remember_newline_entry LOW_SPACE_UNRESOLVED_NOTES "$pool: $note" >/dev/null 2>&1 || true
+}
+
+load_active_leases() {
+	local line snap expires state
+
+	ACTIVE_LEASE_SNAPSHOTS=$'\n'
+
+	[[ -f "$LEASE_STATE_FILE" ]] || return 0
+
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		[[ "$line" =~ ^[[:space:]]*# ]] && continue
+		[[ "$line" =~ ^[[:space:]]*$ ]] && continue
+
+		IFS=$'\t' read -r snap expires state _ <<<"$line"
+		snap="$(trim "$snap")"
+		expires="$(trim "$expires")"
+		state="$(trim "$state")"
+
+		[[ -n "$snap" ]] || continue
+		[[ "$expires" =~ ^[0-9]+$ ]] || continue
+		[[ -n "$state" ]] || state="active"
+		[[ "$state" == "active" ]] || continue
+
+		if ((expires > NOW_EPOCH)); then
+			remember_newline_entry ACTIVE_LEASE_SNAPSHOTS "$snap" >/dev/null 2>&1 || true
+		fi
+	done <"$LEASE_STATE_FILE"
+}
+
+snapshot_has_active_lease() {
+	local snap="$1"
+	newline_set_contains "$ACTIVE_LEASE_SNAPSHOTS" "$snap"
+}
+
+snapshot_is_protected_latest() {
+	local snap="$1"
+	newline_set_contains "$PROTECTED_LATEST_SNAPSHOTS" "$snap"
+}
+
+load_snapshot_property_maps() {
+	local dataset="$1"
+	# shellcheck disable=SC2034  # nameref targets are used by the caller
+	local -n used_ref="$2"
+	# shellcheck disable=SC2034  # nameref targets are used by the caller
+	local -n written_ref="$3"
+	# shellcheck disable=SC2034  # nameref targets are used by the caller
+	local -n userrefs_ref="$4"
+	local metadata snap property value
+
+	used_ref=()
+	written_ref=()
+	userrefs_ref=()
+
+	metadata="$(zfs get -H -p -o name,property,value -t snapshot -r used,written,userrefs "$dataset" 2>/dev/null | grep -F "@${PREFIX}" || true)"
+
+	while IFS=$'\t' read -r snap property value; do
+		[[ -n "$snap" && -n "$property" ]] || continue
+
+		case "$property" in
+		used)
+			# shellcheck disable=SC2034  # nameref write consumed by caller
+			used_ref["$snap"]="$value"
+			;;
+		written)
+			# shellcheck disable=SC2034  # nameref write consumed by caller
+			written_ref["$snap"]="$value"
+			;;
+		userrefs)
+			# shellcheck disable=SC2034  # nameref write consumed by caller
+			userrefs_ref["$snap"]="$value"
+			;;
+		esac
+	done <<<"$metadata"
+}
+
+snapshot_numeric_property() {
+	local raw="$1"
+	local fallback="${2:-0}"
+
+	if [[ "$raw" =~ ^[0-9]+$ ]]; then
+		echo "$raw"
+	else
+		echo "$fallback"
+	fi
+}
+
+snapshot_protection_reason() {
+	local snap="$1"
+	local userrefs_raw="${2:-0}"
+	local userrefs
+
+	userrefs="$(snapshot_numeric_property "$userrefs_raw" 0)"
+
+	if ((userrefs > 0)); then
+		echo "held (${userrefs} user reference(s))"
+		return 0
+	fi
+
+	if snapshot_has_active_lease "$snap"; then
+		echo "leased by the snapshot manager"
+		return 0
+	fi
+
+	return 1
+}
+
+detect_plugin_version() {
+	local manifest_path version
+
+	for manifest_path in "/var/log/plugins/${PLUGIN_NAME}.plg" "/boot/config/plugins/${PLUGIN_NAME}.plg"; do
+		[[ -r "$manifest_path" ]] || continue
+		version="$(sed -n 's/.*<PLUGIN[^>]*version="\([^"]\+\)".*/\1/p' "$manifest_path" | head -n 1)"
+		version="$(trim "$version")"
+		if [[ -n "$version" ]]; then
+			echo "$version"
+			return 0
+		fi
+	done
+
+	echo "unknown"
+}
+
+detect_unraid_version() {
+	local value
+
+	if [[ -r /etc/unraid-version ]]; then
+		value="$(awk -F= '
+      /^[[:space:]]*version[[:space:]]*=/ {
+        gsub(/"/, "", $2)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+        print $2
+        exit
+      }
+    ' /etc/unraid-version 2>/dev/null || true)"
+		value="$(trim "$value")"
+		if [[ -n "$value" ]]; then
+			echo "$value"
+			return 0
+		fi
+
+		value="$(head -n 1 /etc/unraid-version 2>/dev/null || true)"
+		value="$(trim "$value")"
+		if [[ -n "$value" ]]; then
+			echo "$value"
+			return 0
+		fi
+	fi
+
+	if [[ -r /etc/os-release ]]; then
+		value="$(awk -F= '/^PRETTY_NAME=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null || true)"
+		value="$(trim "$value")"
+		if [[ -n "$value" ]]; then
+			echo "$value"
+			return 0
+		fi
+	fi
+
+	echo "unknown"
+}
+
+detect_zfs_version() {
+	local value
+	value="$(zfs version 2>/dev/null || zfs --version 2>/dev/null || true)"
+	value="$(printf '%s' "$value" | tr '\n' ';' | sed 's/;[[:space:]]*/; /g; s/[[:space:];]*$//')"
+	value="$(trim "$value")"
+	[[ -n "$value" ]] && echo "$value" || echo "unknown"
+}
+
+detect_zpool_version() {
+	local value
+	value="$(zpool version 2>/dev/null || zpool --version 2>/dev/null || true)"
+	value="$(printf '%s' "$value" | tr '\n' ';' | sed 's/;[[:space:]]*/; /g; s/[[:space:];]*$//')"
+	value="$(trim "$value")"
+	[[ -n "$value" ]] && echo "$value" || echo "unknown"
+}
+
+log_runtime_environment() {
+	local plugin_version unraid_version zfs_version zpool_version
+	local kernel_info bash_info path_zfs path_zpool pool_overview line
+
+	plugin_version="$(detect_plugin_version)"
+	unraid_version="$(detect_unraid_version)"
+	zfs_version="$(detect_zfs_version)"
+	zpool_version="$(detect_zpool_version)"
+	kernel_info="$(uname -srmo 2>/dev/null || uname -sr 2>/dev/null || echo unknown)"
+	bash_info="${BASH_VERSION:-unknown}"
+	path_zfs="$(command -v zfs 2>/dev/null || echo missing)"
+	path_zpool="$(command -v zpool 2>/dev/null || echo missing)"
+
+	log "Environment: kernel='${kernel_info}' bash='${bash_info}'"
+	log "Versions: plugin='${plugin_version}' unraid='${unraid_version}' zfs='${zfs_version}' zpool='${zpool_version}'"
+	log "Commands: zfs='${path_zfs}' zpool='${path_zpool}' script='${BASH_SOURCE[0]}'"
+
+	pool_overview="$(zpool list -H -o name,size,alloc,free,capacity,health 2>/dev/null || true)"
+	if [[ -n "$pool_overview" ]]; then
+		log "Pools(name size alloc free cap health):"
+		while IFS= read -r line; do
+			[[ -n "$line" ]] || continue
+			log "  ${line}"
+		done <<<"$pool_overview"
+	fi
 }
 
 upsert_pool_threshold() {
@@ -384,10 +794,25 @@ write_run_summary() {
 		echo "  Deleted by daily consolidation: ${COUNT_DELETED_DAILY}"
 		echo "  Deleted by weekly consolidation: ${COUNT_DELETED_WEEKLY}"
 		echo "  Deleted by low-space cleanup: ${COUNT_DELETED_SPACE}"
+		echo "  Deleted as zero-change housekeeping: ${COUNT_DELETED_ZERO_CHANGE}"
+		echo "Skipped because held or leased: ${COUNT_SKIPPED_HELD}"
+		echo "Skipped because delete would reclaim no space: ${COUNT_SKIPPED_NON_RECLAIMABLE}"
+		echo "Pools left below target because reclaim is blocked: ${COUNT_LOW_SPACE_UNRESOLVED}"
+
+		if ((COUNT_LOW_SPACE_UNRESOLVED > 0)); then
+			echo
+			echo "Warnings:"
+			echo "  Some pools stayed below their configured free-space target because no reclaimable auto snapshots could be safely removed."
+			while IFS= read -r note; do
+				[[ -n "$note" ]] || continue
+				echo "  ${note}"
+			done <<<"$(emit_newline_entries "$LOW_SPACE_UNRESOLVED_NOTES")"
+		fi
 	} >"$tmp_file"
 
 	if mv -f "$tmp_file" "$SUMMARY_LOG_FILE" 2>/dev/null; then
-		chmod 0644 "$SUMMARY_LOG_FILE" 2>/dev/null || true
+		chmod 0600 "$SUMMARY_LOG_FILE" 2>/dev/null || true
+		chown root:root "$SUMMARY_LOG_FILE" 2>/dev/null || true
 	else
 		rm -f "$tmp_file"
 	fi
@@ -398,7 +823,7 @@ on_exit() {
 	set +e
 
 	if ((LOCK_FALLBACK_HELD)); then
-		rm -rf "$LOCKDIR" 2>/dev/null || true
+		rmdir "$LOCKDIR" 2>/dev/null || true
 	fi
 
 	if ((RUN_SUMMARY_ENABLED)); then
@@ -438,12 +863,20 @@ time_clean_dataset() {
 
 	# Output format: name<TAB>creation_epoch (newest first)
 	local snaps
+	local protection_reason written_raw written_bytes userrefs_raw used_raw used_bytes
+	local zero_change_anchor=""
+	local latest_snapshot=""
+	local -A snap_written_map=()
+	local -A snap_userrefs_map=()
 	snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$ds" | grep -F "@${PREFIX}" || true)"
 
 	if [[ -z "$snaps" ]]; then
 		log "  No ${PREFIX} snapshots found."
 		return 0
 	fi
+
+	declare -A snap_used_map=()
+	load_snapshot_property_maps "$ds" snap_used_map snap_written_map snap_userrefs_map
 
 	# Keep seen day/week keys in newline-delimited sets for broad Bash compatibility.
 	local kept_day=$'\n'
@@ -452,11 +885,51 @@ time_clean_dataset() {
 	while IFS=$'\t' read -r snap_name snap_created; do
 		[[ -z "$snap_name" || -z "$snap_created" ]] && continue
 
+		written_raw="${snap_written_map[$snap_name]:-}"
+		written_bytes="$(snapshot_numeric_property "$written_raw" -1)"
+		used_raw="${snap_used_map[$snap_name]:-0}"
+		used_bytes="$(snapshot_numeric_property "$used_raw" 0)"
+		userrefs_raw="${snap_userrefs_map[$snap_name]:-0}"
+		protection_reason="$(snapshot_protection_reason "$snap_name" "$userrefs_raw" || true)"
+
+		if [[ -z "$latest_snapshot" ]]; then
+			latest_snapshot="$snap_name"
+			remember_protected_latest_snapshot "$snap_name"
+			if ((written_bytes == 0)); then
+				zero_change_anchor="$snap_name"
+			else
+				zero_change_anchor=""
+			fi
+			log "  Keeping newest autosnapshot: $snap_name"
+			continue
+		fi
+
+		if ((written_bytes == 0)); then
+			if [[ -n "$zero_change_anchor" ]]; then
+				if [[ -n "$protection_reason" ]]; then
+					log "  Keeping zero-change duplicate because it is ${protection_reason}: $snap_name"
+					record_skipped_held_snapshot "$snap_name"
+				else
+					log "  Deleting zero-change duplicate: $snap_name (used=${used_bytes})"
+					do_destroy "$snap_name" "zero_change_housekeeping"
+				fi
+				continue
+			fi
+			zero_change_anchor="$snap_name"
+		else
+			zero_change_anchor=""
+		fi
+
 		local age=$((NOW_EPOCH - snap_created))
 
 		if ((age > KEEP_WEEKLY_UNTIL_SECONDS)); then
-			log "  Deleting (older than ${KEEP_WEEKLY_UNTIL_DAYS}d): $snap_name"
-			do_destroy "$snap_name" "age_window"
+			if [[ -n "$protection_reason" ]]; then
+				log "  Keeping expired snapshot because it is ${protection_reason}: $snap_name"
+				record_skipped_held_snapshot "$snap_name"
+			else
+				log "  Deleting (older than ${KEEP_WEEKLY_UNTIL_DAYS}d): $snap_name"
+				do_destroy "$snap_name" "age_window"
+			fi
 			continue
 		fi
 
@@ -467,8 +940,13 @@ time_clean_dataset() {
 				kept_week+="$week_key"$'\n'
 				log "  Keeping weekly latest: $snap_name"
 			else
-				log "  Deleting weekly duplicate: $snap_name"
-				do_destroy "$snap_name" "weekly_consolidation"
+				if [[ -n "$protection_reason" ]]; then
+					log "  Keeping weekly duplicate because it is ${protection_reason}: $snap_name"
+					record_skipped_held_snapshot "$snap_name"
+				else
+					log "  Deleting weekly duplicate: $snap_name"
+					do_destroy "$snap_name" "weekly_consolidation"
+				fi
 			fi
 			continue
 		fi
@@ -480,8 +958,13 @@ time_clean_dataset() {
 				kept_day+="$day_key"$'\n'
 				log "  Keeping daily latest: $snap_name"
 			else
-				log "  Deleting daily duplicate: $snap_name"
-				do_destroy "$snap_name" "daily_consolidation"
+				if [[ -n "$protection_reason" ]]; then
+					log "  Keeping daily duplicate because it is ${protection_reason}: $snap_name"
+					record_skipped_held_snapshot "$snap_name"
+				else
+					log "  Deleting daily duplicate: $snap_name"
+					do_destroy "$snap_name" "daily_consolidation"
+				fi
 			fi
 			continue
 		fi
@@ -500,8 +983,6 @@ fi
 trap 'record_error_context "$LINENO" "$BASH_COMMAND"' ERR
 trap on_exit EXIT
 
-acquire_lock
-
 RUN_SUMMARY_ENABLED=1
 RUN_STARTED_AT_EPOCH="$(date +%s)"
 RUN_STARTED_AT_HUMAN="$(date +'%Y-%m-%d %H:%M:%S %Z')"
@@ -512,10 +993,6 @@ fi
 
 DATASETS="$(trim "$DATASETS")"
 PREFIX="$(trim "$PREFIX")"
-LOCKFILE="$(trim "$LOCKFILE")"
-LOCKDIR="$(trim "$LOCKDIR")"
-LOG_FILE="$(trim "$LOG_FILE")"
-SUMMARY_LOG_FILE="$(trim "$SUMMARY_LOG_FILE")"
 KEEP_LOG_RUNS="$(trim "$KEEP_LOG_RUNS")"
 
 if [[ -z "$PREFIX" ]]; then
@@ -555,6 +1032,9 @@ if ! command -v zfs >/dev/null 2>&1 || ! command -v zpool >/dev/null 2>&1; then
 	fail_config "zfs/zpool commands are not available." "Install/enable ZFS on this server, then run again."
 fi
 
+prepare_runtime_state
+acquire_lock
+
 IFS=',' read -r -a raw_pairs <<<"$DATASETS"
 declare -a pairs=()
 for raw_pair in "${raw_pairs[@]}"; do
@@ -588,10 +1068,16 @@ KEEP_ALL_FOR_SECONDS=$((KEEP_ALL_FOR_DAYS * 86400))
 KEEP_DAILY_UNTIL_SECONDS=$((KEEP_DAILY_UNTIL_DAYS * 86400))
 KEEP_WEEKLY_UNTIL_SECONDS=$((KEEP_WEEKLY_UNTIL_DAYS * 86400))
 
+load_active_leases
+
 log "${LOG_RUN_MARKER} ts=$(date +'%Y-%m-%d %H:%M:%S %Z') pid=$$ mode=${RUN_MODE}"
+log_runtime_environment
 log "Config: datasets='${DATASETS}' prefix='${PREFIX}' dry_run=${DRY_RUN}"
 log "Retention(days): keep_all=${KEEP_ALL_FOR_DAYS} keep_daily_until=${KEEP_DAILY_UNTIL_DAYS} keep_weekly_until=${KEEP_WEEKLY_UNTIL_DAYS}"
 log "Logs: debug='${LOG_FILE}' summary='${SUMMARY_LOG_FILE}'"
+if [[ -f "$LEASE_STATE_FILE" ]]; then
+	log "Leases: active snapshot-manager leases loaded from '${LEASE_STATE_FILE}'"
+fi
 
 declare -a pool_names=()
 declare -a pool_thresholds=()
@@ -616,6 +1102,9 @@ log "Prepared ${RUN_DATASET_COUNT} dataset entries across ${RUN_POOL_COUNT} pool
 for i in "${!pool_names[@]}"; do
 	pool="${pool_names[$i]}"
 	min_free="${pool_thresholds[$i]}"
+	blocked_pool_datasets=$'\n'
+	simulated_deleted_snaps=$'\n'
+	simulated_reclaimed_bytes=0
 
 	while :; do
 		avail="$(get_pool_avail "$pool")"
@@ -625,7 +1114,7 @@ for i in "${!pool_names[@]}"; do
 		fi
 
 		freeing="$(get_pool_freeing "$pool")"
-		effective_avail=$((avail + freeing))
+		effective_avail=$((avail + freeing + simulated_reclaimed_bytes))
 		log "Pool $pool check: avail=${avail} freeing=${freeing} effective=${effective_avail} min_required=${min_free}"
 
 		if ((effective_avail >= min_free)); then
@@ -633,30 +1122,113 @@ for i in "${!pool_names[@]}"; do
 			break
 		fi
 
-		snapshot_list=""
+		oldest_snap=""
+		oldest_snap_epoch=""
+		oldest_snap_dataset=""
+		oldest_snap_used=0
+		any_pool_snapshots=0
+
 		for pair in "${pairs[@]}"; do
 			ds="${pair%:*}"
 			this_pool="${ds%%/*}"
 			[[ "$this_pool" != "$pool" ]] && continue
+			if newline_set_contains "$blocked_pool_datasets" "$ds"; then
+				continue
+			fi
 
 			snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$ds" | grep -F "@${PREFIX}" || true)"
-			[[ -n "$snaps" ]] && snapshot_list+="$snaps"$'\n'
+			if [[ -z "$snaps" ]]; then
+				continue
+			fi
+
+			any_pool_snapshots=1
+
+			declare -A space_used_map=()
+			declare -A space_userrefs_map=()
+			declare -A space_written_map=()
+			load_snapshot_property_maps "$ds" space_used_map space_written_map space_userrefs_map
+
+			ds_has_reclaimable=0
+			while IFS=$'\t' read -r snap_name snap_created; do
+				[[ -n "$snap_name" && -n "$snap_created" ]] || continue
+
+				if newline_set_contains "$simulated_deleted_snaps" "$snap_name"; then
+					continue
+				fi
+
+				if snapshot_is_protected_latest "$snap_name"; then
+					log "Pool $pool low on space -> skipping newest autosnapshot for dataset safety: $snap_name"
+					continue
+				fi
+
+				protection_reason="$(snapshot_protection_reason "$snap_name" "${space_userrefs_map[$snap_name]:-0}" || true)"
+				if [[ -n "$protection_reason" ]]; then
+					log "Pool $pool low on space -> skipping held/leased snapshot: $snap_name (${protection_reason})"
+					record_skipped_held_snapshot "$snap_name"
+					continue
+				fi
+
+				used_bytes="$(snapshot_numeric_property "${space_used_map[$snap_name]:-0}" 0)"
+				written_bytes="$(snapshot_numeric_property "${space_written_map[$snap_name]:-0}" 0)"
+				if ((used_bytes <= 0)); then
+					log "Pool $pool low on space -> skipping non-reclaimable snapshot: $snap_name (used=${used_bytes} written=${written_bytes})"
+					record_skipped_non_reclaimable_snapshot "$snap_name"
+					continue
+				fi
+
+				ds_has_reclaimable=1
+				if [[ -z "$oldest_snap_epoch" || "$snap_created" -lt "$oldest_snap_epoch" ]]; then
+					oldest_snap="$snap_name"
+					oldest_snap_epoch="$snap_created"
+					oldest_snap_dataset="$ds"
+					oldest_snap_used="$used_bytes"
+				fi
+			done <<<"$snaps"
+
+			if ((ds_has_reclaimable == 0)); then
+				if remember_newline_entry blocked_pool_datasets "$ds"; then
+					log "Pool $pool low on space -> dataset $ds has no reclaimable snapshots this run; skipping it for remaining cleanup."
+				fi
+			fi
 		done
 
-		if [[ -z "$snapshot_list" ]]; then
+		if ((any_pool_snapshots == 0)); then
 			log "Pool $pool low on space, but no ${PREFIX} snapshots remain for listed datasets."
 			break
 		fi
 
-		oldest_snap="$(pick_oldest_snapshot "$snapshot_list")"
-
 		if [[ -z "$oldest_snap" ]]; then
-			log "Pool $pool low on space, but couldn't parse an eligible snapshot entry."
+			record_low_space_unresolved_pool "$pool" "No reclaimable ${PREFIX} snapshots remain across the configured datasets."
+			log "Pool $pool low on space, but no reclaimable ${PREFIX} snapshots remain across the configured datasets."
 			break
 		fi
 
-		log "Pool $pool low on space -> deleting oldest eligible snapshot: $oldest_snap"
+		before_effective_avail="$effective_avail"
+		log "Pool $pool low on space -> deleting oldest reclaimable snapshot: $oldest_snap (dataset=${oldest_snap_dataset} used=${oldest_snap_used})"
 		do_destroy "$oldest_snap" "space_pressure"
+
+		if ((DRY_RUN)); then
+			remember_newline_entry simulated_deleted_snaps "$oldest_snap" >/dev/null 2>&1 || true
+			simulated_reclaimed_bytes=$((simulated_reclaimed_bytes + oldest_snap_used))
+			after_effective_avail=$((before_effective_avail + oldest_snap_used))
+			log "Pool $pool low on space -> [DRY_RUN] simulated effective free space after delete: ${after_effective_avail}"
+		else
+			avail_after="$(get_pool_avail "$pool")"
+			if [[ -z "$avail_after" ]]; then
+				record_low_space_unresolved_pool "$pool" "Available space could not be re-checked after deleting $oldest_snap."
+				log "Pool $pool low on space -> unable to re-check available space after deleting $oldest_snap; stopping cleanup for safety."
+				break
+			fi
+
+			freeing_after="$(get_pool_freeing "$pool")"
+			after_effective_avail=$((avail_after + freeing_after))
+		fi
+
+		if ((after_effective_avail <= before_effective_avail)); then
+			record_low_space_unresolved_pool "$pool" "Deleting ${oldest_snap} did not increase effective free space (before ${before_effective_avail}, after ${after_effective_avail})."
+			log "Pool $pool low on space -> deleting $oldest_snap did not increase effective free space (before=${before_effective_avail} after=${after_effective_avail}); stopping cleanup to avoid churn."
+			break
+		fi
 	done
 done
 
@@ -665,6 +1237,11 @@ timestamp="$(date +%Y-%m-%d_%H-%M-%S)"
 
 for pair in "${pairs[@]}"; do
 	ds="${pair%:*}"
+	pool="${ds%%/*}"
+	if newline_set_contains "$LOW_SPACE_UNRESOLVED_POOLS" "$pool"; then
+		log "Skipping snapshot create for $ds because pool $pool stayed below its free-space target and reclaim is blocked."
+		continue
+	fi
 	new_snap="$ds@${PREFIX}${timestamp}"
 	log "Creating snapshot: $new_snap"
 	do_snapshot "$new_snap"
