@@ -56,15 +56,34 @@ find "$STAGING_DIR" -name ".DS_Store" -delete
 find "$STAGING_DIR" -name "._*" -delete
 find "$STAGING_DIR" -name ".AppleDouble" -type d -prune -exec rm -rf {} +
 
-# Package as .txz (tar + xz), compatible with Unraid upgradepkg/removepkg flow.
-if tar --version 2>/dev/null | grep -qi "bsdtar"; then
-  # macOS bsdtar can embed AppleDouble metadata unless explicitly disabled.
-  if ! COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --no-mac-metadata -C "$STAGING_DIR" -cJf "$PKG_PATH" . 2>/dev/null; then
-    COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -C "$STAGING_DIR" -cJf "$PKG_PATH" .
+build_txz() {
+  if tar --version 2>/dev/null | grep -qi "bsdtar"; then
+    # macOS bsdtar can embed AppleDouble metadata unless explicitly disabled.
+    local bsdtar_args=(
+      --uid 0
+      --gid 0
+      --uname root
+      --gname root
+      -C "$STAGING_DIR"
+      -cJf "$PKG_PATH"
+      .
+    )
+    if ! COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --no-mac-metadata "${bsdtar_args[@]}" 2>/dev/null; then
+      COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar "${bsdtar_args[@]}"
+    fi
+  else
+    tar \
+      --owner=0 \
+      --group=0 \
+      --numeric-owner \
+      -C "$STAGING_DIR" \
+      -cJf "$PKG_PATH" \
+      .
   fi
-else
-  tar -C "$STAGING_DIR" -cJf "$PKG_PATH" .
-fi
+}
+
+# Package as .txz (tar + xz), compatible with Unraid upgradepkg/removepkg flow.
+build_txz
 
 if command -v md5sum >/dev/null 2>&1; then
   PKG_MD5="$(md5sum "$PKG_PATH" | awk '{print $1}')"

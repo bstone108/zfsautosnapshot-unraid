@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.03.02.1 (2026-03-02)
+
+- New release packages now install with proper `root:root` ownership instead of carrying macOS build-machine ownership metadata.
+
 ### 2026.02.21.6 (2026-02-21)
 
 - Raised minimum supported Unraid version to `6.12.0` to match native ZFS availability.
