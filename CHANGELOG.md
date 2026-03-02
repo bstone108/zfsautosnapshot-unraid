@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.03.02.3 (Testing Branch Only)
+
+- Fixed Installed Plugins page metadata so the plugin now ships a plain-English description directly in the manifest.
+- Added an explicit support-forum link in the plugin manifest for the Installed Plugins page.
+- Switched the Installed Plugins page icon reference to the plugin's local web path instead of the remote raw GitHub image URL.
+
 ### 2026.03.02.2 (Testing Branch Only)
 
 - New testing release packages now install with proper `root:root` ownership instead of carrying macOS build-machine ownership metadata.
