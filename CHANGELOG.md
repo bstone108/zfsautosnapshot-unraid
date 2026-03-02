@@ -5,6 +5,13 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.03.02.2 (Testing Branch Only)
+
+- New testing release packages now install with proper `root:root` ownership instead of carrying macOS build-machine ownership metadata.
+- Moved runtime lock handling out of world-writable `/tmp` and into a protected root-owned runtime directory.
+- Hard locked the debug/summary log locations so the plugin no longer trusts custom lock/log path overrides from config edits.
+- Tightened log-file safety checks and permissions while keeping the verbose debug information available in the WebUI and downloads.
+
 ### 2026.02.21.7 (Testing Branch Only)
 
 - Raised minimum supported Unraid version to `6.12.0` to match native ZFS availability.

@@ -1345,8 +1345,9 @@ if ($resolvedCron === '') {
     <div class="zfsas-card" id="live_run_log">
       <h3>Run Output</h3>
       <div class="zfsas-help">
-        Default view shows a concise one-run summary from <code><?php echo h($summaryLogFile); ?></code>.
-        Use "Show Debug Log" to inspect the verbose debug log at <code><?php echo h($debugLogFile); ?></code>.
+        Default view shows a concise one-run summary.
+        Use "Show Debug Log" to inspect the verbose debug log.
+        These logs are stored in protected root-owned system paths and are only exposed through this page.
         "Download Logs" exports both logs in one text file.
       </div>
       <div class="zfsas-log-toolbar">
@@ -1599,7 +1600,9 @@ if ($resolvedCron === '') {
 
     var shouldFollowTail = !!forceScrollToBottom || (outputEl.scrollTop + outputEl.clientHeight >= outputEl.scrollHeight - 40);
     var content = '';
-    if (!data.exists) {
+    if (data.unsafe) {
+      content = 'Selected log file path failed safety checks and was blocked.';
+    } else if (!data.exists) {
       if (logView === 'debug') {
         content = 'Debug log does not exist yet. Start a run and this view will populate.';
       } else {
@@ -1784,7 +1787,7 @@ if ($resolvedCron === '') {
       return false;
     }
 
-    logStreamSource.onmessage = function (event) {
+    function handleStreamPayload(event) {
       var payload;
       try {
         payload = JSON.parse(String(event.data || ''));
@@ -1792,7 +1795,10 @@ if ($resolvedCron === '') {
         return;
       }
       applyLogPayload(payload, false);
-    };
+    }
+
+    logStreamSource.addEventListener('payload', handleStreamPayload);
+    logStreamSource.onmessage = handleStreamPayload;
 
     logStreamSource.onerror = function () {
       stopLogStream();

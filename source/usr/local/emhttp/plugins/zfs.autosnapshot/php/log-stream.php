@@ -2,6 +2,25 @@
 $debugLogFile = '/var/log/zfs_autosnapshot.log';
 $summaryLogFile = '/var/log/zfs_autosnapshot.last.log';
 
+function isSafeLogPath($path)
+{
+    clearstatcache(true, $path);
+
+    if (!is_string($path) || $path === '') {
+        return false;
+    }
+
+    if (is_link($path)) {
+        return false;
+    }
+
+    if (file_exists($path) && !is_file($path)) {
+        return false;
+    }
+
+    return true;
+}
+
 function tailFileLines($path, $lineCount, $maxBytes, &$wasTruncated = false)
 {
     $wasTruncated = false;
@@ -52,8 +71,9 @@ function resolveLogTypeAndFile($requestedType, $summaryLogFile, $debugLogFile)
 function buildPayload($logFile, $logType, $lineCount)
 {
     $maxBytes = ($logType === 'debug') ? 500000 : 50000;
-    $exists = is_file($logFile);
-    $readable = is_readable($logFile);
+    $safe = isSafeLogPath($logFile);
+    $exists = ($safe && is_file($logFile));
+    $readable = ($exists && is_readable($logFile));
     $mtime = ($exists ? (int) @filemtime($logFile) : 0);
     $size = ($exists ? (int) @filesize($logFile) : 0);
     $truncated = false;
@@ -68,6 +88,7 @@ function buildPayload($logFile, $logType, $lineCount)
         'type' => $logType,
         'exists' => $exists,
         'readable' => $readable,
+        'unsafe' => !$safe,
         'mtime' => $mtime,
         'size' => $size,
         'truncated' => $truncated,
@@ -92,6 +113,7 @@ if (!headers_sent()) {
     header('Pragma: no-cache');
     header('Connection: keep-alive');
     header('X-Accel-Buffering: no');
+    header('X-Content-Type-Options: nosniff');
 }
 
 list($logType, $logFile) = resolveLogTypeAndFile($_GET['type'] ?? 'summary', $summaryLogFile, $debugLogFile);

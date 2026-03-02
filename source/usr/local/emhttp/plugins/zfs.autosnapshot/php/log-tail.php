@@ -9,10 +9,30 @@ function sendJson($payload, $statusCode = 200)
         header('Content-Type: application/json; charset=UTF-8');
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');
+        header('X-Content-Type-Options: nosniff');
     }
 
     echo json_encode($payload);
     exit;
+}
+
+function isSafeLogPath($path)
+{
+    clearstatcache(true, $path);
+
+    if (!is_string($path) || $path === '') {
+        return false;
+    }
+
+    if (is_link($path)) {
+        return false;
+    }
+
+    if (file_exists($path) && !is_file($path)) {
+        return false;
+    }
+
+    return true;
 }
 
 function tailFileLines($path, $lineCount, $maxBytes, &$wasTruncated = false)
@@ -64,7 +84,11 @@ function resolveLogTypeAndFile($requestedType, $summaryLogFile, $debugLogFile)
 
 function streamLogSection($title, $path)
 {
-    echo "===== {$title} ({$path}) =====\n";
+    echo "===== {$title} =====\n";
+    if (!isSafeLogPath($path)) {
+        echo "Log file path is unavailable because it failed safety checks.\n";
+        return;
+    }
     if (!is_file($path)) {
         echo "Log file is not present.\n";
         return;
@@ -86,6 +110,7 @@ function downloadCombinedLogs($debugLogFile, $summaryLogFile)
         header('Content-Disposition: attachment; filename="zfs_autosnapshot_logs.txt"');
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');
+        header('X-Content-Type-Options: nosniff');
     }
 
     echo "ZFS Auto Snapshot Log Export\n";
@@ -106,8 +131,9 @@ if ($download) {
 
 $lineCount = (int) ($_GET['lines'] ?? 400);
 $maxBytes = ($logType === 'debug') ? 500000 : 50000;
-$exists = is_file($logFile);
-$readable = is_readable($logFile);
+$safe = isSafeLogPath($logFile);
+$exists = ($safe && is_file($logFile));
+$readable = ($exists && is_readable($logFile));
 $mtime = ($exists ? (int) @filemtime($logFile) : 0);
 $size = ($exists ? (int) @filesize($logFile) : 0);
 $truncated = false;
@@ -122,6 +148,7 @@ sendJson([
     'type' => $logType,
     'exists' => $exists,
     'readable' => $readable,
+    'unsafe' => !$safe,
     'mtime' => $mtime,
     'size' => $size,
     'truncated' => $truncated,

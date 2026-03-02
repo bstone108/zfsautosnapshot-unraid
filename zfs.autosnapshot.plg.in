@@ -2,11 +2,9 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="__BASE_URL__/zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" Launch="Settings/ZFSAutoSnapshot">
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Publish-ready metadata update for plugin catalogs and Community Applications indexing.
-- Icon resolution is now explicit with an absolute icon URL in the plugin manifest.
-- Release packaging now includes a standalone icon file in `dist/` beside the `.plg`.
-- Added clear plugin description and support URL metadata for catalog consumers.
-- Core behavior remains unchanged: safe prefix-scoped deletions, retention cleanup, space-pressure cleanup, and scheduled snapshot creation.
+- Release packages now normalize file ownership to `root:root` so installs no longer inherit macOS build-machine ownership metadata.
+- Runtime lock files now live under a protected root-owned runtime directory instead of world-writable `/tmp`.
+- Verbose logs remain available, but log paths are now fixed and hardened against unsafe local file targets.
   </CHANGES>
 
   <DESCRIPTION>
