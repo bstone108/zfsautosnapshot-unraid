@@ -387,7 +387,7 @@ EOF
 
   assert_snapshot_exists "${case_dir}" "tank/data@autosnapshot-a"
   assert_snapshot_exists "${case_dir}" "tank/data@autosnapshot-b"
-  assert_file_contains "${case_dir}/stdout.log" "skipping newest autosnapshot for dataset safety: tank/data@autosnapshot-a"
+  assert_file_contains "${case_dir}/stdout.log" "Keeping newest autosnapshot: tank/data@autosnapshot-a"
   assert_file_contains "${case_dir}/log/summary.log" "Skipped because delete would reclaim no space: 1"
   assert_file_contains "${case_dir}/log/summary.log" "Pools left below target because reclaim is blocked: 1"
   assert_file_contains "${case_dir}/stdout.log" "Skipping snapshot create for tank/data because pool tank stayed below its free-space target and reclaim is blocked."
@@ -431,7 +431,7 @@ EOF
 
   assert_snapshot_missing "${case_dir}" "tank/data@autosnapshot-old"
   assert_snapshot_exists "${case_dir}" "tank/data@autosnapshot-new"
-  assert_file_contains "${case_dir}/stdout.log" "skipping newest autosnapshot for dataset safety: tank/data@autosnapshot-new"
+  assert_file_contains "${case_dir}/stdout.log" "Keeping newest autosnapshot: tank/data@autosnapshot-new"
   assert_file_contains "${case_dir}/log/summary.log" "Pools left below target because reclaim is blocked: 1"
 }
 
