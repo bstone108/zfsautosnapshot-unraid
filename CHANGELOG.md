@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.03.06.1 (2026-03-06)
+
+- Reduced low-space cleanup log noise so newest-autosnapshot protection is reported once during the initial dataset pass instead of being repeated throughout pool cleanup scans.
+- Cleanup behavior is unchanged: the newest autosnapshot still stays protected from automatic deletion.
+
 ### 2026.03.02.4 (Testing Branch Only)
 
 - Added safer automatic cleanup so the plugin now protects held or leased snapshots, always keeps the newest autosnapshot for each dataset, and skips deletes that cannot actually reclaim space.

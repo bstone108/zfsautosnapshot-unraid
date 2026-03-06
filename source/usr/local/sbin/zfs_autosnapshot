@@ -1157,7 +1157,6 @@ for i in "${!pool_names[@]}"; do
 				fi
 
 				if snapshot_is_protected_latest "$snap_name"; then
-					log "Pool $pool low on space -> skipping newest autosnapshot for dataset safety: $snap_name"
 					continue
 				fi
 
