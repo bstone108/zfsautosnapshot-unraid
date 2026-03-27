@@ -7,6 +7,7 @@ $syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
 $logApiUrl = "/plugins/{$pluginName}/php/log-tail.php";
 $logStreamApiUrl = "/plugins/{$pluginName}/php/log-stream.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
+$saveApiUrl = "/plugins/{$pluginName}/php/save-settings.php";
 $logPollIntervalMs = 2000;
 
 $defaults = [
@@ -1281,7 +1282,7 @@ if ($resolvedCron === '') {
     </div>
   <?php endif; ?>
 
-  <form method="post" action="<?php echo h(pluginSettingsPageUrl($settingsPagePath, ['saved' => null])); ?>" id="zfsas_settings_form">
+  <form method="post" action="<?php echo h(pluginSettingsPageUrl($settingsPagePath, ['saved' => null])); ?>" data-ajax-action="<?php echo h($saveApiUrl); ?>" id="zfsas_settings_form">
     <div class="zfsas-card">
       <h3>Datasets</h3>
       <div class="zfsas-help">
@@ -1568,7 +1569,7 @@ if ($resolvedCron === '') {
     feedbackEl.innerHTML = html;
   }
 
-  function requestJsonFormPost(form, onSuccess, onError, onComplete) {
+  function requestJsonFormPost(form, targetUrl, onSuccess, onError, onComplete) {
     var xhr = new XMLHttpRequest();
     var finished = false;
 
@@ -1582,7 +1583,7 @@ if ($resolvedCron === '') {
       }
     }
 
-    xhr.open('POST', requestTargetUrl(form), true);
+    xhr.open('POST', targetUrl || requestTargetUrl(form), true);
     xhr.timeout = 20000;
     xhr.setRequestHeader('Accept', 'application/json');
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
@@ -1622,7 +1623,12 @@ if ($resolvedCron === '') {
         payload = JSON.parse(xhr.responseText);
       } catch (parseError) {
         try {
-          onError(new Error('Invalid save response.'));
+          var raw = String(xhr.responseText || '').trim();
+          if (raw.charAt(0) === '<') {
+            onError(new Error('Save response was wrapped by the web UI or theme. Reload the page and try again.'));
+          } else {
+            onError(new Error('Invalid save response.'));
+          }
         } finally {
           finalize();
         }
@@ -2297,6 +2303,7 @@ if ($resolvedCron === '') {
       try {
         requestJsonFormPost(
           saveForm,
+          saveForm.getAttribute('data-ajax-action') || requestTargetUrl(saveForm),
           function (data) {
             renderSaveFeedback(data.errors || [], data.notices || ['Settings saved.']);
 

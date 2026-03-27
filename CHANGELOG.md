@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.03.27.3 (Testing Branch Only)
+
+- Fixed alternate-theme save failures by moving in-page settings saves to a dedicated save endpoint that is less likely to be polluted by WebGUI or theme wrapper output.
+- Added stronger save-response handling so the page can report a clearer message when the server returns wrapped HTML instead of clean JSON.
+- Kept the theme readability improvements from the prior testing build.
+
 ### 2026.03.27.2 (Testing Branch Only)
 
 - Fixed the settings page so saving no longer drops some systems onto a blank-looking page.
