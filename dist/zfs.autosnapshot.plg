@@ -1,9 +1,10 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.03.06.1" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.03.27.2" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.03.06.1 (2026-03-06)
-- Reduced low-space cleanup log noise so newest-autosnapshot protection is reported once during the initial dataset pass instead of being repeated during every pool scan.
-- Cleanup behavior is unchanged: newest autosnapshots are still protected from automatic deletion.
+### 2026.03.27.2 (2026-03-27)
+- Fixed the settings page so saving no longer drops some systems onto a blank-looking page.
+- Improved theme compatibility so alternate Unraid themes render the settings UI more reliably instead of mixing unreadable light and dark colors.
+- Kept the faster in-page save behavior while restoring normal button recovery and clearer save feedback.
   </CHANGES>
 
   <DESCRIPTION>
@@ -12,9 +13,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.03.06.1-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.03.06.1-noarch-1.txz</URL>
-    <MD5>80df52c728c6b5e292b5de497f24034e</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.03.27.2-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.03.27.2-noarch-1.txz</URL>
+    <MD5>93f46a9572028b3327a1d4177c8b6366</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -22,10 +23,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.03.06.1-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.03.27.2-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="80df52c728c6b5e292b5de497f24034e"
+PKG_MD5="93f46a9572028b3327a1d4177c8b6366"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then

@@ -1,5 +1,6 @@
 <?php
 $pluginName = 'zfs.autosnapshot';
+$settingsPagePath = '/Settings/ZFSAutoSnapshot';
 $configDir = "/boot/config/plugins/{$pluginName}";
 $configFile = "{$configDir}/zfs_autosnapshot.conf";
 $syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
@@ -40,6 +41,87 @@ $weekdayNames = [
 function h($value)
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
+function sendJsonResponse($payload, $statusCode = 200)
+{
+    http_response_code((int) $statusCode);
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode($payload);
+    exit;
+}
+
+function sendClientRedirectPage($url, $message = 'Settings saved. Returning to the settings page...')
+{
+    $target = htmlspecialchars((string) $url, ENT_QUOTES, 'UTF-8');
+    $text = htmlspecialchars((string) $message, ENT_QUOTES, 'UTF-8');
+
+    echo '<div style="padding:16px;">';
+    echo '<div>' . $text . '</div>';
+    echo '<div style="margin-top:10px;"><a href="' . $target . '">Continue</a></div>';
+    echo '</div>';
+    echo '<script>window.location.replace(' . json_encode((string) $url) . ');</script>';
+    exit;
+}
+
+function isAjaxSaveRequest()
+{
+    if (($_POST['ajax'] ?? '') === 'save') {
+        return true;
+    }
+
+    $requestedWith = $_SERVER['HTTP_X_REQUESTED_WITH'] ?? '';
+    return is_string($requestedWith) && strcasecmp($requestedWith, 'XMLHttpRequest') === 0;
+}
+
+function currentRequestUriWithQuery($replacements = [])
+{
+    $requestUri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+    if ($requestUri === '') {
+        return '';
+    }
+
+    $parts = parse_url($requestUri);
+    $path = (string) ($parts['path'] ?? '');
+    if ($path === '') {
+        return '';
+    }
+
+    $query = [];
+    if (isset($parts['query'])) {
+        parse_str((string) $parts['query'], $query);
+    }
+
+    foreach ($replacements as $key => $value) {
+        if ($value === null) {
+            unset($query[$key]);
+        } else {
+            $query[$key] = $value;
+        }
+    }
+
+    $queryString = http_build_query($query);
+    return ($queryString === '') ? $path : ($path . '?' . $queryString);
+}
+
+function pluginSettingsPageUrl($fallbackPath, $replacements = [])
+{
+    $fallbackPath = trim((string) $fallbackPath);
+    if ($fallbackPath === '') {
+        $fallbackPath = '/Settings/ZFSAutoSnapshot';
+    }
+
+    $query = [];
+    foreach ($replacements as $key => $value) {
+        if ($value === null) {
+            unset($query[$key]);
+        } else {
+            $query[$key] = $value;
+        }
+    }
+
+    $queryString = http_build_query($query);
+    return ($queryString === '') ? $fallbackPath : ($fallbackPath . '?' . $queryString);
 }
 
 function trimValue($value)
@@ -639,21 +721,37 @@ function renderConfig($config)
     return implode("\n", $lines);
 }
 
-$installedVersion = detectInstalledPluginVersion($pluginName);
+$isPostRequest = (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST');
+$isAjaxSaveRequest = ($isPostRequest && isAjaxSaveRequest());
+
+$installedVersion = $isAjaxSaveRequest ? '' : detectInstalledPluginVersion($pluginName);
 
 $config = parseConfigFile($configFile, $defaults);
 $errors = [];
 $notices = [];
 
+if (!$isAjaxSaveRequest && (($_GET['saved'] ?? '') === '1')) {
+    $notices[] = 'Settings saved and schedule applied.';
+}
+
 $datasetParseWarnings = [];
 $configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $datasetParseWarnings);
 
 $datasetDiscoveryError = null;
-$availableDatasets = listZfsDatasets($datasetDiscoveryError);
-$datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap);
-$datasetPools = buildDatasetPools($datasetRows);
+$availableDatasets = [];
+$datasetRows = [];
+$datasetPools = [];
 
-if (!empty($datasetParseWarnings)) {
+if ($isAjaxSaveRequest) {
+    $datasetRows = buildDatasetRows([], $configuredDatasetMap);
+    $datasetPools = buildDatasetPools($datasetRows);
+} else {
+    $availableDatasets = listZfsDatasets($datasetDiscoveryError);
+    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap);
+    $datasetPools = buildDatasetPools($datasetRows);
+}
+
+if (!$isAjaxSaveRequest && !empty($datasetParseWarnings)) {
     foreach ($datasetParseWarnings as $warning) {
         $notices[] = $warning;
     }
@@ -750,14 +848,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($syncExit !== 0) {
                 $errors[] = 'Settings saved, but failed to apply scheduler: ' . implode(' | ', $syncOutput);
             } else {
-                $notices[] = 'Settings saved and schedule applied.';
+                if (!$isAjaxSaveRequest) {
+                    $postSaveWarnings = [];
+                    $configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $postSaveWarnings);
+                    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap);
+                    $datasetPools = buildDatasetPools($datasetRows);
 
-                $postSaveWarnings = [];
-                $configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $postSaveWarnings);
-                $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap);
-                $datasetPools = buildDatasetPools($datasetRows);
+                    $redirectUrl = pluginSettingsPageUrl($settingsPagePath, [
+                        'saved' => '1',
+                    ]);
+
+                    if ($redirectUrl !== '') {
+                        sendClientRedirectPage($redirectUrl);
+                    }
+                }
+
+                $notices[] = 'Settings saved and schedule applied.';
             }
         }
+    }
+
+    if ($isAjaxSaveRequest) {
+        $ajaxNotices = $notices;
+        $ajaxErrors = $errors;
+        $ajaxResolvedCron = trim((string) ($config['CRON_SCHEDULE'] ?? ''));
+        if ($ajaxResolvedCron === '') {
+            $ajaxResolvedCron = '(disabled)';
+        }
+
+        sendJsonResponse([
+            'ok' => empty($ajaxErrors),
+            'errors' => array_values($ajaxErrors),
+            'notices' => array_values($ajaxNotices),
+            'resolvedCron' => $ajaxResolvedCron,
+            'prefix' => (string) ($config['PREFIX'] ?? ''),
+        ], empty($ajaxErrors) ? 200 : 400);
     }
 }
 
@@ -771,6 +896,7 @@ if ($resolvedCron === '') {
   margin: 16px;
   max-width: 1100px;
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  color: var(--text-color, #1f2933);
 }
 
 .zfsas-header {
@@ -785,7 +911,8 @@ if ($resolvedCron === '') {
 }
 
 .zfsas-subtitle {
-  color: #444;
+  color: var(--text-color, #444);
+  opacity: 0.85;
   margin: 6px 0 16px;
 }
 
@@ -795,19 +922,20 @@ if ($resolvedCron === '') {
   padding: 3px 10px;
   font-size: 12px;
   font-weight: 600;
-  border: 1px solid #bfd3ff;
+  border: 1px solid var(--border-color, #bfd3ff);
   border-radius: 999px;
-  background: #eef4ff;
-  color: #1f4b8c;
+  background: rgba(82, 126, 235, 0.12);
+  color: var(--text-color, #1f4b8c);
 }
 
 .zfsas-card {
-  background: #fff;
-  border: 1px solid #d9e1ea;
+  background: var(--background-color, #fff);
+  border: 1px solid var(--border-color, #d9e1ea);
   border-radius: 10px;
   padding: 16px;
   margin-bottom: 14px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  color: var(--text-color, #1f2933);
 }
 
 .zfsas-grid {
@@ -827,7 +955,8 @@ if ($resolvedCron === '') {
 }
 
 .zfsas-help {
-  color: #4f5a66;
+  color: var(--text-color, #4f5a66);
+  opacity: 0.82;
   font-size: 12px;
   line-height: 1.4;
 }
@@ -836,9 +965,10 @@ if ($resolvedCron === '') {
 .zfsas-select {
   width: 100%;
   padding: 8px 10px;
-  border: 1px solid #b8c5d1;
+  border: 1px solid var(--input-border-color, var(--border-color, #b8c5d1));
   border-radius: 8px;
-  background: #fff;
+  background: var(--input-background-color, var(--background-color, #fff));
+  color: var(--text-color, #1f2933);
 }
 
 .zfsas-inline {
@@ -875,21 +1005,21 @@ if ($resolvedCron === '') {
 }
 
 .zfsas-alert-error {
-  background: #fff1f0;
-  border: 1px solid #f5c2c0;
-  color: #8f2d2a;
+  background: rgba(176, 0, 32, 0.08);
+  border: 1px solid rgba(176, 0, 32, 0.28);
+  color: var(--text-color, #8f2d2a);
 }
 
 .zfsas-alert-ok {
-  background: #effaf1;
-  border: 1px solid #b7e3bf;
-  color: #21693a;
+  background: rgba(46, 125, 50, 0.1);
+  border: 1px solid rgba(46, 125, 50, 0.28);
+  color: var(--text-color, #21693a);
 }
 
 .zfsas-alert-warn {
-  background: #fff9ec;
-  border: 1px solid #f2d9a6;
-  color: #8a5a12;
+  background: rgba(180, 120, 0, 0.1);
+  border: 1px solid rgba(180, 120, 0, 0.28);
+  color: var(--text-color, #8a5a12);
 }
 
 .zfsas-dataset-toolbar {
@@ -899,9 +1029,9 @@ if ($resolvedCron === '') {
   margin-top: 12px;
   flex-wrap: wrap;
   padding: 10px;
-  border: 1px solid #e1e8ef;
+  border: 1px solid var(--border-color, #e1e8ef);
   border-radius: 8px;
-  background: #f8fbff;
+  background: rgba(82, 126, 235, 0.06);
 }
 
 .zfsas-pool-filter {
@@ -933,9 +1063,9 @@ if ($resolvedCron === '') {
   padding: 2px 8px;
   font-size: 11px;
   border-radius: 99px;
-  background: #eaf2ff;
-  border: 1px solid #bfd3ff;
-  color: #1f4b8c;
+  background: rgba(82, 126, 235, 0.12);
+  border: 1px solid rgba(82, 126, 235, 0.25);
+  color: inherit;
 }
 
 .zfsas-row-hidden {
@@ -944,7 +1074,7 @@ if ($resolvedCron === '') {
 
 .zfsas-table-wrap {
   margin-top: 10px;
-  border: 1px solid #e1e8ef;
+  border: 1px solid var(--border-color, #e1e8ef);
   border-radius: 8px;
   overflow-x: auto;
 }
@@ -958,14 +1088,15 @@ if ($resolvedCron === '') {
 .zfsas-table th,
 .zfsas-table td {
   padding: 10px 12px;
-  border-bottom: 1px solid #edf2f7;
+  border-bottom: 1px solid var(--border-color, #edf2f7);
   vertical-align: top;
 }
 
 .zfsas-table th {
-  background: #f8fbff;
+  background: rgba(82, 126, 235, 0.06);
   text-align: left;
   font-size: 13px;
+  color: var(--text-color, #1f2933);
 }
 
 .zfsas-table tr:last-child td {
@@ -993,18 +1124,18 @@ if ($resolvedCron === '') {
   padding: 2px 6px;
   font-size: 11px;
   border-radius: 99px;
-  background: #fff7e8;
-  border: 1px solid #f0d3a3;
-  color: #8f5e12;
+  background: rgba(180, 120, 0, 0.1);
+  border: 1px solid rgba(180, 120, 0, 0.28);
+  color: inherit;
 }
 
 .zfsas-empty {
   margin-top: 12px;
   padding: 12px;
-  border: 1px dashed #c8d5e3;
+  border: 1px dashed var(--border-color, #c8d5e3);
   border-radius: 8px;
-  background: #fafcff;
-  color: #455261;
+  background: rgba(82, 126, 235, 0.04);
+  color: var(--text-color, #455261);
 }
 
 .zfsas-schedule-row {
@@ -1014,10 +1145,10 @@ if ($resolvedCron === '') {
 .zfsas-preview {
   margin-top: 10px;
   padding: 10px;
-  background: #f5f9ff;
-  border: 1px solid #cfe0ff;
+  background: rgba(82, 126, 235, 0.08);
+  border: 1px solid rgba(82, 126, 235, 0.24);
   border-radius: 8px;
-  color: #264b85;
+  color: var(--text-color, #264b85);
 }
 
 .zfsas-log-toolbar {
@@ -1036,11 +1167,13 @@ if ($resolvedCron === '') {
 .zfsas-log-status {
   margin-left: auto;
   font-size: 12px;
-  color: #4f5a66;
+  color: var(--text-color, #4f5a66);
+  opacity: 0.82;
 }
 
 .zfsas-log-status.error {
-  color: #8f2d2a;
+  color: var(--text-color, #8f2d2a);
+  opacity: 1;
 }
 
 .zfsas-log-output {
@@ -1050,7 +1183,7 @@ if ($resolvedCron === '') {
   overflow: auto;
   padding: 10px 12px;
   border-radius: 8px;
-  border: 1px solid #1f2f40;
+  border: 1px solid var(--border-color, #1f2f40);
   background: #0d1724;
   color: #d9edf7;
   font: 12px/1.35 Consolas, Menlo, Monaco, monospace;
@@ -1069,11 +1202,13 @@ if ($resolvedCron === '') {
 .zfsas-manual-status {
   margin-right: auto;
   font-size: 12px;
-  color: #4f5a66;
+  color: var(--text-color, #4f5a66);
+  opacity: 0.82;
 }
 
 .zfsas-manual-status.error {
-  color: #8f2d2a;
+  color: var(--text-color, #8f2d2a);
+  opacity: 1;
 }
 
 @media (max-width: 900px) {
@@ -1121,21 +1256,23 @@ if ($resolvedCron === '') {
     Manage dataset selection, retention policy, and automatic run schedule.
   </div>
 
-  <?php if (!empty($errors)) : ?>
-    <div class="zfsas-alert zfsas-alert-error">
-      <?php foreach ($errors as $error) : ?>
-        <div><?php echo h($error); ?></div>
-      <?php endforeach; ?>
-    </div>
-  <?php endif; ?>
+  <div id="save_feedback">
+    <?php if (!empty($errors)) : ?>
+      <div class="zfsas-alert zfsas-alert-error">
+        <?php foreach ($errors as $error) : ?>
+          <div><?php echo h($error); ?></div>
+        <?php endforeach; ?>
+      </div>
+    <?php endif; ?>
 
-  <?php if (!empty($notices)) : ?>
-    <div class="zfsas-alert zfsas-alert-ok">
-      <?php foreach ($notices as $notice) : ?>
-        <div><?php echo h($notice); ?></div>
-      <?php endforeach; ?>
-    </div>
-  <?php endif; ?>
+    <?php if (!empty($notices)) : ?>
+      <div class="zfsas-alert zfsas-alert-ok">
+        <?php foreach ($notices as $notice) : ?>
+          <div><?php echo h($notice); ?></div>
+        <?php endforeach; ?>
+      </div>
+    <?php endif; ?>
+  </div>
 
   <?php if ($datasetDiscoveryError !== null) : ?>
     <div class="zfsas-alert zfsas-alert-warn">
@@ -1144,7 +1281,7 @@ if ($resolvedCron === '') {
     </div>
   <?php endif; ?>
 
-  <form method="post" action="">
+  <form method="post" action="<?php echo h(pluginSettingsPageUrl($settingsPagePath, ['saved' => null])); ?>" id="zfsas_settings_form">
     <div class="zfsas-card">
       <h3>Datasets</h3>
       <div class="zfsas-help">
@@ -1217,7 +1354,7 @@ if ($resolvedCron === '') {
         <label for="prefix">Snapshot name prefix</label>
         <input id="prefix" name="prefix" class="zfsas-input" value="<?php echo h($config['PREFIX']); ?>">
         <div class="zfsas-help">
-          Safety guard: only snapshots containing the prefix <code><?php echo h($config['PREFIX']); ?></code> are eligible for automatic deletion.
+          Safety guard: only snapshots containing the prefix <code id="prefix_preview"><?php echo h($config['PREFIX']); ?></code> are eligible for automatic deletion.
         </div>
       </div>
 
@@ -1332,7 +1469,7 @@ if ($resolvedCron === '') {
 
       <div id="schedule_preview" class="zfsas-preview"></div>
       <div class="zfsas-help" style="margin-top: 10px;">
-        Current cron expression: <code><?php echo h($resolvedCron); ?></code>
+        Current cron expression: <code id="resolved_cron_value"><?php echo h($resolvedCron); ?></code>
       </div>
     </div>
 
@@ -1383,6 +1520,178 @@ if ($resolvedCron === '') {
   var logTimer = null;
   var logStreamSource = null;
   var logFingerprint = '';
+  var saveForm = byId('zfsas_settings_form');
+  var saveButton = saveForm ? saveForm.querySelector('button[type="submit"]') : null;
+  var saveButtonDefaultText = saveButton ? saveButton.textContent : 'Save Settings';
+  var saveBusy = false;
+
+  function escapeHtml(text) {
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function requestTargetUrl(form) {
+    var action = form ? form.getAttribute('action') : '';
+    if (typeof action === 'string' && action.trim() !== '') {
+      return action;
+    }
+    return window.location.pathname + window.location.search;
+  }
+
+  function renderSaveFeedback(errors, notices) {
+    var feedbackEl = byId('save_feedback');
+    if (!feedbackEl) {
+      return;
+    }
+
+    var html = '';
+    if (Array.isArray(errors) && errors.length > 0) {
+      html += '<div class="zfsas-alert zfsas-alert-error">';
+      errors.forEach(function (message) {
+        html += '<div>' + escapeHtml(message) + '</div>';
+      });
+      html += '</div>';
+    }
+
+    if (Array.isArray(notices) && notices.length > 0) {
+      html += '<div class="zfsas-alert zfsas-alert-ok">';
+      notices.forEach(function (message) {
+        html += '<div>' + escapeHtml(message) + '</div>';
+      });
+      html += '</div>';
+    }
+
+    feedbackEl.innerHTML = html;
+  }
+
+  function requestJsonFormPost(form, onSuccess, onError, onComplete) {
+    var xhr = new XMLHttpRequest();
+    var finished = false;
+
+    function finalize() {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      if (typeof onComplete === 'function') {
+        onComplete();
+      }
+    }
+
+    xhr.open('POST', requestTargetUrl(form), true);
+    xhr.timeout = 20000;
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
+    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+    var formData = new FormData(form);
+    var requestParams = new URLSearchParams();
+    formData.forEach(function (value, key) {
+      requestParams.append(key, value);
+    });
+    requestParams.append('ajax', 'save');
+
+    var csrfToken = '';
+    if (typeof window.csrf_token === 'string' && window.csrf_token.length > 0) {
+      csrfToken = window.csrf_token;
+    } else {
+      var csrfInput = document.querySelector('input[name="csrf_token"]');
+      if (csrfInput && typeof csrfInput.value === 'string' && csrfInput.value.length > 0) {
+        csrfToken = csrfInput.value;
+      }
+    }
+
+    if (csrfToken !== '') {
+      xhr.setRequestHeader('X-CSRF-Token', csrfToken);
+      if (!requestParams.has('csrf_token')) {
+        requestParams.append('csrf_token', csrfToken);
+      }
+    }
+
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) {
+        return;
+      }
+
+      var payload;
+      try {
+        payload = JSON.parse(xhr.responseText);
+      } catch (parseError) {
+        try {
+          onError(new Error('Invalid save response.'));
+        } finally {
+          finalize();
+        }
+        return;
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        try {
+          onError(new Error((payload && payload.errors && payload.errors[0]) ? payload.errors[0] : ('HTTP ' + xhr.status)), payload);
+        } finally {
+          finalize();
+        }
+        return;
+      }
+
+      try {
+        onSuccess(payload);
+      } finally {
+        finalize();
+      }
+    };
+
+    xhr.onerror = function () {
+      try {
+        onError(new Error('Network error while saving settings.'));
+      } finally {
+        finalize();
+      }
+    };
+
+    xhr.ontimeout = function () {
+      try {
+        onError(new Error('Save request timed out. The settings may still be applying; reload the page and confirm.'));
+      } finally {
+        finalize();
+      }
+    };
+
+    xhr.onabort = function () {
+      try {
+        onError(new Error('Save request was interrupted. Reload the page and try again.'));
+      } finally {
+        finalize();
+      }
+    };
+
+    xhr.send(requestParams.toString());
+  }
+
+  function setSaveButtonState(isBusy) {
+    saveBusy = !!isBusy;
+    if (!saveButton) {
+      return;
+    }
+
+    if (saveBusy) {
+      saveButton.disabled = true;
+      saveButton.setAttribute('disabled', 'disabled');
+      saveButton.setAttribute('aria-busy', 'true');
+      saveButton.textContent = 'Saving...';
+      return;
+    }
+
+    saveButton.disabled = false;
+    saveButton.removeAttribute('disabled');
+    saveButton.setAttribute('aria-busy', 'false');
+    saveButton.textContent = saveButtonDefaultText;
+    saveButton.blur();
+  }
 
   function pad2(value) {
     value = parseInt(value, 10);
@@ -1963,6 +2272,68 @@ if ($resolvedCron === '') {
           setManualRunStatus('Manual run start failed: ' + error.message, true);
         }
       );
+    });
+  }
+
+  if (saveForm) {
+    saveForm.addEventListener('submit', function (event) {
+      event.preventDefault();
+      if (saveBusy) {
+        return;
+      }
+
+      var saveFailsafeTimer = null;
+      setSaveButtonState(true);
+      renderSaveFeedback([], ['Saving settings...']);
+
+      saveFailsafeTimer = window.setTimeout(function () {
+        if (!saveBusy) {
+          return;
+        }
+        setSaveButtonState(false);
+        renderSaveFeedback(['Save is taking longer than expected. Reload the page and verify whether the settings were applied.'], []);
+      }, 25000);
+
+      try {
+        requestJsonFormPost(
+          saveForm,
+          function (data) {
+            renderSaveFeedback(data.errors || [], data.notices || ['Settings saved.']);
+
+            var cronValueEl = byId('resolved_cron_value');
+            if (cronValueEl && typeof data.resolvedCron === 'string') {
+              cronValueEl.textContent = data.resolvedCron;
+            }
+
+            var prefixPreviewEl = byId('prefix_preview');
+            var prefixInputEl = byId('prefix');
+            if (prefixPreviewEl) {
+              prefixPreviewEl.textContent = (typeof data.prefix === 'string' && data.prefix.length > 0)
+                ? data.prefix
+                : (prefixInputEl ? prefixInputEl.value : '');
+            }
+          },
+          function (error, payload) {
+            if (payload && Array.isArray(payload.errors)) {
+              renderSaveFeedback(payload.errors, payload.notices || []);
+            } else {
+              renderSaveFeedback([error.message], []);
+            }
+          },
+          function () {
+            if (saveFailsafeTimer !== null) {
+              window.clearTimeout(saveFailsafeTimer);
+            }
+            setSaveButtonState(false);
+          }
+        );
+      } catch (error) {
+        if (saveFailsafeTimer !== null) {
+          window.clearTimeout(saveFailsafeTimer);
+        }
+        setSaveButtonState(false);
+        renderSaveFeedback(['Save request could not be started: ' + String(error && error.message ? error.message : error)], []);
+      }
     });
   }
 

@@ -2,8 +2,9 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Reduced low-space cleanup log noise so newest-autosnapshot protection is reported once during the initial dataset pass instead of being repeated during every pool scan.
-- Cleanup behavior is unchanged: newest autosnapshots are still protected from automatic deletion.
+- Fixed the settings page so saving no longer drops some systems onto a blank-looking page.
+- Improved theme compatibility so alternate Unraid themes render the settings UI more reliably instead of mixing unreadable light and dark colors.
+- Kept the faster in-page save behavior while restoring normal button recovery and clearer save feedback.
   </CHANGES>
 
   <DESCRIPTION>

@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.03.27.2 (Testing Branch Only)
+
+- Fixed the settings page so saving no longer drops some systems onto a blank-looking page.
+- Improved theme compatibility so alternate Unraid themes render the settings UI more reliably instead of mixing unreadable light and dark colors.
+- Kept the faster in-page save behavior while restoring normal button recovery and clearer save feedback.
+
 ### 2026.03.06.1 (2026-03-06)
 
 - Reduced low-space cleanup log noise so newest-autosnapshot protection is reported once during the initial dataset pass instead of being repeated throughout pool cleanup scans.
