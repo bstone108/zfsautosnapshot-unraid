@@ -56,7 +56,12 @@ if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     ], 405);
 }
 
+if (!defined('ZFSAS_FORCE_AJAX_SAVE')) {
+    define('ZFSAS_FORCE_AJAX_SAVE', true);
+}
+
 $_POST['ajax'] = 'save';
+$_REQUEST['ajax'] = 'save';
 $_SERVER['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest';
 
 require __DIR__ . '/settings.php';

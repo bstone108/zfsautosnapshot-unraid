@@ -723,7 +723,7 @@ function renderConfig($config)
 }
 
 $isPostRequest = (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST');
-$isAjaxSaveRequest = ($isPostRequest && isAjaxSaveRequest());
+$isAjaxSaveRequest = ((defined('ZFSAS_FORCE_AJAX_SAVE') && ZFSAS_FORCE_AJAX_SAVE) || ($isPostRequest && isAjaxSaveRequest()));
 
 $installedVersion = $isAjaxSaveRequest ? '' : detectInstalledPluginVersion($pluginName);
 

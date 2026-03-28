@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.03.28.1 (Testing Branch Only)
+
+- Forced the dedicated save endpoint into JSON mode so alternate-theme and unusual browser setups no longer depend on request headers to decide between JSON and HTML responses.
+- This is aimed at systems where Save reached the right endpoint but still came back as HTML, which made the page report an invalid save response.
+- Kept the theme readability and save-feedback improvements from the previous testing builds.
+
 ### 2026.03.27.3 (Testing Branch Only)
 
 - Fixed alternate-theme save failures by moving in-page settings saves to a dedicated save endpoint that is less likely to be polluted by WebGUI or theme wrapper output.
