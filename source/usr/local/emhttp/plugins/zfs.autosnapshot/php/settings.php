@@ -46,14 +46,31 @@ function h($value)
 
 function sendJsonResponse($payload, $statusCode = 200)
 {
-    http_response_code((int) $statusCode);
-    header('Content-Type: application/json; charset=UTF-8');
+    while (ob_get_level() > 0) {
+        @ob_end_clean();
+    }
+
+    if (!headers_sent()) {
+        http_response_code((int) $statusCode);
+        header('Content-Type: application/json; charset=UTF-8');
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        header('X-Content-Type-Options: nosniff');
+    }
+
     echo json_encode($payload);
     exit;
 }
 
 function sendClientRedirectPage($url, $message = 'Settings saved. Returning to the settings page...')
 {
+    if (!headers_sent()) {
+        header('Location: ' . (string) $url, true, 303);
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        exit;
+    }
+
     $target = htmlspecialchars((string) $url, ENT_QUOTES, 'UTF-8');
     $text = htmlspecialchars((string) $message, ENT_QUOTES, 'UTF-8');
 
@@ -758,7 +775,7 @@ if (!$isAjaxSaveRequest && !empty($datasetParseWarnings)) {
     }
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if ($isPostRequest) {
     $submitted = $config;
 
     $submitted['PREFIX'] = trimValue($_POST['prefix'] ?? $submitted['PREFIX']);
@@ -925,8 +942,8 @@ if ($resolvedCron === '') {
   font-weight: 600;
   border: 1px solid var(--border-color, #bfd3ff);
   border-radius: 999px;
-  background: rgba(82, 126, 235, 0.12);
-  color: var(--text-color, #1f4b8c);
+  background: var(--input-background-color, var(--background-color, rgba(82, 126, 235, 0.08)));
+  color: inherit;
 }
 
 .zfsas-card {
@@ -1008,19 +1025,19 @@ if ($resolvedCron === '') {
 .zfsas-alert-error {
   background: rgba(176, 0, 32, 0.08);
   border: 1px solid rgba(176, 0, 32, 0.28);
-  color: var(--text-color, #8f2d2a);
+  color: inherit;
 }
 
 .zfsas-alert-ok {
   background: rgba(46, 125, 50, 0.1);
   border: 1px solid rgba(46, 125, 50, 0.28);
-  color: var(--text-color, #21693a);
+  color: inherit;
 }
 
 .zfsas-alert-warn {
   background: rgba(180, 120, 0, 0.1);
   border: 1px solid rgba(180, 120, 0, 0.28);
-  color: var(--text-color, #8a5a12);
+  color: inherit;
 }
 
 .zfsas-dataset-toolbar {
@@ -1146,10 +1163,10 @@ if ($resolvedCron === '') {
 .zfsas-preview {
   margin-top: 10px;
   padding: 10px;
-  background: rgba(82, 126, 235, 0.08);
-  border: 1px solid rgba(82, 126, 235, 0.24);
+  background: var(--background-color, rgba(82, 126, 235, 0.08));
+  border: 1px solid var(--border-color, rgba(82, 126, 235, 0.24));
   border-radius: 8px;
-  color: var(--text-color, #264b85);
+  color: inherit;
 }
 
 .zfsas-log-toolbar {
@@ -1569,6 +1586,33 @@ if ($resolvedCron === '') {
     feedbackEl.innerHTML = html;
   }
 
+  function parsePossiblyWrappedJson(rawText) {
+    var raw = String(rawText == null ? '' : rawText).trim();
+    var parseError = null;
+
+    if (raw === '') {
+      throw new Error('Empty response.');
+    }
+
+    try {
+      return JSON.parse(raw);
+    } catch (error) {
+      parseError = error;
+    }
+
+    var start = raw.indexOf('{');
+    var end = raw.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      var candidate = raw.slice(start, end + 1);
+      var payload = JSON.parse(candidate);
+      if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'ok')) {
+        return payload;
+      }
+    }
+
+    throw parseError || new Error('Invalid JSON response.');
+  }
+
   function requestJsonFormPost(form, targetUrl, onSuccess, onError, onComplete) {
     var xhr = new XMLHttpRequest();
     var finished = false;
@@ -1620,7 +1664,7 @@ if ($resolvedCron === '') {
 
       var payload;
       try {
-        payload = JSON.parse(xhr.responseText);
+        payload = parsePossiblyWrappedJson(xhr.responseText);
       } catch (parseError) {
         try {
           var raw = String(xhr.responseText || '').trim();
@@ -1969,9 +2013,14 @@ if ($resolvedCron === '') {
 
       var payload;
       try {
-        payload = JSON.parse(xhr.responseText);
+        payload = parsePossiblyWrappedJson(xhr.responseText);
       } catch (parseError) {
-        onError(new Error('Invalid JSON response.'));
+        var raw = String(xhr.responseText || '').trim();
+        if (raw.charAt(0) === '<') {
+          onError(new Error('Session expired or security token was rejected. Reload the page and try again.'));
+        } else {
+          onError(new Error('Invalid JSON response.'));
+        }
         return;
       }
 

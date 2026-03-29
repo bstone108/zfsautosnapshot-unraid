@@ -8,6 +8,26 @@ DEFAULT_CFG="${PLUGIN_DIR}/config/zfs_autosnapshot.conf.example"
 TARGET_CFG="${BOOT_PLUGIN_DIR}/zfs_autosnapshot.conf"
 CRON_FILE="/etc/cron.d/zfs_autosnapshot"
 
+refresh_web_runtime() {
+  local refreshed=0
+
+  if [[ -x /etc/rc.d/rc.php-fpm ]]; then
+    /etc/rc.d/rc.php-fpm restart >/dev/null 2>&1 || /etc/rc.d/rc.php-fpm reload >/dev/null 2>&1 || true
+    refreshed=1
+  fi
+
+  if [[ -x /etc/rc.d/rc.nginx ]]; then
+    /etc/rc.d/rc.nginx reload >/dev/null 2>&1 || /etc/rc.d/rc.nginx restart >/dev/null 2>&1 || true
+    refreshed=1
+  fi
+
+  if (( refreshed )); then
+    echo "WebGUI runtime refreshed."
+  else
+    echo "WebGUI runtime refresh skipped (rc.php-fpm/rc.nginx not found)." >&2
+  fi
+}
+
 mkdir -p "$BOOT_PLUGIN_DIR"
 
 if [[ ! -f "$TARGET_CFG" ]]; then
@@ -46,6 +66,10 @@ fi
 if [[ -x /etc/rc.d/rc.crond ]]; then
   /etc/rc.d/rc.crond restart >/dev/null 2>&1 || true
 fi
+
+# Refresh php-fpm/nginx so updated plugin PHP is served immediately on systems
+# that keep stale PHP workers or opcache across plugin upgrades.
+refresh_web_runtime
 
 if (( sync_exit != 0 )); then
   echo "WARNING: sync-cron.sh failed during install/upgrade (exit ${sync_exit})." >&2

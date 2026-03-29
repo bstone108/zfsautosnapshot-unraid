@@ -5,6 +5,13 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.03.28.2 (Testing Branch Only)
+
+- Hardened settings saves so even if stray WebGUI or theme output gets injected ahead of the response, the plugin is much more likely to recover cleanly instead of reporting an invalid save response.
+- Improved save fallback behavior so non-AJAX saves use a cleaner redirect path instead of leaving some systems on a blank-looking page.
+- Install and upgrade now refresh the WebGUI runtime so updated plugin PHP is picked up immediately on servers that keep stale PHP workers or opcache alive.
+- Continued smoothing out alternate-theme rendering by removing a few remaining fixed text-color assumptions in the settings UI.
+
 ### 2026.03.28.1 (Testing Branch Only)
 
 - Forced the dedicated save endpoint into JSON mode so alternate-theme and unusual browser setups no longer depend on request headers to decide between JSON and HTML responses.
