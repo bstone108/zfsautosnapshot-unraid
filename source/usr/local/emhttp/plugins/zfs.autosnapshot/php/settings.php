@@ -1548,6 +1548,7 @@ if ($resolvedCron === '') {
   var logApiUrl = <?php echo json_encode($logApiUrl); ?>;
   var logStreamApiUrl = <?php echo json_encode($logStreamApiUrl); ?>;
   var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
+  var saveApiUrl = <?php echo json_encode($saveApiUrl); ?>;
   var logView = 'summary';
   var logPaused = false;
   var logTimer = null;

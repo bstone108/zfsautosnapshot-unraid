@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.03.29.2 (Testing Branch Only)
+
+- Fixed the new save compatibility probe after a JavaScript variable was missed in the prior testing release.
+- This restores the probe warning logic without breaking the settings page on systems that were otherwise saving normally.
+
 ### 2026.03.29.1 (Testing Branch Only)
 
 - Hardened settings saves again so the plugin can recover more gracefully if another plugin or theme adds stray output around save responses.
