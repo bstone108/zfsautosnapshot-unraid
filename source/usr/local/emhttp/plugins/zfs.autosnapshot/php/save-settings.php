@@ -1,8 +1,19 @@
 <?php
 ob_start();
+@ini_set('display_errors', '0');
+
+if (!defined('ZFSAS_JSON_BEGIN')) {
+    define('ZFSAS_JSON_BEGIN', 'ZFSAS_JSON_BEGIN');
+}
+
+if (!defined('ZFSAS_JSON_END')) {
+    define('ZFSAS_JSON_END', 'ZFSAS_JSON_END');
+}
 
 function flushSaveJson($payload, $statusCode = 200)
 {
+    $GLOBALS['zfsas_json_response_sent'] = true;
+
     while (ob_get_level() > 0) {
         ob_end_clean();
     }
@@ -13,9 +24,12 @@ function flushSaveJson($payload, $statusCode = 200)
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');
         header('X-Content-Type-Options: nosniff');
+        header('X-Zfsas-Response-Mode: marked-json');
     }
 
+    echo ZFSAS_JSON_BEGIN;
     echo json_encode($payload);
+    echo ZFSAS_JSON_END;
     exit;
 }
 
@@ -31,6 +45,10 @@ set_error_handler(function ($severity, $message, $file, $line) {
 });
 
 register_shutdown_function(function () {
+    if (!empty($GLOBALS['zfsas_json_response_sent'])) {
+        return;
+    }
+
     $error = error_get_last();
     if ($error === null) {
         return;
@@ -44,6 +62,21 @@ register_shutdown_function(function () {
     flushSaveJson([
         'ok' => false,
         'errors' => ['Save request failed before a valid response could be returned. Reload the page and try again.'],
+        'notices' => [],
+    ], 500);
+});
+
+set_exception_handler(function ($throwable) {
+    error_log(sprintf(
+        'zfs.autosnapshot save-settings exception: %s in %s:%d',
+        (string) $throwable->getMessage(),
+        (string) $throwable->getFile(),
+        (int) $throwable->getLine()
+    ));
+
+    flushSaveJson([
+        'ok' => false,
+        'errors' => ['Save request failed unexpectedly. Reload the page and try again.'],
         'notices' => [],
     ], 500);
 });
@@ -63,6 +96,15 @@ if (!defined('ZFSAS_FORCE_AJAX_SAVE')) {
 $_POST['ajax'] = 'save';
 $_REQUEST['ajax'] = 'save';
 $_SERVER['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest';
+
+if (trim((string) ($_POST['probe'] ?? '')) === '1') {
+    flushSaveJson([
+        'ok' => true,
+        'probe' => true,
+        'notices' => ['Save endpoint probe completed successfully.'],
+        'errors' => [],
+    ]);
+}
 
 require __DIR__ . '/settings.php';
 

@@ -44,8 +44,18 @@ function h($value)
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
+if (!defined('ZFSAS_JSON_BEGIN')) {
+    define('ZFSAS_JSON_BEGIN', 'ZFSAS_JSON_BEGIN');
+}
+
+if (!defined('ZFSAS_JSON_END')) {
+    define('ZFSAS_JSON_END', 'ZFSAS_JSON_END');
+}
+
 function sendJsonResponse($payload, $statusCode = 200)
 {
+    $GLOBALS['zfsas_json_response_sent'] = true;
+
     while (ob_get_level() > 0) {
         @ob_end_clean();
     }
@@ -56,9 +66,12 @@ function sendJsonResponse($payload, $statusCode = 200)
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');
         header('X-Content-Type-Options: nosniff');
+        header('X-Zfsas-Response-Mode: marked-json');
     }
 
+    echo ZFSAS_JSON_BEGIN;
     echo json_encode($payload);
+    echo ZFSAS_JSON_END;
     exit;
 }
 
@@ -1292,6 +1305,8 @@ if ($resolvedCron === '') {
     <?php endif; ?>
   </div>
 
+  <div id="compat_feedback"></div>
+
   <?php if ($datasetDiscoveryError !== null) : ?>
     <div class="zfsas-alert zfsas-alert-warn">
       <?php echo h($datasetDiscoveryError); ?>
@@ -1586,12 +1601,51 @@ if ($resolvedCron === '') {
     feedbackEl.innerHTML = html;
   }
 
+  function renderCompatibilityFeedback(message) {
+    var feedbackEl = byId('compat_feedback');
+    if (!feedbackEl) {
+      return;
+    }
+
+    if (typeof message !== 'string' || message.trim() === '') {
+      feedbackEl.innerHTML = '';
+      return;
+    }
+
+    feedbackEl.innerHTML =
+      '<div class="zfsas-alert zfsas-alert-warn">'
+      + '<div>' + escapeHtml(message) + '</div>'
+      + '</div>';
+  }
+
+  function extractMarkedJson(raw) {
+    var beginMarker = 'ZFSAS_JSON_BEGIN';
+    var endMarker = 'ZFSAS_JSON_END';
+    var start = raw.indexOf(beginMarker);
+    if (start === -1) {
+      return null;
+    }
+
+    var contentStart = start + beginMarker.length;
+    var end = raw.indexOf(endMarker, contentStart);
+    if (end === -1 || end <= contentStart) {
+      return null;
+    }
+
+    return raw.slice(contentStart, end).trim();
+  }
+
   function parsePossiblyWrappedJson(rawText) {
     var raw = String(rawText == null ? '' : rawText).trim();
     var parseError = null;
 
     if (raw === '') {
       throw new Error('Empty response.');
+    }
+
+    var marked = extractMarkedJson(raw);
+    if (marked !== null) {
+      return JSON.parse(marked);
     }
 
     try {
@@ -2035,10 +2089,18 @@ if ($resolvedCron === '') {
   }
 
   function requestJsonPost(url, onSuccess, onError) {
+    var bodyParams = {};
+    if (typeof onSuccess !== 'function') {
+      bodyParams = onSuccess || {};
+      onSuccess = arguments[2];
+      onError = arguments[3];
+    }
+
     var xhr = new XMLHttpRequest();
     xhr.open('POST', url, true);
     xhr.setRequestHeader('Accept', 'application/json');
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
+    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
     var csrfToken = '';
     if (typeof window.csrf_token === 'string' && window.csrf_token.length > 0) {
@@ -2066,7 +2128,7 @@ if ($resolvedCron === '') {
 
       var payload;
       try {
-        payload = JSON.parse(xhr.responseText);
+        payload = parsePossiblyWrappedJson(xhr.responseText);
       } catch (parseError) {
         var raw = String(xhr.responseText || '').trim();
         if (raw.charAt(0) === '<') {
@@ -2084,12 +2146,43 @@ if ($resolvedCron === '') {
       onError(new Error('Network error.'));
     };
 
-    var body = '';
+    var requestParams = new URLSearchParams();
+    Object.keys(bodyParams).forEach(function (key) {
+      var value = bodyParams[key];
+      if (Array.isArray(value)) {
+        value.forEach(function (entry) {
+          requestParams.append(key, entry);
+        });
+        return;
+      }
+      if (value !== undefined && value !== null) {
+        requestParams.append(key, value);
+      }
+    });
+
     if (csrfToken !== '') {
-      body = 'csrf_token=' + encodeURIComponent(csrfToken);
+      requestParams.append('csrf_token', csrfToken);
     }
 
-    xhr.send(body);
+    xhr.send(requestParams.toString());
+  }
+
+  function runSaveCompatibilityProbe() {
+    requestJsonPost(
+      saveApiUrl,
+      {probe: '1'},
+      function (data) {
+        if (data && data.ok === true && data.probe === true) {
+          renderCompatibilityFeedback('');
+          return;
+        }
+
+        renderCompatibilityFeedback('Save endpoint compatibility probe returned an unexpected result. If saving fails on this server, another plugin or theme may be altering plugin responses.');
+      },
+      function (error) {
+        renderCompatibilityFeedback('Save endpoint compatibility probe failed: ' + error.message + ' If saving is unreliable on this server, another plugin or theme may be altering plugin responses.');
+      }
+    );
   }
 
   function fetchLiveLog(forceScrollToBottom) {
@@ -2397,6 +2490,7 @@ if ($resolvedCron === '') {
   refreshScheduleUI();
   refreshDatasetCount();
   refreshLogViewControls();
+  runSaveCompatibilityProbe();
 
   if (byId('log_output')) {
     restartLogTransport(true);
