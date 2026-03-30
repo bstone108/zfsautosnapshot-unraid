@@ -5,6 +5,35 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.03.29.2
+
+- Fixed the new save compatibility probe after a JavaScript variable was missed in the prior testing release.
+- This restores the probe warning logic without breaking the settings page on systems that were otherwise saving normally.
+
+### 2026.03.29.1 (Testing Branch Only)
+
+- Hardened settings saves again so the plugin can recover more gracefully if another plugin or theme adds stray output around save responses.
+- Added a save-endpoint compatibility check that can warn when this server appears to be altering plugin responses before you click Save.
+- Improved the internal save parser so small amounts of wrapper noise are less likely to break normal save behavior.
+
+### 2026.03.28.1 (Testing Branch Only)
+
+- Forced the dedicated save endpoint into JSON mode so alternate-theme and unusual browser setups no longer depend on request headers to decide between JSON and HTML responses.
+- This is aimed at systems where Save reached the right endpoint but still came back as HTML, which made the page report an invalid save response.
+- Kept the theme readability and save-feedback improvements from the previous testing builds.
+
+### 2026.03.27.3 (Testing Branch Only)
+
+- Fixed alternate-theme save failures by moving in-page settings saves to a dedicated save endpoint that is less likely to be polluted by WebGUI or theme wrapper output.
+- Added stronger save-response handling so the page can report a clearer message when the server returns wrapped HTML instead of clean JSON.
+- Kept the theme readability improvements from the prior testing build.
+
+### 2026.03.27.2 (Testing Branch Only)
+
+- Fixed the settings page so saving no longer drops some systems onto a blank-looking page.
+- Improved theme compatibility so alternate Unraid themes render the settings UI more reliably instead of mixing unreadable light and dark colors.
+- Kept the faster in-page save behavior while restoring normal button recovery and clearer save feedback.
+
 ### 2026.03.06.1 (2026-03-06)
 
 - Reduced low-space cleanup log noise so newest-autosnapshot protection is reported once during the initial dataset pass instead of being repeated throughout pool cleanup scans.
