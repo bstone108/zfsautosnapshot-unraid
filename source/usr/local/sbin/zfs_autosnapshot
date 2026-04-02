@@ -40,6 +40,10 @@ LOG_RUN_MARKER="[RUN_START]"
 KEEP_LOG_RUNS="${KEEP_LOG_RUNS:-2}"
 # If a single snapshot destroy runs longer than this, treat it as hung and exit.
 DESTROY_HANG_TIMEOUT_SECONDS=120
+# After deleting a snapshot, give ZFS/free-space accounting a short window to
+# reflect the reclaim before concluding the delete made no progress.
+POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS:-12}"
+POST_DELETE_RECHECK_INTERVAL_SECONDS="${POST_DELETE_RECHECK_INTERVAL_SECONDS:-2}"
 
 RUN_STARTED_AT_EPOCH=0
 RUN_STARTED_AT_HUMAN=""
@@ -417,6 +421,50 @@ get_pool_freeing() {
 	local value
 	value="$(zpool get -H -o value freeing "$1" 2>/dev/null || true)"
 	[[ "$value" =~ ^[0-9]+$ ]] && echo "$value" || echo 0
+}
+
+get_pool_effective_avail() {
+	local pool="$1"
+	local avail freeing
+
+	avail="$(get_pool_avail "$pool")"
+	[[ -n "$avail" ]] || {
+		echo ""
+		return 1
+	}
+
+	freeing="$(get_pool_freeing "$pool")"
+	echo $((avail + freeing))
+}
+
+wait_for_effective_avail_change() {
+	local pool="$1"
+	local baseline="$2"
+	local max_wait="$3"
+	local interval="$4"
+	local waited=0
+	local effective_now
+
+	while :; do
+		effective_now="$(get_pool_effective_avail "$pool")"
+		[[ -n "$effective_now" ]] || {
+			echo ""
+			return 1
+		}
+
+		if ((effective_now > baseline)); then
+			echo "$effective_now"
+			return 0
+		fi
+
+		if ((waited >= max_wait)); then
+			echo "$effective_now"
+			return 0
+		fi
+
+		sleep "$interval"
+		waited=$((waited + interval))
+	done
 }
 
 newline_set_contains() {
@@ -994,6 +1042,8 @@ fi
 DATASETS="$(trim "$DATASETS")"
 PREFIX="$(trim "$PREFIX")"
 KEEP_LOG_RUNS="$(trim "$KEEP_LOG_RUNS")"
+POST_DELETE_RECHECK_WAIT_SECONDS="$(trim "$POST_DELETE_RECHECK_WAIT_SECONDS")"
+POST_DELETE_RECHECK_INTERVAL_SECONDS="$(trim "$POST_DELETE_RECHECK_INTERVAL_SECONDS")"
 
 if [[ -z "$PREFIX" ]]; then
 	fail_config "Snapshot prefix is empty, which is unsafe." "Set a non-empty prefix (example: autosnapshot-) so only this plugin's snapshots can be deleted."
@@ -1023,6 +1073,12 @@ require_numeric_in_range "KEEP_LOG_RUNS" "$KEEP_LOG_RUNS" 1 50
 require_numeric_in_range "KEEP_ALL_FOR_DAYS" "$KEEP_ALL_FOR_DAYS" 1 36500
 require_numeric_in_range "KEEP_DAILY_UNTIL_DAYS" "$KEEP_DAILY_UNTIL_DAYS" 2 36500
 require_numeric_in_range "KEEP_WEEKLY_UNTIL_DAYS" "$KEEP_WEEKLY_UNTIL_DAYS" 3 36500
+require_numeric_in_range "POST_DELETE_RECHECK_WAIT_SECONDS" "$POST_DELETE_RECHECK_WAIT_SECONDS" 0 300
+require_numeric_in_range "POST_DELETE_RECHECK_INTERVAL_SECONDS" "$POST_DELETE_RECHECK_INTERVAL_SECONDS" 1 60
+
+if ((POST_DELETE_RECHECK_INTERVAL_SECONDS > POST_DELETE_RECHECK_WAIT_SECONDS && POST_DELETE_RECHECK_WAIT_SECONDS > 0)); then
+	fail_config "POST_DELETE_RECHECK_INTERVAL_SECONDS is longer than POST_DELETE_RECHECK_WAIT_SECONDS." "Lower the recheck interval or increase the total wait window."
+fi
 
 if ((KEEP_ALL_FOR_DAYS >= KEEP_DAILY_UNTIL_DAYS || KEEP_DAILY_UNTIL_DAYS >= KEEP_WEEKLY_UNTIL_DAYS)); then
 	fail_config "Retention order is invalid." "Use this order: Keep all < Keep daily until < Keep weekly until."
@@ -1074,6 +1130,7 @@ log "${LOG_RUN_MARKER} ts=$(date +'%Y-%m-%d %H:%M:%S %Z') pid=$$ mode=${RUN_MODE
 log_runtime_environment
 log "Config: datasets='${DATASETS}' prefix='${PREFIX}' dry_run=${DRY_RUN}"
 log "Retention(days): keep_all=${KEEP_ALL_FOR_DAYS} keep_daily_until=${KEEP_DAILY_UNTIL_DAYS} keep_weekly_until=${KEEP_WEEKLY_UNTIL_DAYS}"
+log "Post-delete recheck(seconds): wait=${POST_DELETE_RECHECK_WAIT_SECONDS} interval=${POST_DELETE_RECHECK_INTERVAL_SECONDS}"
 log "Logs: debug='${LOG_FILE}' summary='${SUMMARY_LOG_FILE}'"
 if [[ -f "$LEASE_STATE_FILE" ]]; then
 	log "Leases: active snapshot-manager leases loaded from '${LEASE_STATE_FILE}'"
@@ -1212,15 +1269,25 @@ for i in "${!pool_names[@]}"; do
 			after_effective_avail=$((before_effective_avail + oldest_snap_used))
 			log "Pool $pool low on space -> [DRY_RUN] simulated effective free space after delete: ${after_effective_avail}"
 		else
-			avail_after="$(get_pool_avail "$pool")"
-			if [[ -z "$avail_after" ]]; then
+			after_effective_avail="$(get_pool_effective_avail "$pool")"
+			if [[ -z "$after_effective_avail" ]]; then
 				record_low_space_unresolved_pool "$pool" "Available space could not be re-checked after deleting $oldest_snap."
 				log "Pool $pool low on space -> unable to re-check available space after deleting $oldest_snap; stopping cleanup for safety."
 				break
 			fi
 
-			freeing_after="$(get_pool_freeing "$pool")"
-			after_effective_avail=$((avail_after + freeing_after))
+			if ((after_effective_avail <= before_effective_avail && oldest_snap_used > 0 && POST_DELETE_RECHECK_WAIT_SECONDS > 0)); then
+				log "Pool $pool low on space -> waiting up to ${POST_DELETE_RECHECK_WAIT_SECONDS}s for free-space accounting to update after deleting $oldest_snap."
+				after_effective_avail="$(wait_for_effective_avail_change "$pool" "$before_effective_avail" "$POST_DELETE_RECHECK_WAIT_SECONDS" "$POST_DELETE_RECHECK_INTERVAL_SECONDS")"
+				if [[ -z "$after_effective_avail" ]]; then
+					record_low_space_unresolved_pool "$pool" "Available space could not be re-checked after deleting $oldest_snap."
+					log "Pool $pool low on space -> unable to re-check available space after deleting $oldest_snap; stopping cleanup for safety."
+					break
+				fi
+				if ((after_effective_avail > before_effective_avail)); then
+					log "Pool $pool low on space -> effective free space updated after waiting (before=${before_effective_avail} after=${after_effective_avail})."
+				fi
+			fi
 		fi
 
 		if ((after_effective_avail <= before_effective_avail)); then

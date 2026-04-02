@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.01.1 (Testing Branch Only)
+
+- Improved low-space cleanup so the plugin waits briefly for ZFS free-space accounting to catch up after deleting a snapshot.
+- This reduces false "delete would not free space" outcomes on systems where reclaim shows up a few seconds late.
+
 ### 2026.03.29.2 (Testing Branch Only)
 
 - Fixed the new save compatibility probe after a JavaScript variable was missed in the prior testing release.

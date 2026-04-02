@@ -184,6 +184,7 @@ set -euo pipefail
 state_dir="${MOCK_STATE_DIR:?}"
 snaps_file="${state_dir}/snaps.tsv"
 pools_file="${state_dir}/pools.tsv"
+pending_file="${state_dir}/pending_reclaims.tsv"
 
 pool_for_dataset() {
   local dataset="$1"
@@ -211,6 +212,34 @@ update_pool_avail() {
   mv "$tmp" "$pools_file"
 }
 
+apply_pending_reclaims() {
+  local tmp line pool delta remaining
+
+  [[ -f "$pending_file" ]] || return 0
+
+  tmp="$(mktemp "${pending_file}.tmp.XXXXXX")"
+  while IFS=$'\t' read -r pool delta remaining; do
+    [[ -n "$pool" ]] || continue
+
+    if [[ "$remaining" =~ ^[0-9]+$ ]] && (( remaining > 0 )); then
+      remaining=$((remaining - 1))
+    else
+      remaining=0
+    fi
+
+    if (( remaining == 0 )); then
+      if [[ "$delta" =~ ^[0-9]+$ ]] && (( delta > 0 )); then
+        update_pool_avail "$pool" "$delta"
+      fi
+      continue
+    fi
+
+    printf "%s\t%s\t%s\n" "$pool" "$delta" "$remaining" >> "$tmp"
+  done < "$pending_file"
+
+  mv "$tmp" "$pending_file"
+}
+
 cmd="${1:-}"
 shift || true
 
@@ -222,6 +251,7 @@ case "$cmd" in
     args=" $* "
     if [[ "$args" == *" -o avail "* ]]; then
       pool="${@: -1}"
+      apply_pending_reclaims
       awk -F '\t' -v pool="$pool" '$1 == pool { print $2; found = 1 } END { exit(found ? 0 : 1) }' "$pools_file"
       exit 0
     fi
@@ -259,6 +289,7 @@ case "$cmd" in
     snap="${1:?missing snapshot name}"
     actual_reclaim="$(awk -F '\t' -v snap="$snap" '$1 == snap { print $7; found = 1 } END { if (!found) exit 1 }' "$snaps_file")"
     dataset="$(awk -F '\t' -v snap="$snap" '$1 == snap { print $2; found = 1 } END { if (!found) exit 1 }' "$snaps_file")"
+    delay_polls="$(awk -F '\t' -v snap="$snap" '$1 == snap { print $8; found = 1 } END { if (!found) exit 1 }' "$snaps_file")"
     pool="$(pool_for_dataset "$dataset")"
 
     tmp="$(mktemp "${snaps_file}.tmp.XXXXXX")"
@@ -266,7 +297,11 @@ case "$cmd" in
     mv "$tmp" "$snaps_file"
 
     if [[ "$actual_reclaim" =~ ^[0-9]+$ ]] && (( actual_reclaim > 0 )); then
-      update_pool_avail "$pool" "$actual_reclaim"
+      if [[ "$delay_polls" =~ ^[0-9]+$ ]] && (( delay_polls > 0 )); then
+        printf "%s\t%s\t%s\n" "$pool" "$actual_reclaim" "$delay_polls" >> "$pending_file"
+      else
+        update_pool_avail "$pool" "$actual_reclaim"
+      fi
     fi
     ;;
   *)
@@ -286,6 +321,7 @@ new_case() {
   mkdir -p "${case_dir}/config" "${case_dir}/run" "${case_dir}/log" "${case_dir}/state" "${case_dir}/mockbin"
   : > "${case_dir}/state/pools.tsv"
   : > "${case_dir}/state/snaps.tsv"
+  : > "${case_dir}/state/pending_reclaims.tsv"
   : > "${case_dir}/config/snapshot_leases.tsv"
 
   write_test_script "${case_dir}"
@@ -315,6 +351,8 @@ run_case() {
   if ! PATH="${case_dir}/mockbin:${PATH}" \
     MOCK_STATE_DIR="${case_dir}/state" \
     MOCK_NOW_EPOCH="${MOCK_NOW_EPOCH:-2000000000}" \
+    POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS_OVERRIDE:-2}" \
+    POST_DELETE_RECHECK_INTERVAL_SECONDS="${POST_DELETE_RECHECK_INTERVAL_SECONDS_OVERRIDE:-1}" \
     TZ=UTC \
       "${case_dir}/zfs_autosnapshot" > "${case_dir}/stdout.log" 2>&1; then
     TEST_FAILED=1
@@ -414,6 +452,28 @@ EOF
   assert_file_contains "${case_dir}/log/summary.log" "Pools left below target because reclaim is blocked: 1"
 }
 
+test_low_space_waits_for_delayed_reclaim_accounting() {
+  local case_dir
+  case_dir="$(new_case delayed_reclaim)"
+
+  write_config "${case_dir}" "tank/data:100G"
+  cat > "${case_dir}/state/pools.tsv" <<'EOF'
+tank	40000000000	0	1000000000000	40000000000	96%	ONLINE
+EOF
+  cat > "${case_dir}/state/snaps.tsv" <<'EOF'
+tank/data@autosnapshot-old	tank/data	1999998800	70000000000	10	0	70000000000	2
+tank/data@autosnapshot-new	tank/data	1999999900	0	0	0	0	0
+EOF
+
+  run_case "${case_dir}"
+
+  assert_snapshot_missing "${case_dir}" "tank/data@autosnapshot-old"
+  assert_snapshot_exists "${case_dir}" "tank/data@autosnapshot-new"
+  assert_file_contains "${case_dir}/stdout.log" "waiting up to 2s for free-space accounting to update after deleting tank/data@autosnapshot-old"
+  assert_file_contains "${case_dir}/stdout.log" "Pool tank OK: effective_avail=110000000000 bytes (>= 107374182400)."
+  assert_file_contains "${case_dir}/log/summary.log" "Pools left below target because reclaim is blocked: 0"
+}
+
 test_low_space_never_deletes_newest_snapshot() {
   local case_dir
   case_dir="$(new_case latest_protected)"
@@ -447,6 +507,9 @@ main() {
 
   test_low_space_stops_after_no_progress_delete
   echo "PASS: low-space stops after no-progress delete"
+
+  test_low_space_waits_for_delayed_reclaim_accounting
+  echo "PASS: low-space waits for delayed reclaim accounting"
 
   test_low_space_never_deletes_newest_snapshot
   echo "PASS: low-space never deletes newest snapshot"
