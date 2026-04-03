@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.03.5 (Testing Branch Only)
+
+- Fixed plugin updates so any running snapshot job is stopped during remove and install steps instead of being left behind after an upgrade.
+- Clears stale runtime lock state during update so a crashed or force-stopped run does not block the next scheduled job.
+
 ### 2026.04.03.4 (Testing Branch Only)
 
 - Fixed low-space cleanup so snapshots with `used=0` are no longer treated as permanently undeletable when they are part of an older snapshot chain that can still unlock reclaim.

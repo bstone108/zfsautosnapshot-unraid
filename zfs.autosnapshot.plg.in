@@ -2,9 +2,8 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Fixed low-space cleanup so snapshots with `used=0` are no longer treated as permanently undeletable when they are part of an older snapshot chain that can still unlock reclaim.
-- The plugin now chooses the oldest eligible snapshot chain leader on each helpful dataset instead of getting stuck re-evaluating the same no-immediate-reclaim entries over and over.
-- Reduced repeated low-space skip noise so long cleanup runs stay easier to follow.
+- Fixed plugin updates so any running snapshot job is stopped during remove and install steps instead of being left behind after an upgrade.
+- Clears stale runtime lock state during update so a crashed or force-stopped run does not block the next scheduled job.
   </CHANGES>
 
   <DESCRIPTION>
