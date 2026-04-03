@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.03.6 (Testing Branch Only)
+
+- Fixed plugin updates again so they now stop the full snapshot-job process tree, including child delete operations, instead of only trying to stop the parent script.
+- This is specifically aimed at upgrades where a stuck cleanup run survived because the child `zfs destroy` process kept running after the main script exited.
+
 ### 2026.04.03.5 (Testing Branch Only)
 
 - Fixed plugin updates so any running snapshot job is stopped during remove and install steps instead of being left behind after an upgrade.
