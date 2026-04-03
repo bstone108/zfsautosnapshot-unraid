@@ -81,6 +81,13 @@ declare -A NO_CONSTRAINT_RECLAIM=()
 LOW_SPACE_UNRESOLVED_NOTES=$'\n'
 # shellcheck disable=SC2034  # tracked through indirect helpers
 PROTECTED_LATEST_SNAPSHOTS=$'\n'
+declare -A LOW_SPACE_DATASET_SNAPSHOT_LINES=()
+declare -A LOW_SPACE_DATASET_CANDIDATE_SNAP=()
+declare -A LOW_SPACE_DATASET_CANDIDATE_USED=()
+declare -A LOW_SPACE_DATASET_CANDIDATE_EPOCH=()
+declare -A LOW_SPACE_DATASET_ANY_SNAPS=()
+declare -A LOW_SPACE_DATASET_GENERATION=()
+declare -A LOW_SPACE_DATASET_REFRESH_GENERATION=()
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -498,7 +505,10 @@ record_skipped_held_snapshot() {
 
 	if remember_newline_entry SKIPPED_HELD_SNAPSHOTS "$snap"; then
 		COUNT_SKIPPED_HELD=$((COUNT_SKIPPED_HELD + 1))
+		return 0
 	fi
+
+	return 1
 }
 
 record_skipped_non_reclaimable_snapshot() {
@@ -506,7 +516,10 @@ record_skipped_non_reclaimable_snapshot() {
 
 	if remember_newline_entry SKIPPED_NON_RECLAIMABLE_SNAPSHOTS "$snap"; then
 		COUNT_SKIPPED_NON_RECLAIMABLE=$((COUNT_SKIPPED_NON_RECLAIMABLE + 1))
+		return 0
 	fi
+
+	return 1
 }
 
 remember_protected_latest_snapshot() {
@@ -596,6 +609,108 @@ load_snapshot_property_maps() {
 			;;
 		esac
 	done <<<"$metadata"
+}
+
+load_dataset_snapshot_inventory() {
+	local dataset="$1"
+	local inventory
+
+	if [[ -n "${LOW_SPACE_DATASET_SNAPSHOT_LINES[$dataset]+set}" ]]; then
+		return 0
+	fi
+
+	inventory="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$dataset" | grep -F "@${PREFIX}" | sort -t $'\t' -k2,2n || true)"
+	LOW_SPACE_DATASET_SNAPSHOT_LINES["$dataset"]="$inventory"
+	LOW_SPACE_DATASET_GENERATION["$dataset"]=${LOW_SPACE_DATASET_GENERATION["$dataset"]:-0}
+	LOW_SPACE_DATASET_REFRESH_GENERATION["$dataset"]=-1
+}
+
+refresh_dataset_cleanup_candidate() {
+	local dataset="$1"
+	local count_skips="${2:-1}"
+	local inventory snap_name snap_created protection_reason used_bytes written_bytes
+	local chain_start="" chain_start_epoch="" chain_start_used=0 found_snapshots=0
+	local selected_snap="" selected_epoch="" selected_used=0
+	local -A space_used_map=()
+	local -A space_userrefs_map=()
+	local -A space_written_map=()
+
+	load_dataset_snapshot_inventory "$dataset"
+	inventory="${LOW_SPACE_DATASET_SNAPSHOT_LINES[$dataset]}"
+	load_snapshot_property_maps "$dataset" space_used_map space_written_map space_userrefs_map
+
+	while IFS=$'\t' read -r snap_name snap_created; do
+		[[ -n "$snap_name" && -n "$snap_created" ]] || continue
+
+		if newline_set_contains "$simulated_deleted_snaps" "$snap_name"; then
+			continue
+		fi
+
+		found_snapshots=1
+
+		if snapshot_is_protected_latest "$snap_name"; then
+			chain_start=""
+			chain_start_epoch=""
+			chain_start_used=0
+			continue
+		fi
+
+		protection_reason="$(snapshot_protection_reason "$snap_name" "${space_userrefs_map[$snap_name]:-0}" || true)"
+		if [[ -n "$protection_reason" ]]; then
+			if ((count_skips)) && record_skipped_held_snapshot "$snap_name"; then
+				log "Low-space cleanup -> skipping held/leased snapshot: $snap_name (${protection_reason})"
+			fi
+			chain_start=""
+			chain_start_epoch=""
+			chain_start_used=0
+			continue
+		fi
+
+		used_bytes="$(snapshot_numeric_property "${space_used_map[$snap_name]:-0}" 0)"
+		written_bytes="$(snapshot_numeric_property "${space_written_map[$snap_name]:-0}" 0)"
+
+		if [[ -z "$chain_start" ]]; then
+			chain_start="$snap_name"
+			chain_start_epoch="$snap_created"
+			chain_start_used="$used_bytes"
+		fi
+
+		if ((used_bytes > 0)); then
+			selected_snap="$chain_start"
+			selected_epoch="$chain_start_epoch"
+			selected_used="$chain_start_used"
+			break
+		fi
+
+		if ((count_skips)) && record_skipped_non_reclaimable_snapshot "$snap_name"; then
+			log "Low-space cleanup -> snapshot currently shows no immediate reclaim: $snap_name (used=${used_bytes} written=${written_bytes}); it will only be deleted if it leads to an older reclaimable chain."
+		fi
+	done <<<"$inventory"
+
+	LOW_SPACE_DATASET_CANDIDATE_SNAP["$dataset"]="$selected_snap"
+	LOW_SPACE_DATASET_CANDIDATE_USED["$dataset"]="$selected_used"
+	LOW_SPACE_DATASET_CANDIDATE_EPOCH["$dataset"]="$selected_epoch"
+	LOW_SPACE_DATASET_ANY_SNAPS["$dataset"]="$found_snapshots"
+	LOW_SPACE_DATASET_REFRESH_GENERATION["$dataset"]="${LOW_SPACE_DATASET_GENERATION[$dataset]:-0}"
+}
+
+ensure_dataset_cleanup_candidate() {
+	local dataset="$1"
+	local count_skips="${2:-1}"
+	local generation refreshed_generation
+
+	load_dataset_snapshot_inventory "$dataset"
+	generation="${LOW_SPACE_DATASET_GENERATION[$dataset]:-0}"
+	refreshed_generation="${LOW_SPACE_DATASET_REFRESH_GENERATION[$dataset]:--1}"
+
+	if [[ "$generation" != "$refreshed_generation" ]]; then
+		refresh_dataset_cleanup_candidate "$dataset" "$count_skips"
+	fi
+}
+
+mark_dataset_cleanup_candidate_dirty() {
+	local dataset="$1"
+	LOW_SPACE_DATASET_GENERATION["$dataset"]=$(( ${LOW_SPACE_DATASET_GENERATION["$dataset"]:-0} + 1 ))
 }
 
 snapshot_numeric_property() {
@@ -962,7 +1077,7 @@ find_oldest_reclaimable_snapshot_for_constraints() {
 	local result_used_var_name="$4"
 	local result_any_snapshots_var_name="$5"
 	local count_skips="${6:-1}"
-	local candidate_ds snaps protection_reason used_bytes written_bytes snap_name snap_created
+	local candidate_ds candidate_snap candidate_epoch candidate_used
 	local selected_snap="" selected_snap_epoch="" selected_dataset="" selected_used=0 found_candidate_snapshots=0
 
 	for pair in "${pairs[@]}"; do
@@ -971,55 +1086,23 @@ find_oldest_reclaimable_snapshot_for_constraints() {
 			continue
 		fi
 
-		snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$candidate_ds" | grep -F "@${PREFIX}" || true)"
-		if [[ -z "$snaps" ]]; then
-			continue
+		ensure_dataset_cleanup_candidate "$candidate_ds" "$count_skips"
+
+		if (( ${LOW_SPACE_DATASET_ANY_SNAPS[$candidate_ds]:-0} > 0 )); then
+			found_candidate_snapshots=1
 		fi
 
-		found_candidate_snapshots=1
+		candidate_snap="${LOW_SPACE_DATASET_CANDIDATE_SNAP[$candidate_ds]:-}"
+		candidate_epoch="${LOW_SPACE_DATASET_CANDIDATE_EPOCH[$candidate_ds]:-}"
+		candidate_used="${LOW_SPACE_DATASET_CANDIDATE_USED[$candidate_ds]:-0}"
+		[[ -n "$candidate_snap" && -n "$candidate_epoch" ]] || continue
 
-		declare -A space_used_map=()
-		declare -A space_userrefs_map=()
-		declare -A space_written_map=()
-		load_snapshot_property_maps "$candidate_ds" space_used_map space_written_map space_userrefs_map
-
-		while IFS=$'\t' read -r snap_name snap_created; do
-			[[ -n "$snap_name" && -n "$snap_created" ]] || continue
-
-			if newline_set_contains "$simulated_deleted_snaps" "$snap_name"; then
-				continue
-			fi
-
-			if snapshot_is_protected_latest "$snap_name"; then
-				continue
-			fi
-
-			protection_reason="$(snapshot_protection_reason "$snap_name" "${space_userrefs_map[$snap_name]:-0}" || true)"
-			if [[ -n "$protection_reason" ]]; then
-				if ((count_skips)); then
-					log "Low-space cleanup -> skipping held/leased snapshot: $snap_name (${protection_reason})"
-					record_skipped_held_snapshot "$snap_name"
-				fi
-				continue
-			fi
-
-			used_bytes="$(snapshot_numeric_property "${space_used_map[$snap_name]:-0}" 0)"
-			written_bytes="$(snapshot_numeric_property "${space_written_map[$snap_name]:-0}" 0)"
-			if ((used_bytes <= 0)); then
-				if ((count_skips)); then
-					log "Low-space cleanup -> skipping non-reclaimable snapshot: $snap_name (used=${used_bytes} written=${written_bytes})"
-					record_skipped_non_reclaimable_snapshot "$snap_name"
-				fi
-				continue
-			fi
-
-			if [[ -z "$selected_snap_epoch" || "$snap_created" -lt "$selected_snap_epoch" ]]; then
-				selected_snap="$snap_name"
-				selected_snap_epoch="$snap_created"
-				selected_dataset="$candidate_ds"
-				selected_used="$used_bytes"
-			fi
-		done <<<"$snaps"
+		if [[ -z "$selected_snap_epoch" || "$candidate_epoch" -lt "$selected_snap_epoch" ]]; then
+			selected_snap="$candidate_snap"
+			selected_snap_epoch="$candidate_epoch"
+			selected_dataset="$candidate_ds"
+			selected_used="$candidate_used"
+		fi
 	done
 
 	printf -v "$result_snap_var_name" '%s' "$selected_snap"
@@ -1145,13 +1228,13 @@ write_run_summary() {
 		echo "  Deleted by low-space cleanup: ${COUNT_DELETED_SPACE}"
 		echo "  Deleted as zero-change housekeeping: ${COUNT_DELETED_ZERO_CHANGE}"
 		echo "Skipped because held or leased: ${COUNT_SKIPPED_HELD}"
-		echo "Skipped because delete would reclaim no space: ${COUNT_SKIPPED_NON_RECLAIMABLE}"
+			echo "Skipped because snapshot had no immediate reclaim path: ${COUNT_SKIPPED_NON_RECLAIMABLE}"
 		echo "Datasets left below target because reclaim is blocked: ${COUNT_LOW_SPACE_UNRESOLVED}"
 
 		if ((COUNT_LOW_SPACE_UNRESOLVED > 0)); then
 			echo
 			echo "Warnings:"
-			echo "  Some datasets stayed below their configured free-space target because no reclaimable auto snapshots could safely improve them."
+				echo "  Some datasets stayed below their configured free-space target because no deletable auto-snapshot chain could safely improve them."
 			while IFS= read -r note; do
 				[[ -n "$note" ]] || continue
 				echo "  ${note}"
@@ -1460,6 +1543,13 @@ declare -A simulated_constraint_reclaimed_bytes=()
 blocked_low_datasets=$'\n'
 blocked_low_dataset_notes=$'\n'
 simulated_deleted_snaps=$'\n'
+LOW_SPACE_DATASET_SNAPSHOT_LINES=()
+LOW_SPACE_DATASET_CANDIDATE_SNAP=()
+LOW_SPACE_DATASET_CANDIDATE_USED=()
+LOW_SPACE_DATASET_CANDIDATE_EPOCH=()
+LOW_SPACE_DATASET_ANY_SNAPS=()
+LOW_SPACE_DATASET_GENERATION=()
+LOW_SPACE_DATASET_REFRESH_GENERATION=()
 
 while :; do
 	low_dataset=""
@@ -1522,17 +1612,18 @@ while :; do
 	fi
 
 	if [[ -z "$oldest_snap" ]]; then
-		log "Dataset $low_dataset is low on space, but no reclaimable ${PREFIX} snapshots remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
+		log "Dataset $low_dataset is low on space, but no deletable ${PREFIX} snapshot chains remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
 		remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
-		remember_newline_entry blocked_low_dataset_notes "$low_dataset: No reclaimable ${PREFIX} snapshots remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
+		remember_newline_entry blocked_low_dataset_notes "$low_dataset: No deletable ${PREFIX} snapshot chains remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
 		continue
 	fi
 
-	log "Dataset $low_dataset low on space -> deleting oldest reclaimable snapshot: $oldest_snap (dataset=${oldest_snap_dataset} used=${oldest_snap_used} active_constraints=${low_dataset_active_constraints_display})"
+	log "Dataset $low_dataset low on space -> deleting oldest eligible snapshot: $oldest_snap (dataset=${oldest_snap_dataset} used=${oldest_snap_used} active_constraints=${low_dataset_active_constraints_display})"
 	do_destroy "$oldest_snap" "space_pressure"
+	remember_newline_entry simulated_deleted_snaps "$oldest_snap" >/dev/null 2>&1 || true
+	mark_dataset_cleanup_candidate_dirty "$oldest_snap_dataset"
 
 	if ((DRY_RUN)); then
-		remember_newline_entry simulated_deleted_snaps "$oldest_snap" >/dev/null 2>&1 || true
 		apply_simulated_reclaim_to_constraints "$oldest_snap_dataset" "$oldest_snap_used" simulated_constraint_reclaimed_bytes
 		after_effective_avail="$(get_dataset_effective_avail "$low_dataset" simulated_constraint_reclaimed_bytes)"
 		log "Dataset $low_dataset low on space -> [DRY_RUN] simulated effective free space after delete: ${after_effective_avail}"

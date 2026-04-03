@@ -482,7 +482,7 @@ EOF
   assert_snapshot_exists "${case_dir}" "tank/data@autosnapshot-a"
   assert_snapshot_exists "${case_dir}" "tank/data@autosnapshot-b"
   assert_file_contains "${case_dir}/stdout.log" "Keeping newest autosnapshot: tank/data@autosnapshot-a"
-  assert_file_contains "${case_dir}/log/summary.log" "Skipped because delete would reclaim no space: 1"
+  assert_file_contains "${case_dir}/log/summary.log" "Skipped because snapshot had no immediate reclaim path: 1"
   assert_file_contains "${case_dir}/log/summary.log" "Datasets left below target because reclaim is blocked: 1"
   assert_file_contains "${case_dir}/stdout.log" "Skipping snapshot create for tank/data because low-space dataset tank/data still cannot be helped by deleting any managed snapshots."
 }
@@ -509,7 +509,7 @@ EOF
   assert_snapshot_missing "${case_dir}" "tank/b@autosnapshot-b-old"
   assert_snapshot_exists "${case_dir}" "tank/b@autosnapshot-b-new"
   assert_file_contains "${case_dir}/stdout.log" "visible free space did not rise after deleting tank/a@autosnapshot-a-old"
-  assert_file_contains "${case_dir}/stdout.log" "deleting oldest reclaimable snapshot: tank/b@autosnapshot-b-old"
+  assert_file_contains "${case_dir}/stdout.log" "deleting oldest eligible snapshot: tank/b@autosnapshot-b-old"
   assert_file_contains "${case_dir}/log/summary.log" "Datasets left below target because reclaim is blocked: 0"
 }
 
@@ -542,8 +542,8 @@ EOF
 
   assert_file_contains "${case_dir}/stdout.log" "Dataset tank/shared/b is below its free-space target"
   assert_file_contains "${case_dir}/stdout.log" "active_constraints=quota:tank/shared"
-  assert_file_contains "${case_dir}/stdout.log" "deleting oldest reclaimable snapshot: tank/shared/a@autosnapshot-a-old"
-  assert_file_not_contains "${case_dir}/stdout.log" "deleting oldest reclaimable snapshot: tank/isolated/c@autosnapshot-c-old"
+  assert_file_contains "${case_dir}/stdout.log" "deleting oldest eligible snapshot: tank/shared/a@autosnapshot-a-old"
+  assert_file_not_contains "${case_dir}/stdout.log" "deleting oldest eligible snapshot: tank/isolated/c@autosnapshot-c-old"
 }
 
 test_low_space_uses_pool_wide_candidates_when_pool_is_limiting() {
@@ -572,7 +572,31 @@ EOF
 
   assert_file_contains "${case_dir}/stdout.log" "Dataset tank/main/b is below its free-space target"
   assert_file_contains "${case_dir}/stdout.log" "active_constraints=pool:tank"
-  assert_file_contains "${case_dir}/stdout.log" "deleting oldest reclaimable snapshot: tank/isolated/c@autosnapshot-c-old"
+  assert_file_contains "${case_dir}/stdout.log" "deleting oldest eligible snapshot: tank/isolated/c@autosnapshot-c-old"
+}
+
+test_low_space_deletes_zero_used_chain_leaders() {
+  local case_dir
+  case_dir="$(new_case zero_used_chain)"
+
+  write_config "${case_dir}" "tank/data:100G"
+  cat > "${case_dir}/state/pools.tsv" <<'EOF'
+tank	40000000000	0	1000000000000	40000000000	96%	ONLINE
+EOF
+  cat > "${case_dir}/state/snaps.tsv" <<'EOF'
+tank/data@autosnapshot-oldest	tank/data	1999998700	0	134217728	0	0
+tank/data@autosnapshot-middle	tank/data	1999998800	60000000000	67108864	0	60000000000
+tank/data@autosnapshot-newest	tank/data	1999999900	0	0	0	0
+EOF
+
+  run_case "${case_dir}"
+
+  assert_snapshot_missing "${case_dir}" "tank/data@autosnapshot-oldest"
+  assert_snapshot_missing "${case_dir}" "tank/data@autosnapshot-middle"
+  assert_snapshot_exists "${case_dir}" "tank/data@autosnapshot-newest"
+  assert_file_contains "${case_dir}/stdout.log" "deleting oldest eligible snapshot: tank/data@autosnapshot-oldest"
+  assert_file_contains "${case_dir}/stdout.log" "deleting oldest eligible snapshot: tank/data@autosnapshot-middle"
+  assert_file_contains "${case_dir}/stdout.log" "snapshot currently shows no immediate reclaim: tank/data@autosnapshot-oldest"
 }
 
 test_low_space_waits_for_delayed_reclaim_accounting() {
@@ -635,6 +659,9 @@ main() {
 
   test_low_space_uses_pool_wide_candidates_when_pool_is_limiting
   echo "PASS: low-space uses pool-wide candidates when the pool is limiting"
+
+  test_low_space_deletes_zero_used_chain_leaders
+  echo "PASS: low-space deletes zero-used chain leaders when they unlock reclaim"
 
   test_low_space_waits_for_delayed_reclaim_accounting
   echo "PASS: low-space waits for delayed reclaim accounting"

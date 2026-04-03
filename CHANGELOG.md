@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.03.4 (Testing Branch Only)
+
+- Fixed low-space cleanup so snapshots with `used=0` are no longer treated as permanently undeletable when they are part of an older snapshot chain that can still unlock reclaim.
+- The plugin now chooses the oldest eligible snapshot chain leader on each helpful dataset instead of getting stuck re-evaluating the same no-immediate-reclaim entries over and over.
+- Reduced repeated low-space skip noise so long cleanup runs stay easier to follow.
+
 ### 2026.04.03.3 (Testing Branch Only)
 
 - Fixed low-space cleanup so it now chooses snapshots from datasets that can actually improve the dataset that is running low on space.
