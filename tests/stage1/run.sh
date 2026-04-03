@@ -575,6 +575,28 @@ EOF
   assert_file_contains "${case_dir}/stdout.log" "deleting oldest eligible snapshot: tank/isolated/c@autosnapshot-c-old"
 }
 
+test_low_space_does_not_retry_deleted_snapshot_from_overlapping_scope() {
+  local case_dir
+  case_dir="$(new_case overlapping_scope_retry)"
+
+  write_config "${case_dir}" "tank/root:100G,tank/root/child:100G"
+  cat > "${case_dir}/state/pools.tsv" <<'EOF'
+tank	40000000000	0	1000000000000	40000000000	96%	ONLINE
+EOF
+  cat > "${case_dir}/state/snaps.tsv" <<'EOF'
+tank/root/child@autosnapshot-old	tank/root/child	1999998700	10000000000	10	0	10000000000
+tank/root/child@autosnapshot-new	tank/root/child	1999999900	0	0	0	0
+EOF
+
+  run_case "${case_dir}"
+
+  assert_snapshot_missing "${case_dir}" "tank/root/child@autosnapshot-old"
+  assert_snapshot_exists "${case_dir}" "tank/root/child@autosnapshot-new"
+  assert_file_contains "${case_dir}/stdout.log" "deleting oldest eligible snapshot: tank/root/child@autosnapshot-old"
+  assert_file_not_contains "${case_dir}/stdout.log" "Snapshot destroy command failed for 'tank/root/child@autosnapshot-old'"
+  assert_file_contains "${case_dir}/log/summary.log" "Result: Success"
+}
+
 test_low_space_deletes_zero_used_chain_leaders() {
   local case_dir
   case_dir="$(new_case zero_used_chain)"
@@ -659,6 +681,9 @@ main() {
 
   test_low_space_uses_pool_wide_candidates_when_pool_is_limiting
   echo "PASS: low-space uses pool-wide candidates when the pool is limiting"
+
+  test_low_space_does_not_retry_deleted_snapshot_from_overlapping_scope
+  echo "PASS: low-space does not retry deleted snapshots from overlapping scopes"
 
   test_low_space_deletes_zero_used_chain_leaders
   echo "PASS: low-space deletes zero-used chain leaders when they unlock reclaim"

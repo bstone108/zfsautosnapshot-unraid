@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.03.7 (Testing Branch Only)
+
+- Fixed low-space cleanup so the same deleted snapshot is not retried again through an overlapping ancestor/child dataset path.
+- This specifically fixes runs that deleted a snapshot once, then immediately tried to delete that exact same snapshot again and failed.
+
 ### 2026.04.03.6 (Testing Branch Only)
 
 - Fixed plugin updates again so they now stop the full snapshot-job process tree, including child delete operations, instead of only trying to stop the parent script.

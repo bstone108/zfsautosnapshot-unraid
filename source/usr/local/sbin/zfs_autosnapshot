@@ -713,6 +713,19 @@ mark_dataset_cleanup_candidate_dirty() {
 	LOW_SPACE_DATASET_GENERATION["$dataset"]=$(( ${LOW_SPACE_DATASET_GENERATION["$dataset"]:-0} + 1 ))
 }
 
+mark_cleanup_candidates_dirty_for_snapshot() {
+	local snap="$1"
+	local actual_dataset="${snap%@*}"
+	local pair_dataset
+
+	for pair in "${pairs[@]}"; do
+		pair_dataset="${pair%:*}"
+		if dataset_is_within_scope "$actual_dataset" "$pair_dataset"; then
+			mark_dataset_cleanup_candidate_dirty "$pair_dataset"
+		fi
+	done
+}
+
 snapshot_numeric_property() {
 	local raw="$1"
 	local fallback="${2:-0}"
@@ -1595,6 +1608,7 @@ while :; do
 	oldest_snap=""
 	oldest_snap_dataset=""
 	oldest_snap_used=0
+	oldest_snap_actual_dataset=""
 	any_candidate_snapshots=0
 	find_oldest_reclaimable_snapshot_for_constraints \
 		low_dataset_active_constraints \
@@ -1618,10 +1632,11 @@ while :; do
 		continue
 	fi
 
-	log "Dataset $low_dataset low on space -> deleting oldest eligible snapshot: $oldest_snap (dataset=${oldest_snap_dataset} used=${oldest_snap_used} active_constraints=${low_dataset_active_constraints_display})"
+	oldest_snap_actual_dataset="${oldest_snap%@*}"
+	log "Dataset $low_dataset low on space -> deleting oldest eligible snapshot: $oldest_snap (dataset=${oldest_snap_actual_dataset} used=${oldest_snap_used} active_constraints=${low_dataset_active_constraints_display})"
 	do_destroy "$oldest_snap" "space_pressure"
 	remember_newline_entry simulated_deleted_snaps "$oldest_snap" >/dev/null 2>&1 || true
-	mark_dataset_cleanup_candidate_dirty "$oldest_snap_dataset"
+	mark_cleanup_candidates_dirty_for_snapshot "$oldest_snap"
 
 	if ((DRY_RUN)); then
 		apply_simulated_reclaim_to_constraints "$oldest_snap_dataset" "$oldest_snap_used" simulated_constraint_reclaimed_bytes
