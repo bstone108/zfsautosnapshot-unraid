@@ -2,8 +2,8 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Reduced unnecessary post-delete waiting during low-space cleanup when ZFS `freeing` already shows the pool reclaim is in progress.
-- Shortened the fallback recheck wait window for cases where free-space accounting is still ambiguous after delete.
+- Fixed updates again so they can stop a running cleanup job more reliably, including an in-flight snapshot delete and orphaned older `zfs destroy` processes left behind by previous builds.
+- Running jobs now receive an explicit stop request before the updater escalates to process termination, which makes upgrades more dependable when cleanup is active.
   </CHANGES>
 
   <DESCRIPTION>

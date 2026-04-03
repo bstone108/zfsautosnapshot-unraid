@@ -33,6 +33,8 @@ KEEP_WEEKLY_UNTIL_DAYS=183
 
 LOCKFILE="${RUNTIME_DIR}/zfs_autosnapshot.lock"
 LOCKDIR="${RUNTIME_DIR}/zfs_autosnapshot.lockdir"
+ACTIVE_CHILD_PID_FILE="${RUNTIME_DIR}/zfs_autosnapshot.child.pid"
+STOP_REQUEST_FILE="${RUNTIME_DIR}/zfs_autosnapshot.stop"
 LOG_FILE="/var/log/zfs_autosnapshot.log"
 SUMMARY_LOG_FILE="/var/log/zfs_autosnapshot.last.log"
 LEASE_STATE_FILE="${CONFIG_DIR}/snapshot_leases.tsv"
@@ -55,6 +57,9 @@ RUN_USER_ERROR=""
 RUN_USER_ACTION=""
 RUN_SUMMARY_ENABLED=0
 LOCK_FALLBACK_HELD=0
+STOP_REQUESTED=0
+ACTIVE_CHILD_PID=""
+ACTIVE_CHILD_SNAP=""
 
 COUNT_CREATED=0
 COUNT_DELETED_TOTAL=0
@@ -290,10 +295,70 @@ ensure_secure_file() {
 prepare_runtime_state() {
 	ensure_secure_directory "$RUNTIME_DIR" 0700 "Runtime directory"
 	ensure_secure_file "$LOCKFILE" 0600 "Lock file"
+	if [[ -e "$ACTIVE_CHILD_PID_FILE" ]]; then
+		ensure_secure_file "$ACTIVE_CHILD_PID_FILE" 0600 "Active child PID file"
+	fi
+	if [[ -e "$STOP_REQUEST_FILE" ]]; then
+		ensure_secure_file "$STOP_REQUEST_FILE" 0600 "Stop request file"
+	fi
 	ensure_existing_directory "$(dirname "$LOG_FILE")" "Debug log directory"
 	ensure_existing_directory "$(dirname "$SUMMARY_LOG_FILE")" "Summary log directory"
 	ensure_secure_file "$LOG_FILE" 0600 "Debug log"
 	ensure_secure_file "$SUMMARY_LOG_FILE" 0600 "Run summary log"
+}
+
+clear_active_child_state() {
+	ACTIVE_CHILD_PID=""
+	ACTIVE_CHILD_SNAP=""
+	rm -f "$ACTIVE_CHILD_PID_FILE" >/dev/null 2>&1 || true
+}
+
+register_active_child() {
+	local pid="$1"
+	local snap="$2"
+
+	ACTIVE_CHILD_PID="$pid"
+	ACTIVE_CHILD_SNAP="$snap"
+	printf '%s\n' "$pid" >"$ACTIVE_CHILD_PID_FILE"
+	chmod 0600 "$ACTIVE_CHILD_PID_FILE" 2>/dev/null || true
+	chown root:root "$ACTIVE_CHILD_PID_FILE" 2>/dev/null || true
+}
+
+stop_requested() {
+	((STOP_REQUESTED != 0)) && return 0
+	[[ -f "$STOP_REQUEST_FILE" ]]
+}
+
+terminate_active_child() {
+	local reason="${1:-Stop requested.}"
+	local pid="${ACTIVE_CHILD_PID:-}"
+
+	if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+		log "$reason"
+		kill "$pid" >/dev/null 2>&1 || true
+		sleep 1
+		if kill -0 "$pid" 2>/dev/null; then
+			kill -9 "$pid" >/dev/null 2>&1 || true
+		fi
+		wait "$pid" 2>/dev/null || true
+	fi
+
+	clear_active_child_state
+}
+
+abort_if_stop_requested() {
+	if stop_requested; then
+		STOP_REQUESTED=1
+		terminate_active_child "Stop requested; shutting down current run."
+		exit 0
+	fi
+}
+
+handle_stop_signal() {
+	local signal="${1:-TERM}"
+	STOP_REQUESTED=1
+	terminate_active_child "Stop requested via ${signal}; terminating any in-flight snapshot delete."
+	exit 0
 }
 
 increment_delete_counter() {
@@ -339,9 +404,16 @@ destroy_with_watchdog() {
 
 	zfs destroy "$snap" &
 	pid=$!
+	register_active_child "$pid" "$snap"
 	start="$(date +%s)"
 
 	while kill -0 "$pid" 2>/dev/null; do
+		if stop_requested; then
+			STOP_REQUESTED=1
+			terminate_active_child "Stop requested; terminating in-flight snapshot delete: $snap"
+			exit 0
+		fi
+
 		now="$(date +%s)"
 		elapsed=$((now - start))
 
@@ -351,6 +423,7 @@ destroy_with_watchdog() {
 			sleep 1
 			kill -9 "$pid" >/dev/null 2>&1 || true
 			wait "$pid" 2>/dev/null || true
+			clear_active_child_state
 
 			RUN_ERROR_CONTEXT="zfs destroy timed out for '$snap' after ${DESTROY_HANG_TIMEOUT_SECONDS}s"
 			set_user_failure \
@@ -362,6 +435,7 @@ destroy_with_watchdog() {
 		sleep 1
 	done
 
+	clear_active_child_state
 	if wait "$pid"; then
 		wait_rc=0
 	else
@@ -1309,6 +1383,7 @@ write_run_summary() {
 on_exit() {
 	local exit_code="$?"
 	set +e
+	clear_active_child_state
 
 	if ((LOCK_FALLBACK_HELD)); then
 		rmdir "$LOCKDIR" 2>/dev/null || true
@@ -1340,6 +1415,8 @@ acquire_lock() {
 		echo "$$" >"$LOCKDIR/pid"
 		LOCK_FALLBACK_HELD=1
 	fi
+
+	rm -f "$STOP_REQUEST_FILE" "$ACTIVE_CHILD_PID_FILE" >/dev/null 2>&1 || true
 }
 
 # -----------------------------------------------------------------------------
@@ -1470,6 +1547,8 @@ fi
 
 trap 'record_error_context "$LINENO" "$BASH_COMMAND"' ERR
 trap on_exit EXIT
+trap 'handle_stop_signal TERM' TERM
+trap 'handle_stop_signal INT' INT
 
 RUN_SUMMARY_ENABLED=1
 RUN_STARTED_AT_EPOCH="$(date +%s)"
@@ -1580,6 +1659,7 @@ declare -a pool_names=()
 
 # Phase A: time-based cleanup + collect unique pools for reporting
 for pair in "${pairs[@]}"; do
+	abort_if_stop_requested
 	ds="${pair%:*}"
 	pool="${ds%%/*}"
 	remember_pool_name "$pool"
@@ -1608,6 +1688,7 @@ LOW_SPACE_DATASET_GENERATION=()
 LOW_SPACE_DATASET_REFRESH_GENERATION=()
 
 while :; do
+	abort_if_stop_requested
 	low_dataset=""
 	low_dataset_threshold=0
 	low_dataset_effective_avail=0
@@ -1616,6 +1697,7 @@ while :; do
 	declare -a low_dataset_active_constraints=()
 
 	for pair in "${pairs[@]}"; do
+		abort_if_stop_requested
 		ds="${pair%:*}"
 		thresh="${pair##*:}"
 		pool="${ds%%/*}"
@@ -1698,6 +1780,7 @@ while :; do
 			log "Dataset $low_dataset low on space -> waiting up to ${POST_DELETE_RECHECK_WAIT_SECONDS}s for free-space accounting to update after deleting $oldest_snap."
 			waited=0
 			while ((waited < POST_DELETE_RECHECK_WAIT_SECONDS)); do
+				abort_if_stop_requested
 				sleep "$POST_DELETE_RECHECK_INTERVAL_SECONDS"
 				waited=$((waited + POST_DELETE_RECHECK_INTERVAL_SECONDS))
 				after_effective_avail="$(get_dataset_effective_avail "$low_dataset")"
@@ -1733,6 +1816,7 @@ set_low_space_unresolved_state "$blocked_low_datasets" "$blocked_low_dataset_not
 timestamp="$(date +%Y-%m-%d_%H-%M-%S)"
 
 for pair in "${pairs[@]}"; do
+	abort_if_stop_requested
 	ds="${pair%:*}"
 	skip_create_for=""
 	while IFS= read -r unresolved_dataset; do

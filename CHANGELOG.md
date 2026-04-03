@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.03.9 (Testing Branch Only)
+
+- Fixed updates again so they can stop a running cleanup job more reliably, including an in-flight snapshot delete and orphaned older `zfs destroy` processes left behind by previous builds.
+- Running jobs now receive an explicit stop request before the updater escalates to process termination, which makes upgrades more dependable when cleanup is active.
+
 ### 2026.04.03.8 (Testing Branch Only)
 
 - Reduced unnecessary post-delete waiting during low-space cleanup when ZFS `freeing` already shows the pool reclaim is in progress.

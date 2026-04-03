@@ -10,7 +10,10 @@ CRON_FILE="/etc/cron.d/zfs_autosnapshot"
 RUNTIME_DIR="/var/run/zfs-autosnapshot"
 LOCK_FILE="${RUNTIME_DIR}/zfs_autosnapshot.lock"
 LOCK_DIR="${RUNTIME_DIR}/zfs_autosnapshot.lockdir"
+CHILD_PID_FILE="${RUNTIME_DIR}/zfs_autosnapshot.child.pid"
+STOP_FILE="${RUNTIME_DIR}/zfs_autosnapshot.stop"
 RUN_MATCH='/usr/local/sbin/zfs_autosnapshot'
+SNAPSHOT_PREFIX='autosnapshot-'
 
 remember_pid() {
   local var_name="$1"
@@ -36,6 +39,16 @@ list_running_pids() {
   fi
 }
 
+load_snapshot_prefix() {
+  local raw
+
+  [[ -r "$TARGET_CFG" ]] || return 0
+  raw="$(awk -F= '/^PREFIX=/{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); gsub(/^"/,"",v); gsub(/"$/,"",v); print v; exit}' "$TARGET_CFG" 2>/dev/null || true)"
+  if [[ -n "$raw" ]]; then
+    SNAPSHOT_PREFIX="$raw"
+  fi
+}
+
 read_lock_pids() {
   if [[ -r "$LOCK_FILE" ]]; then
     awk 'NR == 1 && $1 ~ /^[0-9]+$/ { print $1; exit }' "$LOCK_FILE" 2>/dev/null || true
@@ -43,6 +56,10 @@ read_lock_pids() {
 
   if [[ -r "${LOCK_DIR}/pid" ]]; then
     awk 'NR == 1 && $1 ~ /^[0-9]+$/ { print $1; exit }' "${LOCK_DIR}/pid" 2>/dev/null || true
+  fi
+
+  if [[ -r "$CHILD_PID_FILE" ]]; then
+    awk 'NR == 1 && $1 ~ /^[0-9]+$/ { print $1; exit }' "$CHILD_PID_FILE" 2>/dev/null || true
   fi
 }
 
@@ -66,6 +83,20 @@ collect_pid_tree() {
   done < <(list_child_pids "$root_pid")
 
   printf '%s\n' "$root_pid"
+}
+
+list_orphaned_destroy_pids() {
+  ps -eo pid=,args= | awk -v prefix="$SNAPSHOT_PREFIX" '
+    index($0, "zfs destroy") && index($0, "@" prefix) { print $1 }
+  ' || true
+}
+
+request_graceful_stop() {
+  mkdir -p "$RUNTIME_DIR" 2>/dev/null || true
+  : > "$STOP_FILE" 2>/dev/null || true
+  chmod 0600 "$STOP_FILE" 2>/dev/null || true
+  echo "Requested running zfs_autosnapshot job to stop."
+  sleep 2
 }
 
 stop_pid_tree() {
@@ -108,6 +139,8 @@ stop_pid_tree() {
 stop_running_jobs() {
   local pid
   local seen_pids=$'\n'
+  load_snapshot_prefix
+  request_graceful_stop
 
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
@@ -119,6 +152,11 @@ stop_running_jobs() {
     remember_pid seen_pids "$pid" >/dev/null 2>&1 || true
   done < <(list_running_pids)
 
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    remember_pid seen_pids "$pid" >/dev/null 2>&1 || true
+  done < <(list_orphaned_destroy_pids)
+
   if [[ -z "$(printf '%s' "$seen_pids" | sed '/^[[:space:]]*$/d')" ]]; then
     echo "No running zfs_autosnapshot job detected."
   else
@@ -129,6 +167,8 @@ stop_running_jobs() {
   fi
 
   rm -f "$LOCK_FILE" >/dev/null 2>&1 || true
+  rm -f "$CHILD_PID_FILE" >/dev/null 2>&1 || true
+  rm -f "$STOP_FILE" >/dev/null 2>&1 || true
   rmdir "$LOCK_DIR" >/dev/null 2>&1 || true
 }
 
