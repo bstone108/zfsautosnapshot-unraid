@@ -1291,9 +1291,8 @@ for i in "${!pool_names[@]}"; do
 		fi
 
 		if ((after_effective_avail <= before_effective_avail)); then
-			record_low_space_unresolved_pool "$pool" "Deleting ${oldest_snap} did not increase effective free space (before ${before_effective_avail}, after ${after_effective_avail})."
-			log "Pool $pool low on space -> deleting $oldest_snap did not increase effective free space (before=${before_effective_avail} after=${after_effective_avail}); stopping cleanup to avoid churn."
-			break
+			log "Pool $pool low on space -> visible free space did not rise after deleting $oldest_snap (before=${before_effective_avail} after=${after_effective_avail} used=${oldest_snap_used}); continuing cleanup because ZFS marked the snapshot reclaimable."
+			continue
 		fi
 	done
 done

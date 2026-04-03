@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.03.2 (Testing Branch Only)
+
+- Fixed low-space cleanup so one small delete on a shared pool does not stop cleanup just because active writes temporarily hide the reclaimed space.
+- The plugin now keeps working across datasets on the same pool until it either reaches the free-space target or runs out of reclaimable auto snapshots.
+
 ### 2026.04.03.1 (Testing Branch Only)
 
 - Fixed the Pool free-space target column getting cut off on the right side of the settings page.

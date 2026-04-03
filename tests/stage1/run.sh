@@ -291,6 +291,7 @@ case "$cmd" in
     actual_reclaim="$(awk -F '\t' -v snap="$snap" '$1 == snap { print $7; found = 1 } END { if (!found) exit 1 }' "$snaps_file")"
     dataset="$(awk -F '\t' -v snap="$snap" '$1 == snap { print $2; found = 1 } END { if (!found) exit 1 }' "$snaps_file")"
     delay_polls="$(awk -F '\t' -v snap="$snap" '$1 == snap { print $8; found = 1 } END { if (!found) exit 1 }' "$snaps_file")"
+    write_pressure="$(awk -F '\t' -v snap="$snap" '$1 == snap { print $9; found = 1 } END { if (!found) exit 1 }' "$snaps_file")"
     pool="$(pool_for_dataset "$dataset")"
 
     tmp="$(mktemp "${snaps_file}.tmp.XXXXXX")"
@@ -303,6 +304,9 @@ case "$cmd" in
       else
         update_pool_avail "$pool" "$actual_reclaim"
       fi
+    fi
+    if [[ "$write_pressure" =~ ^[0-9]+$ ]] && (( write_pressure > 0 )); then
+      update_pool_avail "$pool" "-${write_pressure}"
     fi
     ;;
   *)
@@ -438,25 +442,31 @@ EOF
   assert_file_contains "${case_dir}/stdout.log" "Skipping snapshot create for tank/data because pool tank stayed below its free-space target and reclaim is blocked."
 }
 
-test_low_space_stops_after_no_progress_delete() {
+test_low_space_continues_across_pool_after_masked_reclaim() {
   local case_dir
-  case_dir="$(new_case no_progress)"
+  case_dir="$(new_case masked_reclaim_across_pool)"
 
-  write_config "${case_dir}" "tank/data:100G"
+  write_config "${case_dir}" "tank/a:100G,tank/b:100G"
   cat > "${case_dir}/state/pools.tsv" <<'EOF'
 tank	40000000000	0	1000000000000	40000000000	96%	ONLINE
 EOF
   cat > "${case_dir}/state/snaps.tsv" <<'EOF'
-tank/data@autosnapshot-a	tank/data	1999998800	70000000000	10	0	0
-tank/data@autosnapshot-b	tank/data	1999998900	30000000000	10	0	30000000000
+tank/a@autosnapshot-a-old	tank/a	1999998700	126976	10	0	126976	0	33554432
+tank/a@autosnapshot-a-new	tank/a	1999999800	0	0	0	0	0	0
+tank/b@autosnapshot-b-old	tank/b	1999998800	70000000000	10	0	70000000000	0	0
+tank/b@autosnapshot-b-new	tank/b	1999999900	0	0	0	0	0	0
 EOF
 
   run_case "${case_dir}"
 
-  assert_snapshot_missing "${case_dir}" "tank/data@autosnapshot-a"
-  assert_snapshot_exists "${case_dir}" "tank/data@autosnapshot-b"
-  assert_file_contains "${case_dir}/stdout.log" "did not increase effective free space"
-  assert_file_contains "${case_dir}/log/summary.log" "Pools left below target because reclaim is blocked: 1"
+  assert_snapshot_missing "${case_dir}" "tank/a@autosnapshot-a-old"
+  assert_snapshot_exists "${case_dir}" "tank/a@autosnapshot-a-new"
+  assert_snapshot_missing "${case_dir}" "tank/b@autosnapshot-b-old"
+  assert_snapshot_exists "${case_dir}" "tank/b@autosnapshot-b-new"
+  assert_file_contains "${case_dir}/stdout.log" "visible free space did not rise after deleting tank/a@autosnapshot-a-old"
+  assert_file_contains "${case_dir}/stdout.log" "deleting oldest reclaimable snapshot: tank/b@autosnapshot-b-old"
+  assert_file_contains "${case_dir}/stdout.log" "Pool tank OK: effective_avail=109966572544 bytes (>= 107374182400)."
+  assert_file_contains "${case_dir}/log/summary.log" "Pools left below target because reclaim is blocked: 0"
 }
 
 test_low_space_waits_for_delayed_reclaim_accounting() {
@@ -512,8 +522,8 @@ main() {
   test_low_space_skips_non_reclaimable_snapshots
   echo "PASS: low-space skips non-reclaimable snapshots"
 
-  test_low_space_stops_after_no_progress_delete
-  echo "PASS: low-space stops after no-progress delete"
+  test_low_space_continues_across_pool_after_masked_reclaim
+  echo "PASS: low-space continues across pool after masked reclaim"
 
   test_low_space_waits_for_delayed_reclaim_accounting
   echo "PASS: low-space waits for delayed reclaim accounting"
