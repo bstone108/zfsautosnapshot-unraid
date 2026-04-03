@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.03.3 (Testing Branch Only)
+
+- Fixed low-space cleanup so it now chooses snapshots from datasets that can actually improve the dataset that is running low on space.
+- If the pool itself is the bottleneck, cleanup can still pull from any configured dataset on that pool.
+- If a quota-limited subtree is the bottleneck, cleanup now stays inside that subtree and leaves unrelated datasets alone.
+
 ### 2026.04.03.2 (Testing Branch Only)
 
 - Fixed low-space cleanup so one small delete on a shared pool does not stop cleanup just because active writes temporarily hide the reclaimed space.

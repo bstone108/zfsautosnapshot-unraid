@@ -75,6 +75,8 @@ SKIPPED_HELD_SNAPSHOTS=$'\n'
 SKIPPED_NON_RECLAIMABLE_SNAPSHOTS=$'\n'
 # shellcheck disable=SC2034  # tracked through indirect helpers
 LOW_SPACE_UNRESOLVED_POOLS=$'\n'
+# shellcheck disable=SC2034  # used through nameref/default helper path
+declare -A NO_CONSTRAINT_RECLAIM=()
 # shellcheck disable=SC2034  # tracked through indirect helpers
 LOW_SPACE_UNRESOLVED_NOTES=$'\n'
 # shellcheck disable=SC2034  # tracked through indirect helpers
@@ -724,22 +726,321 @@ log_runtime_environment() {
 	fi
 }
 
-upsert_pool_threshold() {
+remember_pool_name() {
 	local pool="$1"
-	local threshold="$2"
 	local i
 
 	for i in "${!pool_names[@]}"; do
 		if [[ "${pool_names[$i]}" == "$pool" ]]; then
-			if ((threshold > pool_thresholds[i])); then
-				pool_thresholds[i]=$threshold
-			fi
 			return 0
 		fi
 	done
 
 	pool_names+=("$pool")
-	pool_thresholds+=("$threshold")
+}
+
+get_dataset_avail() {
+	local dataset="$1"
+	local value
+
+	value="$(zfs get -H -p -o value available "$dataset" 2>/dev/null || zfs list -o avail -H -p "$dataset" 2>/dev/null || true)"
+	[[ "$value" =~ ^[0-9]+$ ]] && echo "$value" || echo ""
+}
+
+get_dataset_numeric_property() {
+	local dataset="$1"
+	local property="$2"
+	local value
+
+	value="$(zfs get -H -p -o value "$property" "$dataset" 2>/dev/null || true)"
+	[[ "$value" =~ ^[0-9]+$ ]] && echo "$value" || echo 0
+}
+
+get_dataset_quota_headroom() {
+	local dataset="$1"
+	local quota used
+
+	quota="$(get_dataset_numeric_property "$dataset" "quota")"
+	((quota > 0)) || {
+		echo ""
+		return 1
+	}
+
+	used="$(get_dataset_numeric_property "$dataset" "used")"
+	if ((used >= quota)); then
+		echo 0
+	else
+		echo $((quota - used))
+	fi
+}
+
+get_dataset_refquota_headroom() {
+	local dataset="$1"
+	local refquota referenced
+
+	refquota="$(get_dataset_numeric_property "$dataset" "refquota")"
+	((refquota > 0)) || {
+		echo ""
+		return 1
+	}
+
+	referenced="$(get_dataset_numeric_property "$dataset" "referenced")"
+	if ((referenced >= refquota)); then
+		echo 0
+	else
+		echo $((refquota - referenced))
+	fi
+}
+
+emit_dataset_capacity_constraints() {
+	local dataset="$1"
+	local pool="${dataset%%/*}"
+	local current pool_effective quota_headroom refquota_headroom
+
+	pool_effective="$(get_pool_effective_avail "$pool")"
+	if [[ -n "$pool_effective" ]]; then
+		printf 'pool:%s	%s
+' "$pool" "$pool_effective"
+	fi
+
+	current="$dataset"
+	while :; do
+		quota_headroom="$(get_dataset_quota_headroom "$current" || true)"
+		if [[ -n "$quota_headroom" ]]; then
+			printf 'quota:%s	%s
+' "$current" "$quota_headroom"
+		fi
+
+		[[ "$current" == "$pool" ]] && break
+		current="${current%/*}"
+	done
+
+	refquota_headroom="$(get_dataset_refquota_headroom "$dataset" || true)"
+	if [[ -n "$refquota_headroom" ]]; then
+		printf 'refquota:%s	%s
+' "$dataset" "$refquota_headroom"
+	fi
+}
+
+get_dataset_active_constraints() {
+	local dataset="$1"
+	local delta_map_name="$2"
+	local effective_var_name="$3"
+	local active_constraints_var_name="$4"
+	local token base adjusted best_value=""
+	local -n delta_ref="$delta_map_name"
+	local -n active_constraints_ref="$active_constraints_var_name"
+
+	active_constraints_ref=()
+
+	while IFS=$'	' read -r token base; do
+		[[ -n "$token" && "$base" =~ ^[0-9]+$ ]] || continue
+		adjusted=$((base + ${delta_ref[$token]:-0}))
+		((adjusted >= 0)) || adjusted=0
+
+		if [[ -z "$best_value" ]] || ((adjusted < best_value)); then
+			best_value="$adjusted"
+			active_constraints_ref=("$token")
+		elif ((adjusted == best_value)); then
+			active_constraints_ref+=("$token")
+		fi
+	done < <(emit_dataset_capacity_constraints "$dataset")
+
+	if [[ -z "$best_value" ]]; then
+		printf -v "$effective_var_name" ''
+		return 1
+	fi
+
+	printf -v "$effective_var_name" '%s' "$best_value"
+	return 0
+}
+
+get_dataset_effective_avail() {
+	local dataset="$1"
+	local delta_map_name="${2:-NO_CONSTRAINT_RECLAIM}"
+	local effective_avail
+	local -a active_constraints=()
+
+	get_dataset_active_constraints "$dataset" "$delta_map_name" effective_avail active_constraints || {
+		echo ""
+		return 1
+	}
+
+	echo "$effective_avail"
+}
+
+dataset_is_within_scope() {
+	local dataset="$1"
+	local scope="$2"
+
+	[[ "$dataset" == "$scope" || "$dataset" == "$scope/"* ]]
+}
+
+candidate_affects_constraint() {
+	local dataset="$1"
+	local constraint="$2"
+	local scope
+
+	case "$constraint" in
+	pool:*)
+		[[ "${dataset%%/*}" == "${constraint#pool:}" ]]
+		return
+		;;
+	quota:*)
+		scope="${constraint#quota:}"
+		dataset_is_within_scope "$dataset" "$scope"
+		return
+		;;
+	refquota:*)
+		# Snapshot deletion does not reliably improve refquota headroom, so treat
+		# refquota-limited datasets as non-benefiting for cross-dataset cleanup.
+		return 1
+		;;
+	esac
+
+	return 1
+}
+
+candidate_affects_any_constraint() {
+	local dataset="$1"
+	local constraints_var_name="$2"
+	local constraint
+	local -n constraints_ref="$constraints_var_name"
+
+	for constraint in "${constraints_ref[@]}"; do
+		if candidate_affects_constraint "$dataset" "$constraint"; then
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+apply_simulated_reclaim_to_constraints() {
+	local dataset="$1"
+	local reclaimed_bytes="$2"
+	local delta_map_name="$3"
+	local pool="${dataset%%/*}"
+	local current quota
+	local -n delta_ref="$delta_map_name"
+
+	((reclaimed_bytes > 0)) || return 0
+
+	delta_ref["pool:${pool}"]=$(( ${delta_ref["pool:${pool}"]:-0} + reclaimed_bytes ))
+
+	current="$dataset"
+	while :; do
+		quota="$(get_dataset_numeric_property "$current" "quota")"
+		if ((quota > 0)); then
+			delta_ref["quota:${current}"]=$(( ${delta_ref["quota:${current}"]:-0} + reclaimed_bytes ))
+		fi
+
+		[[ "$current" == "$pool" ]] && break
+		current="${current%/*}"
+	done
+}
+
+format_constraint_list() {
+	local constraints_var_name="$1"
+	local -n constraints_ref="$constraints_var_name"
+	local constraint joined=""
+
+	for constraint in "${constraints_ref[@]}"; do
+		if [[ -n "$joined" ]]; then
+			joined+=", "
+		fi
+		joined+="$constraint"
+	done
+
+	printf '%s\n' "$joined"
+}
+
+find_oldest_reclaimable_snapshot_for_constraints() {
+	local constraints_var_name="$1"
+	local result_snap_var_name="$2"
+	local result_dataset_var_name="$3"
+	local result_used_var_name="$4"
+	local result_any_snapshots_var_name="$5"
+	local count_skips="${6:-1}"
+	local candidate_ds snaps protection_reason used_bytes written_bytes snap_name snap_created
+	local selected_snap="" selected_snap_epoch="" selected_dataset="" selected_used=0 found_candidate_snapshots=0
+
+	for pair in "${pairs[@]}"; do
+		candidate_ds="${pair%:*}"
+		if ! candidate_affects_any_constraint "$candidate_ds" "$constraints_var_name"; then
+			continue
+		fi
+
+		snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$candidate_ds" | grep -F "@${PREFIX}" || true)"
+		if [[ -z "$snaps" ]]; then
+			continue
+		fi
+
+		found_candidate_snapshots=1
+
+		declare -A space_used_map=()
+		declare -A space_userrefs_map=()
+		declare -A space_written_map=()
+		load_snapshot_property_maps "$candidate_ds" space_used_map space_written_map space_userrefs_map
+
+		while IFS=$'\t' read -r snap_name snap_created; do
+			[[ -n "$snap_name" && -n "$snap_created" ]] || continue
+
+			if newline_set_contains "$simulated_deleted_snaps" "$snap_name"; then
+				continue
+			fi
+
+			if snapshot_is_protected_latest "$snap_name"; then
+				continue
+			fi
+
+			protection_reason="$(snapshot_protection_reason "$snap_name" "${space_userrefs_map[$snap_name]:-0}" || true)"
+			if [[ -n "$protection_reason" ]]; then
+				if ((count_skips)); then
+					log "Low-space cleanup -> skipping held/leased snapshot: $snap_name (${protection_reason})"
+					record_skipped_held_snapshot "$snap_name"
+				fi
+				continue
+			fi
+
+			used_bytes="$(snapshot_numeric_property "${space_used_map[$snap_name]:-0}" 0)"
+			written_bytes="$(snapshot_numeric_property "${space_written_map[$snap_name]:-0}" 0)"
+			if ((used_bytes <= 0)); then
+				if ((count_skips)); then
+					log "Low-space cleanup -> skipping non-reclaimable snapshot: $snap_name (used=${used_bytes} written=${written_bytes})"
+					record_skipped_non_reclaimable_snapshot "$snap_name"
+				fi
+				continue
+			fi
+
+			if [[ -z "$selected_snap_epoch" || "$snap_created" -lt "$selected_snap_epoch" ]]; then
+				selected_snap="$snap_name"
+				selected_snap_epoch="$snap_created"
+				selected_dataset="$candidate_ds"
+				selected_used="$used_bytes"
+			fi
+		done <<<"$snaps"
+	done
+
+	printf -v "$result_snap_var_name" '%s' "$selected_snap"
+	printf -v "$result_dataset_var_name" '%s' "$selected_dataset"
+	printf -v "$result_used_var_name" '%s' "$selected_used"
+	printf -v "$result_any_snapshots_var_name" '%s' "$found_candidate_snapshots"
+}
+
+set_low_space_unresolved_state() {
+	local datasets_state="$1"
+	local notes_state="$2"
+	local unresolved_count
+
+	LOW_SPACE_UNRESOLVED_POOLS="$datasets_state"
+	LOW_SPACE_UNRESOLVED_NOTES="$notes_state"
+	unresolved_count="$(emit_newline_entries "$datasets_state" | wc -l | tr -d '[:space:]')"
+	if [[ -n "$unresolved_count" && "$unresolved_count" =~ ^[0-9]+$ ]]; then
+		COUNT_LOW_SPACE_UNRESOLVED="$unresolved_count"
+	else
+		COUNT_LOW_SPACE_UNRESOLVED=0
+	fi
 }
 
 pick_oldest_snapshot() {
@@ -845,12 +1146,12 @@ write_run_summary() {
 		echo "  Deleted as zero-change housekeeping: ${COUNT_DELETED_ZERO_CHANGE}"
 		echo "Skipped because held or leased: ${COUNT_SKIPPED_HELD}"
 		echo "Skipped because delete would reclaim no space: ${COUNT_SKIPPED_NON_RECLAIMABLE}"
-		echo "Pools left below target because reclaim is blocked: ${COUNT_LOW_SPACE_UNRESOLVED}"
+		echo "Datasets left below target because reclaim is blocked: ${COUNT_LOW_SPACE_UNRESOLVED}"
 
 		if ((COUNT_LOW_SPACE_UNRESOLVED > 0)); then
 			echo
 			echo "Warnings:"
-			echo "  Some pools stayed below their configured free-space target because no reclaimable auto snapshots could be safely removed."
+			echo "  Some datasets stayed below their configured free-space target because no reclaimable auto snapshots could safely improve them."
 			while IFS= read -r note; do
 				[[ -n "$note" ]] || continue
 				echo "  ${note}"
@@ -1137,16 +1438,12 @@ if [[ -f "$LEASE_STATE_FILE" ]]; then
 fi
 
 declare -a pool_names=()
-declare -a pool_thresholds=()
 
-# Phase A: time-based cleanup + compute per-pool thresholds
+# Phase A: time-based cleanup + collect unique pools for reporting
 for pair in "${pairs[@]}"; do
 	ds="${pair%:*}"
-	thresh="${pair##*:}"
-
 	pool="${ds%%/*}"
-	thresh_bytes="$(threshold_to_bytes "$thresh")"
-	upsert_pool_threshold "$pool" "$thresh_bytes"
+	remember_pool_name "$pool"
 
 	time_clean_dataset "$ds"
 done
@@ -1155,156 +1452,154 @@ RUN_DATASET_COUNT="${#pairs[@]}"
 RUN_POOL_COUNT="${#pool_names[@]}"
 log "Prepared ${RUN_DATASET_COUNT} dataset entries across ${RUN_POOL_COUNT} pool(s)."
 
-# Phase B: space-based cleanup for each pool
-for i in "${!pool_names[@]}"; do
-	pool="${pool_names[$i]}"
-	min_free="${pool_thresholds[$i]}"
-	blocked_pool_datasets=$'\n'
-	simulated_deleted_snaps=$'\n'
-	simulated_reclaimed_bytes=0
+# Phase B: low-space cleanup using whichever capacity constraints currently limit
+# the low dataset. If multiple constraints tie, any dataset that can improve any
+# active constraint is eligible.
+# shellcheck disable=SC2034  # tracked through nameref helpers
+declare -A simulated_constraint_reclaimed_bytes=()
+blocked_low_datasets=$'\n'
+blocked_low_dataset_notes=$'\n'
+simulated_deleted_snaps=$'\n'
 
-	while :; do
-		avail="$(get_pool_avail "$pool")"
-		if [[ -z "$avail" ]]; then
-			log "Pool $pool check failed: unable to read available space. Skipping low-space cleanup for this pool."
-			break
-		fi
+while :; do
+	low_dataset=""
+	low_dataset_threshold=0
+	low_dataset_effective_avail=0
+	low_dataset_active_constraints_display=""
+	# shellcheck disable=SC2034  # passed by name into helper functions
+	declare -a low_dataset_active_constraints=()
 
-		freeing="$(get_pool_freeing "$pool")"
-		effective_avail=$((avail + freeing + simulated_reclaimed_bytes))
-		log "Pool $pool check: avail=${avail} freeing=${freeing} effective=${effective_avail} min_required=${min_free}"
+	for pair in "${pairs[@]}"; do
+		ds="${pair%:*}"
+		thresh="${pair##*:}"
+		pool="${ds%%/*}"
+		min_free="$(threshold_to_bytes "$thresh")"
+		declare -a active_constraints=()
 
-		if ((effective_avail >= min_free)); then
-			log "Pool $pool OK: effective_avail=$effective_avail bytes (>= $min_free)."
-			break
-		fi
-
-		oldest_snap=""
-		oldest_snap_epoch=""
-		oldest_snap_dataset=""
-		oldest_snap_used=0
-		any_pool_snapshots=0
-
-		for pair in "${pairs[@]}"; do
-			ds="${pair%:*}"
-			this_pool="${ds%%/*}"
-			[[ "$this_pool" != "$pool" ]] && continue
-			if newline_set_contains "$blocked_pool_datasets" "$ds"; then
-				continue
-			fi
-
-			snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$ds" | grep -F "@${PREFIX}" || true)"
-			if [[ -z "$snaps" ]]; then
-				continue
-			fi
-
-			any_pool_snapshots=1
-
-			declare -A space_used_map=()
-			declare -A space_userrefs_map=()
-			declare -A space_written_map=()
-			load_snapshot_property_maps "$ds" space_used_map space_written_map space_userrefs_map
-
-			ds_has_reclaimable=0
-			while IFS=$'\t' read -r snap_name snap_created; do
-				[[ -n "$snap_name" && -n "$snap_created" ]] || continue
-
-				if newline_set_contains "$simulated_deleted_snaps" "$snap_name"; then
-					continue
-				fi
-
-				if snapshot_is_protected_latest "$snap_name"; then
-					continue
-				fi
-
-				protection_reason="$(snapshot_protection_reason "$snap_name" "${space_userrefs_map[$snap_name]:-0}" || true)"
-				if [[ -n "$protection_reason" ]]; then
-					log "Pool $pool low on space -> skipping held/leased snapshot: $snap_name (${protection_reason})"
-					record_skipped_held_snapshot "$snap_name"
-					continue
-				fi
-
-				used_bytes="$(snapshot_numeric_property "${space_used_map[$snap_name]:-0}" 0)"
-				written_bytes="$(snapshot_numeric_property "${space_written_map[$snap_name]:-0}" 0)"
-				if ((used_bytes <= 0)); then
-					log "Pool $pool low on space -> skipping non-reclaimable snapshot: $snap_name (used=${used_bytes} written=${written_bytes})"
-					record_skipped_non_reclaimable_snapshot "$snap_name"
-					continue
-				fi
-
-				ds_has_reclaimable=1
-				if [[ -z "$oldest_snap_epoch" || "$snap_created" -lt "$oldest_snap_epoch" ]]; then
-					oldest_snap="$snap_name"
-					oldest_snap_epoch="$snap_created"
-					oldest_snap_dataset="$ds"
-					oldest_snap_used="$used_bytes"
-				fi
-			done <<<"$snaps"
-
-			if ((ds_has_reclaimable == 0)); then
-				if remember_newline_entry blocked_pool_datasets "$ds"; then
-					log "Pool $pool low on space -> dataset $ds has no reclaimable snapshots this run; skipping it for remaining cleanup."
-				fi
-			fi
-		done
-
-		if ((any_pool_snapshots == 0)); then
-			log "Pool $pool low on space, but no ${PREFIX} snapshots remain for listed datasets."
-			break
-		fi
-
-		if [[ -z "$oldest_snap" ]]; then
-			record_low_space_unresolved_pool "$pool" "No reclaimable ${PREFIX} snapshots remain across the configured datasets."
-			log "Pool $pool low on space, but no reclaimable ${PREFIX} snapshots remain across the configured datasets."
-			break
-		fi
-
-		before_effective_avail="$effective_avail"
-		log "Pool $pool low on space -> deleting oldest reclaimable snapshot: $oldest_snap (dataset=${oldest_snap_dataset} used=${oldest_snap_used})"
-		do_destroy "$oldest_snap" "space_pressure"
-
-		if ((DRY_RUN)); then
-			remember_newline_entry simulated_deleted_snaps "$oldest_snap" >/dev/null 2>&1 || true
-			simulated_reclaimed_bytes=$((simulated_reclaimed_bytes + oldest_snap_used))
-			after_effective_avail=$((before_effective_avail + oldest_snap_used))
-			log "Pool $pool low on space -> [DRY_RUN] simulated effective free space after delete: ${after_effective_avail}"
-		else
-			after_effective_avail="$(get_pool_effective_avail "$pool")"
-			if [[ -z "$after_effective_avail" ]]; then
-				record_low_space_unresolved_pool "$pool" "Available space could not be re-checked after deleting $oldest_snap."
-				log "Pool $pool low on space -> unable to re-check available space after deleting $oldest_snap; stopping cleanup for safety."
-				break
-			fi
-
-			if ((after_effective_avail <= before_effective_avail && oldest_snap_used > 0 && POST_DELETE_RECHECK_WAIT_SECONDS > 0)); then
-				log "Pool $pool low on space -> waiting up to ${POST_DELETE_RECHECK_WAIT_SECONDS}s for free-space accounting to update after deleting $oldest_snap."
-				after_effective_avail="$(wait_for_effective_avail_change "$pool" "$before_effective_avail" "$POST_DELETE_RECHECK_WAIT_SECONDS" "$POST_DELETE_RECHECK_INTERVAL_SECONDS")"
-				if [[ -z "$after_effective_avail" ]]; then
-					record_low_space_unresolved_pool "$pool" "Available space could not be re-checked after deleting $oldest_snap."
-					log "Pool $pool low on space -> unable to re-check available space after deleting $oldest_snap; stopping cleanup for safety."
-					break
-				fi
-				if ((after_effective_avail > before_effective_avail)); then
-					log "Pool $pool low on space -> effective free space updated after waiting (before=${before_effective_avail} after=${after_effective_avail})."
-				fi
-			fi
-		fi
-
-		if ((after_effective_avail <= before_effective_avail)); then
-			log "Pool $pool low on space -> visible free space did not rise after deleting $oldest_snap (before=${before_effective_avail} after=${after_effective_avail} used=${oldest_snap_used}); continuing cleanup because ZFS marked the snapshot reclaimable."
+		if ! get_dataset_active_constraints "$ds" simulated_constraint_reclaimed_bytes effective_avail active_constraints; then
+			log "Dataset $ds check failed: unable to read available space. Skipping low-space cleanup for this dataset."
 			continue
 		fi
+
+		if ((effective_avail >= min_free)); then
+			continue
+		fi
+
+		if newline_set_contains "$blocked_low_datasets" "$ds"; then
+			continue
+		fi
+
+		low_dataset="$ds"
+		low_dataset_threshold="$min_free"
+		low_dataset_effective_avail="$effective_avail"
+		# shellcheck disable=SC2034  # passed by name into helper functions
+		low_dataset_active_constraints=("${active_constraints[@]}")
+		low_dataset_active_constraints_display="$(format_constraint_list low_dataset_active_constraints)"
+		break
 	done
+
+	[[ -n "$low_dataset" ]] || break
+
+	log "Dataset $low_dataset is below its free-space target: effective_avail=${low_dataset_effective_avail} min_required=${low_dataset_threshold} active_constraints=${low_dataset_active_constraints_display}"
+
+	oldest_snap=""
+	oldest_snap_dataset=""
+	oldest_snap_used=0
+	any_candidate_snapshots=0
+	find_oldest_reclaimable_snapshot_for_constraints \
+		low_dataset_active_constraints \
+		oldest_snap \
+		oldest_snap_dataset \
+		oldest_snap_used \
+		any_candidate_snapshots \
+		1
+
+	if ((any_candidate_snapshots == 0)); then
+		log "Dataset $low_dataset is low on space, but no ${PREFIX} snapshots remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
+		remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
+		remember_newline_entry blocked_low_dataset_notes "$low_dataset: No ${PREFIX} snapshots remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
+		continue
+	fi
+
+	if [[ -z "$oldest_snap" ]]; then
+		log "Dataset $low_dataset is low on space, but no reclaimable ${PREFIX} snapshots remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
+		remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
+		remember_newline_entry blocked_low_dataset_notes "$low_dataset: No reclaimable ${PREFIX} snapshots remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
+		continue
+	fi
+
+	log "Dataset $low_dataset low on space -> deleting oldest reclaimable snapshot: $oldest_snap (dataset=${oldest_snap_dataset} used=${oldest_snap_used} active_constraints=${low_dataset_active_constraints_display})"
+	do_destroy "$oldest_snap" "space_pressure"
+
+	if ((DRY_RUN)); then
+		remember_newline_entry simulated_deleted_snaps "$oldest_snap" >/dev/null 2>&1 || true
+		apply_simulated_reclaim_to_constraints "$oldest_snap_dataset" "$oldest_snap_used" simulated_constraint_reclaimed_bytes
+		after_effective_avail="$(get_dataset_effective_avail "$low_dataset" simulated_constraint_reclaimed_bytes)"
+		log "Dataset $low_dataset low on space -> [DRY_RUN] simulated effective free space after delete: ${after_effective_avail}"
+	else
+		after_effective_avail="$(get_dataset_effective_avail "$low_dataset")"
+		if [[ -z "$after_effective_avail" ]]; then
+			log "Dataset $low_dataset low on space -> unable to re-check available space after deleting $oldest_snap; marking it unresolved for now."
+			remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
+			remember_newline_entry blocked_low_dataset_notes "$low_dataset: Available space could not be re-checked after deleting ${oldest_snap}." >/dev/null 2>&1 || true
+			continue
+		fi
+
+		if ((after_effective_avail <= low_dataset_effective_avail && oldest_snap_used > 0 && POST_DELETE_RECHECK_WAIT_SECONDS > 0)); then
+			log "Dataset $low_dataset low on space -> waiting up to ${POST_DELETE_RECHECK_WAIT_SECONDS}s for free-space accounting to update after deleting $oldest_snap."
+			waited=0
+			while ((waited < POST_DELETE_RECHECK_WAIT_SECONDS)); do
+				sleep "$POST_DELETE_RECHECK_INTERVAL_SECONDS"
+				waited=$((waited + POST_DELETE_RECHECK_INTERVAL_SECONDS))
+				after_effective_avail="$(get_dataset_effective_avail "$low_dataset")"
+				[[ -n "$after_effective_avail" ]] || break
+				if ((after_effective_avail > low_dataset_effective_avail)); then
+					log "Dataset $low_dataset low on space -> effective free space updated after waiting (before=${low_dataset_effective_avail} after=${after_effective_avail})."
+					break
+				fi
+			done
+		fi
+
+		if [[ -z "$after_effective_avail" ]]; then
+			log "Dataset $low_dataset low on space -> unable to re-check available space after deleting $oldest_snap; marking it unresolved for now."
+			remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
+			remember_newline_entry blocked_low_dataset_notes "$low_dataset: Available space could not be re-checked after deleting ${oldest_snap}." >/dev/null 2>&1 || true
+			continue
+		fi
+
+		if ((after_effective_avail <= low_dataset_effective_avail)); then
+			log "Dataset $low_dataset low on space -> visible free space did not rise after deleting $oldest_snap (before=${low_dataset_effective_avail} after=${after_effective_avail} used=${oldest_snap_used}); continuing because other datasets may still benefit ${low_dataset}."
+		fi
+	fi
+
+	# A successful or simulated delete changes the current landscape, so re-check
+	# all low datasets from scratch instead of keeping prior blocked state.
+	blocked_low_datasets=$'\n'
+	blocked_low_dataset_notes=$'\n'
 done
+
+set_low_space_unresolved_state "$blocked_low_datasets" "$blocked_low_dataset_notes"
 
 # Phase C: create new snapshots
 timestamp="$(date +%Y-%m-%d_%H-%M-%S)"
 
 for pair in "${pairs[@]}"; do
 	ds="${pair%:*}"
-	pool="${ds%%/*}"
-	if newline_set_contains "$LOW_SPACE_UNRESOLVED_POOLS" "$pool"; then
-		log "Skipping snapshot create for $ds because pool $pool stayed below its free-space target and reclaim is blocked."
+	skip_create_for=""
+	while IFS= read -r unresolved_dataset; do
+		[[ -n "$unresolved_dataset" ]] || continue
+		# shellcheck disable=SC2034  # passed by name into helper functions
+		declare -a unresolved_constraints=()
+		if ! get_dataset_active_constraints "$unresolved_dataset" simulated_constraint_reclaimed_bytes unresolved_effective_avail unresolved_constraints; then
+			continue
+		fi
+		if candidate_affects_any_constraint "$ds" unresolved_constraints; then
+			skip_create_for="$unresolved_dataset"
+			break
+		fi
+	done <<<"$(emit_newline_entries "$LOW_SPACE_UNRESOLVED_POOLS")"
+	if [[ -n "$skip_create_for" ]]; then
+		log "Skipping snapshot create for $ds because low-space dataset $skip_create_for still cannot be helped by deleting any managed snapshots."
 		continue
 	fi
 	new_snap="$ds@${PREFIX}${timestamp}"

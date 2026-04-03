@@ -33,6 +33,17 @@ assert_file_contains() {
   fi
 }
 
+assert_file_not_contains() {
+  local file="$1"
+  local needle="$2"
+  if grep -Fq "$needle" "$file"; then
+    echo "Did not expect to find: $needle" >&2
+    echo "In file: $file" >&2
+    sed -n '1,240p' "$file" >&2 || true
+    fail "assert_file_not_contains failed"
+  fi
+}
+
 assert_snapshot_exists() {
   local case_dir="$1"
   local snap="$2"
@@ -185,6 +196,7 @@ set -euo pipefail
 state_dir="${MOCK_STATE_DIR:?}"
 snaps_file="${state_dir}/snaps.tsv"
 pools_file="${state_dir}/pools.tsv"
+datasets_file="${state_dir}/datasets.tsv"
 pending_file="${state_dir}/pending_reclaims.tsv"
 
 pool_for_dataset() {
@@ -251,9 +263,13 @@ case "$cmd" in
   list)
     args=" $* "
     if [[ "$args" == *" -o avail "* ]]; then
-      pool="${@: -1}"
+      dataset="${@: -1}"
       apply_pending_reclaims
-      awk -F '\t' -v pool="$pool" '$1 == pool { print $2; found = 1 } END { exit(found ? 0 : 1) }' "$pools_file"
+      if awk -F '\t' -v dataset="$dataset" '$1 == dataset { found = 1 } END { exit(found ? 0 : 1) }' "$datasets_file" 2>/dev/null; then
+        awk -F '\t' -v dataset="$dataset" '$1 == dataset { print $2; found = 1 } END { exit(found ? 0 : 1) }' "$datasets_file"
+      else
+        awk -F '\t' -v pool="$dataset" '$1 == pool { print $2; found = 1 } END { exit(found ? 0 : 1) }' "$pools_file"
+      fi
       exit 0
     fi
 
@@ -271,6 +287,33 @@ case "$cmd" in
     exit 1
     ;;
   get)
+    args=" $* "
+    if [[ "$args" == *" -o value "* ]]; then
+      dataset="${@: -1}"
+      property="${@: -2:1}"
+      apply_pending_reclaims
+      case "$property" in
+        available) column=2 ;;
+        quota) column=3 ;;
+        refquota) column=4 ;;
+        used) column=5 ;;
+        referenced) column=6 ;;
+        *)
+          echo "Unsupported mock zfs get property: ${property}" >&2
+          exit 1
+          ;;
+      esac
+
+      awk -F '\t' -v dataset="$dataset" -v column="$column" '
+        $1 == dataset {
+          print $column
+          found = 1
+        }
+        END { exit(found ? 0 : 1) }
+      ' "$datasets_file"
+      exit 0
+    fi
+
     dataset="${@: -1}"
     awk -F '\t' -v dataset="$dataset" '
       $2 == dataset || index($2, dataset "/") == 1 {
@@ -326,6 +369,7 @@ new_case() {
   mkdir -p "${case_dir}/config" "${case_dir}/run" "${case_dir}/log" "${case_dir}/state" "${case_dir}/mockbin"
   : > "${case_dir}/state/pools.tsv"
   : > "${case_dir}/state/snaps.tsv"
+  : > "${case_dir}/state/datasets.tsv"
   : > "${case_dir}/state/pending_reclaims.tsv"
   : > "${case_dir}/config/snapshot_leases.tsv"
 
@@ -340,10 +384,11 @@ new_case() {
 write_config() {
   local case_dir="$1"
   local datasets="$2"
+  local dry_run="${3:-0}"
   cat > "${case_dir}/config/zfs_autosnapshot.conf" <<EOF
 DATASETS="${datasets}"
 PREFIX="autosnapshot-"
-DRY_RUN=0
+DRY_RUN=${dry_run}
 KEEP_ALL_FOR_DAYS=14
 KEEP_DAILY_UNTIL_DAYS=30
 KEEP_WEEKLY_UNTIL_DAYS=183
@@ -438,8 +483,8 @@ EOF
   assert_snapshot_exists "${case_dir}" "tank/data@autosnapshot-b"
   assert_file_contains "${case_dir}/stdout.log" "Keeping newest autosnapshot: tank/data@autosnapshot-a"
   assert_file_contains "${case_dir}/log/summary.log" "Skipped because delete would reclaim no space: 1"
-  assert_file_contains "${case_dir}/log/summary.log" "Pools left below target because reclaim is blocked: 1"
-  assert_file_contains "${case_dir}/stdout.log" "Skipping snapshot create for tank/data because pool tank stayed below its free-space target and reclaim is blocked."
+  assert_file_contains "${case_dir}/log/summary.log" "Datasets left below target because reclaim is blocked: 1"
+  assert_file_contains "${case_dir}/stdout.log" "Skipping snapshot create for tank/data because low-space dataset tank/data still cannot be helped by deleting any managed snapshots."
 }
 
 test_low_space_continues_across_pool_after_masked_reclaim() {
@@ -465,8 +510,69 @@ EOF
   assert_snapshot_exists "${case_dir}" "tank/b@autosnapshot-b-new"
   assert_file_contains "${case_dir}/stdout.log" "visible free space did not rise after deleting tank/a@autosnapshot-a-old"
   assert_file_contains "${case_dir}/stdout.log" "deleting oldest reclaimable snapshot: tank/b@autosnapshot-b-old"
-  assert_file_contains "${case_dir}/stdout.log" "Pool tank OK: effective_avail=109966572544 bytes (>= 107374182400)."
-  assert_file_contains "${case_dir}/log/summary.log" "Pools left below target because reclaim is blocked: 0"
+  assert_file_contains "${case_dir}/log/summary.log" "Datasets left below target because reclaim is blocked: 0"
+}
+
+test_low_space_prefers_shared_quota_scope_over_unrelated_quota() {
+  local case_dir
+  case_dir="$(new_case shared_quota_scope)"
+
+  write_config "${case_dir}" "tank/shared/b:100G,tank/shared/a:100G,tank/isolated/c:100G" 1
+  cat > "${case_dir}/state/pools.tsv" <<'EOF'
+tank	500000000000	0	1000000000000	500000000000	50%	ONLINE
+EOF
+  cat > "${case_dir}/state/datasets.tsv" <<'EOF'
+tank	500000000000	0	0	0	0
+tank/shared	500000000000	107374182400	0	102005473280	0
+tank/shared/a	500000000000	0	0	0	0
+tank/shared/b	500000000000	0	0	0	0
+tank/isolated	500000000000	214748364800	0	1073741824	0
+tank/isolated/c	500000000000	0	0	0	0
+EOF
+  cat > "${case_dir}/state/snaps.tsv" <<'EOF'
+tank/shared/a@autosnapshot-a-old	tank/shared/a	1999998700	5000000000	10	0	5000000000
+tank/shared/a@autosnapshot-a-new	tank/shared/a	1999999900	0	0	0	0
+tank/shared/b@autosnapshot-b-old	tank/shared/b	1999998800	4000000000	10	0	4000000000
+tank/shared/b@autosnapshot-b-new	tank/shared/b	1999999950	0	0	0	0
+tank/isolated/c@autosnapshot-c-old	tank/isolated/c	1999998600	9000000000	10	0	9000000000
+tank/isolated/c@autosnapshot-c-new	tank/isolated/c	1999999960	0	0	0	0
+EOF
+
+  run_case "${case_dir}"
+
+  assert_file_contains "${case_dir}/stdout.log" "Dataset tank/shared/b is below its free-space target"
+  assert_file_contains "${case_dir}/stdout.log" "active_constraints=quota:tank/shared"
+  assert_file_contains "${case_dir}/stdout.log" "deleting oldest reclaimable snapshot: tank/shared/a@autosnapshot-a-old"
+  assert_file_not_contains "${case_dir}/stdout.log" "deleting oldest reclaimable snapshot: tank/isolated/c@autosnapshot-c-old"
+}
+
+test_low_space_uses_pool_wide_candidates_when_pool_is_limiting() {
+  local case_dir
+  case_dir="$(new_case pool_scope)"
+
+  write_config "${case_dir}" "tank/main/b:100G,tank/isolated/c:100G" 1
+  cat > "${case_dir}/state/pools.tsv" <<'EOF'
+tank	40000000000	0	1000000000000	40000000000	96%	ONLINE
+EOF
+  cat > "${case_dir}/state/datasets.tsv" <<'EOF'
+tank	40000000000	0	0	0	0
+tank/main	40000000000	214748364800	0	2147483648	0
+tank/main/b	40000000000	0	0	0	0
+tank/isolated	40000000000	214748364800	0	2147483648	0
+tank/isolated/c	40000000000	0	0	0	0
+EOF
+  cat > "${case_dir}/state/snaps.tsv" <<'EOF'
+tank/main/b@autosnapshot-b-old	tank/main/b	1999998800	4000000000	10	0	4000000000
+tank/main/b@autosnapshot-b-new	tank/main/b	1999999950	0	0	0	0
+tank/isolated/c@autosnapshot-c-old	tank/isolated/c	1999998700	9000000000	10	0	9000000000
+tank/isolated/c@autosnapshot-c-new	tank/isolated/c	1999999960	0	0	0	0
+EOF
+
+  run_case "${case_dir}"
+
+  assert_file_contains "${case_dir}/stdout.log" "Dataset tank/main/b is below its free-space target"
+  assert_file_contains "${case_dir}/stdout.log" "active_constraints=pool:tank"
+  assert_file_contains "${case_dir}/stdout.log" "deleting oldest reclaimable snapshot: tank/isolated/c@autosnapshot-c-old"
 }
 
 test_low_space_waits_for_delayed_reclaim_accounting() {
@@ -487,8 +593,7 @@ EOF
   assert_snapshot_missing "${case_dir}" "tank/data@autosnapshot-old"
   assert_snapshot_exists "${case_dir}" "tank/data@autosnapshot-new"
   assert_file_contains "${case_dir}/stdout.log" "waiting up to 2s for free-space accounting to update after deleting tank/data@autosnapshot-old"
-  assert_file_contains "${case_dir}/stdout.log" "Pool tank OK: effective_avail=110000000000 bytes (>= 107374182400)."
-  assert_file_contains "${case_dir}/log/summary.log" "Pools left below target because reclaim is blocked: 0"
+  assert_file_contains "${case_dir}/log/summary.log" "Datasets left below target because reclaim is blocked: 0"
 }
 
 test_low_space_never_deletes_newest_snapshot() {
@@ -509,7 +614,7 @@ EOF
   assert_snapshot_missing "${case_dir}" "tank/data@autosnapshot-old"
   assert_snapshot_exists "${case_dir}" "tank/data@autosnapshot-new"
   assert_file_contains "${case_dir}/stdout.log" "Keeping newest autosnapshot: tank/data@autosnapshot-new"
-  assert_file_contains "${case_dir}/log/summary.log" "Pools left below target because reclaim is blocked: 1"
+  assert_file_contains "${case_dir}/log/summary.log" "Datasets left below target because reclaim is blocked: 1"
 }
 
 main() {
@@ -524,6 +629,12 @@ main() {
 
   test_low_space_continues_across_pool_after_masked_reclaim
   echo "PASS: low-space continues across pool after masked reclaim"
+
+  test_low_space_prefers_shared_quota_scope_over_unrelated_quota
+  echo "PASS: low-space prefers shared quota scope over unrelated quota"
+
+  test_low_space_uses_pool_wide_candidates_when_pool_is_limiting
+  echo "PASS: low-space uses pool-wide candidates when the pool is limiting"
 
   test_low_space_waits_for_delayed_reclaim_accounting
   echo "PASS: low-space waits for delayed reclaim accounting"
