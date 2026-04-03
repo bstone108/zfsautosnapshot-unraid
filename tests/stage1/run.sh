@@ -470,7 +470,7 @@ test_low_space_skips_non_reclaimable_snapshots() {
 
   write_config "${case_dir}" "tank/data:100G"
   cat > "${case_dir}/state/pools.tsv" <<'EOF'
-tank	40000000000	0	1000000000000	40000000000	96%	ONLINE
+tank	40000000000	1048576	1000000000000	40000000000	96%	ONLINE
 EOF
   cat > "${case_dir}/state/snaps.tsv" <<'EOF'
 tank/data@autosnapshot-a	tank/data	1999999000	0	10	0	0
@@ -508,6 +508,7 @@ EOF
   assert_snapshot_exists "${case_dir}" "tank/a@autosnapshot-a-new"
   assert_snapshot_missing "${case_dir}" "tank/b@autosnapshot-b-old"
   assert_snapshot_exists "${case_dir}" "tank/b@autosnapshot-b-new"
+  assert_file_not_contains "${case_dir}/stdout.log" "waiting up to"
   assert_file_contains "${case_dir}/stdout.log" "visible free space did not rise after deleting tank/a@autosnapshot-a-old"
   assert_file_contains "${case_dir}/stdout.log" "deleting oldest eligible snapshot: tank/b@autosnapshot-b-old"
   assert_file_contains "${case_dir}/log/summary.log" "Datasets left below target because reclaim is blocked: 0"

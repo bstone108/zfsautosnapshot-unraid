@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.03.8 (Testing Branch Only)
+
+- Reduced unnecessary post-delete waiting during low-space cleanup when ZFS `freeing` already shows the pool reclaim is in progress.
+- Shortened the fallback recheck wait window for cases where free-space accounting is still ambiguous after delete.
+
 ### 2026.04.03.7 (Testing Branch Only)
 
 - Fixed low-space cleanup so the same deleted snapshot is not retried again through an overlapping ancestor/child dataset path.
