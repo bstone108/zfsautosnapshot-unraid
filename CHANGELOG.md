@@ -5,7 +5,59 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
-### 2026.03.29.2
+### 2026.04.03.9 (2026-04-03)
+
+- Fixed updates again so they can stop a running cleanup job more reliably, including an in-flight snapshot delete and orphaned older `zfs destroy` processes left behind by previous builds.
+- Running jobs now receive an explicit stop request before the updater escalates to process termination, which makes upgrades more dependable when cleanup is active.
+
+### 2026.04.03.8 (Testing Branch Only)
+
+- Reduced unnecessary post-delete waiting during low-space cleanup when ZFS `freeing` already shows the pool reclaim is in progress.
+- Shortened the fallback recheck wait window for cases where free-space accounting is still ambiguous after delete.
+
+### 2026.04.03.7 (Testing Branch Only)
+
+- Fixed low-space cleanup so the same deleted snapshot is not retried again through an overlapping ancestor/child dataset path.
+- This specifically fixes runs that deleted a snapshot once, then immediately tried to delete that exact same snapshot again and failed.
+
+### 2026.04.03.6 (Testing Branch Only)
+
+- Fixed plugin updates again so they now stop the full snapshot-job process tree, including child delete operations, instead of only trying to stop the parent script.
+- This is specifically aimed at upgrades where a stuck cleanup run survived because the child `zfs destroy` process kept running after the main script exited.
+
+### 2026.04.03.5 (Testing Branch Only)
+
+- Fixed plugin updates so any running snapshot job is stopped during remove and install steps instead of being left behind after an upgrade.
+- Clears stale runtime lock state during update so a crashed or force-stopped run does not block the next scheduled job.
+
+### 2026.04.03.4 (Testing Branch Only)
+
+- Fixed low-space cleanup so snapshots with `used=0` are no longer treated as permanently undeletable when they are part of an older snapshot chain that can still unlock reclaim.
+- The plugin now chooses the oldest eligible snapshot chain leader on each helpful dataset instead of getting stuck re-evaluating the same no-immediate-reclaim entries over and over.
+- Reduced repeated low-space skip noise so long cleanup runs stay easier to follow.
+
+### 2026.04.03.3 (Testing Branch Only)
+
+- Fixed low-space cleanup so it now chooses snapshots from datasets that can actually improve the dataset that is running low on space.
+- If the pool itself is the bottleneck, cleanup can still pull from any configured dataset on that pool.
+- If a quota-limited subtree is the bottleneck, cleanup now stays inside that subtree and leaves unrelated datasets alone.
+
+### 2026.04.03.2 (Testing Branch Only)
+
+- Fixed low-space cleanup so one small delete on a shared pool does not stop cleanup just because active writes temporarily hide the reclaimed space.
+- The plugin now keeps working across datasets on the same pool until it either reaches the free-space target or runs out of reclaimable auto snapshots.
+
+### 2026.04.03.1 (Testing Branch Only)
+
+- Fixed the Pool free-space target column getting cut off on the right side of the settings page.
+- Reduced the target input width so the dataset table fits cleanly across the page.
+
+### 2026.04.01.1 (Testing Branch Only)
+
+- Improved low-space cleanup so the plugin waits briefly for ZFS free-space accounting to catch up after deleting a snapshot.
+- This reduces false "delete would not free space" outcomes on systems where reclaim shows up a few seconds late.
+
+### 2026.03.29.2 (Testing Branch Only)
 
 - Fixed the new save compatibility probe after a JavaScript variable was missed in the prior testing release.
 - This restores the probe warning logic without breaking the settings page on systems that were otherwise saving normally.

@@ -995,6 +995,7 @@ if ($resolvedCron === '') {
 .zfsas-input,
 .zfsas-select {
   width: 100%;
+  box-sizing: border-box;
   padding: 8px 10px;
   border: 1px solid var(--input-border-color, var(--border-color, #b8c5d1));
   border-radius: 8px;
@@ -1113,7 +1114,7 @@ if ($resolvedCron === '') {
 .zfsas-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 720px;
+  min-width: 0;
 }
 
 .zfsas-table th,
@@ -1141,12 +1142,25 @@ if ($resolvedCron === '') {
 
 .zfsas-table code {
   font-family: Consolas, Menlo, Monaco, monospace;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .zfsas-dataset-cell {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.zfsas-threshold-col {
+  width: 180px;
+}
+
+.zfsas-threshold-input {
+  width: 120px;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .zfsas-badge {
@@ -1351,7 +1365,7 @@ if ($resolvedCron === '') {
               <tr>
                 <th class="zfsas-center">Use</th>
                 <th>Dataset</th>
-                <th>Pool free-space target</th>
+                <th class="zfsas-threshold-col">Pool free-space target</th>
               </tr>
             </thead>
             <tbody>
@@ -1372,8 +1386,8 @@ if ($resolvedCron === '') {
                       </div>
                     </div>
                   </td>
-                  <td>
-                    <input class="zfsas-input" name="dataset_threshold[<?php echo (int) $index; ?>]" value="<?php echo h($row['threshold']); ?>">
+                  <td class="zfsas-threshold-col">
+                    <input class="zfsas-input zfsas-threshold-input" name="dataset_threshold[<?php echo (int) $index; ?>]" value="<?php echo h($row['threshold']); ?>">
                     <div class="zfsas-help">Examples: <code>500M</code>, <code>100G</code>, <code>2T</code>.</div>
                   </td>
                 </tr>
