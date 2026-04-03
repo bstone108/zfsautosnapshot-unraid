@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.03.1 (Testing Branch Only)
+
+- Fixed the Pool free-space target column getting cut off on the right side of the settings page.
+- Reduced the target input width so the dataset table fits cleanly across the page.
+
 ### 2026.04.01.1 (Testing Branch Only)
 
 - Improved low-space cleanup so the plugin waits briefly for ZFS free-space accounting to catch up after deleting a snapshot.

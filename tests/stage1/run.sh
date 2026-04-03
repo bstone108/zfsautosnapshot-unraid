@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOURCE_SCRIPT="${ROOT_DIR}/source/usr/local/sbin/zfs_autosnapshot"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/zfsas-stage1-tests.XXXXXX")"
 TEST_FAILED=0
+TEST_BASH_BIN="${TEST_BASH_BIN:-}"
 
 cleanup() {
   if (( TEST_FAILED )) || [[ "${KEEP_STAGE1_TEST_ROOT:-0}" == "1" ]]; then
@@ -71,7 +72,7 @@ write_mock_date() {
   local case_dir="$1"
 
   cat > "${case_dir}/mockbin/date" <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 epoch="${MOCK_NOW_EPOCH:-2000000000}"
@@ -117,7 +118,7 @@ write_mock_zpool() {
   local case_dir="$1"
 
   cat > "${case_dir}/mockbin/zpool" <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 state_dir="${MOCK_STATE_DIR:?}"
@@ -178,7 +179,7 @@ write_mock_zfs() {
   local case_dir="$1"
 
   cat > "${case_dir}/mockbin/zfs" <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 state_dir="${MOCK_STATE_DIR:?}"
@@ -348,7 +349,13 @@ EOF
 
 run_case() {
   local case_dir="$1"
-  if ! PATH="${case_dir}/mockbin:${PATH}" \
+  local path_prefix="${case_dir}/mockbin"
+
+  if [[ -n "$TEST_BASH_BIN" ]]; then
+    path_prefix="$(dirname "$TEST_BASH_BIN"):${path_prefix}"
+  fi
+
+  if ! PATH="${path_prefix}:${PATH}" \
     MOCK_STATE_DIR="${case_dir}/state" \
     MOCK_NOW_EPOCH="${MOCK_NOW_EPOCH:-2000000000}" \
     POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS_OVERRIDE:-2}" \
