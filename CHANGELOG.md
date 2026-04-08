@@ -5,7 +5,20 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.08.2 (2026-04-08)
+
+- Fixed a regression in the previous testing build where the hardened wrapped-response parser was too strict and could break log polling even though settings saves were working.
+- Log refreshes once again accept normal plugin JSON payloads from the log endpoint while still rejecting obvious wrapped HTML noise.
+
+### 2026.04.08.1 (Testing Branch Only)
+
+- Hardened settings saves so the page now posts directly to the dedicated save endpoint for both AJAX and native form fallbacks instead of relying on Unraid plugin-page POST behavior.
+- Broadened CSRF token discovery and tightened wrapped-response parsing so alternate themes or WebGUI wrapper noise are less likely to break Save.
+- Increased save-request timeout tolerance on slower systems and added safer redirect handling for native form saves.
+- Refactored duplicate save-response helpers into shared code so the JSON and redirect paths stay in sync.
+
 ### 2026.04.03.9 (2026-04-03)
+
 
 - Fixed updates again so they can stop a running cleanup job more reliably, including an in-flight snapshot delete and orphaned older `zfs destroy` processes left behind by previous builds.
 - Running jobs now receive an explicit stop request before the updater escalates to process termination, which makes upgrades more dependable when cleanup is active.

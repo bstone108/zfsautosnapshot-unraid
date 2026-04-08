@@ -10,6 +10,8 @@ $runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
 $saveApiUrl = "/plugins/{$pluginName}/php/save-settings.php";
 $logPollIntervalMs = 2000;
 
+require_once __DIR__ . '/response-helpers.php';
+
 $defaults = [
     'DATASETS' => '',
     'PREFIX' => 'autosnapshot-',
@@ -42,57 +44,6 @@ $weekdayNames = [
 function h($value)
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
-}
-
-if (!defined('ZFSAS_JSON_BEGIN')) {
-    define('ZFSAS_JSON_BEGIN', 'ZFSAS_JSON_BEGIN');
-}
-
-if (!defined('ZFSAS_JSON_END')) {
-    define('ZFSAS_JSON_END', 'ZFSAS_JSON_END');
-}
-
-function sendJsonResponse($payload, $statusCode = 200)
-{
-    $GLOBALS['zfsas_json_response_sent'] = true;
-
-    while (ob_get_level() > 0) {
-        @ob_end_clean();
-    }
-
-    if (!headers_sent()) {
-        http_response_code((int) $statusCode);
-        header('Content-Type: application/json; charset=UTF-8');
-        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-        header('Pragma: no-cache');
-        header('X-Content-Type-Options: nosniff');
-        header('X-Zfsas-Response-Mode: marked-json');
-    }
-
-    echo ZFSAS_JSON_BEGIN;
-    echo json_encode($payload);
-    echo ZFSAS_JSON_END;
-    exit;
-}
-
-function sendClientRedirectPage($url, $message = 'Settings saved. Returning to the settings page...')
-{
-    if (!headers_sent()) {
-        header('Location: ' . (string) $url, true, 303);
-        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-        header('Pragma: no-cache');
-        exit;
-    }
-
-    $target = htmlspecialchars((string) $url, ENT_QUOTES, 'UTF-8');
-    $text = htmlspecialchars((string) $message, ENT_QUOTES, 'UTF-8');
-
-    echo '<div style="padding:16px;">';
-    echo '<div>' . $text . '</div>';
-    echo '<div style="margin-top:10px;"><a href="' . $target . '">Continue</a></div>';
-    echo '</div>';
-    echo '<script>window.location.replace(' . json_encode((string) $url) . ');</script>';
-    exit;
 }
 
 function isAjaxSaveRequest()
@@ -142,7 +93,21 @@ function pluginSettingsPageUrl($fallbackPath, $replacements = [])
         $fallbackPath = '/Settings/ZFSAutoSnapshot';
     }
 
+    $parts = parse_url($fallbackPath);
+    if (!is_array($parts)) {
+        $parts = ['path' => '/Settings/ZFSAutoSnapshot'];
+    }
+
+    $path = trim((string) ($parts['path'] ?? ''));
+    if ($path === '') {
+        $path = '/Settings/ZFSAutoSnapshot';
+    }
+
     $query = [];
+    if (isset($parts['query'])) {
+        parse_str((string) $parts['query'], $query);
+    }
+
     foreach ($replacements as $key => $value) {
         if ($value === null) {
             unset($query[$key]);
@@ -152,7 +117,7 @@ function pluginSettingsPageUrl($fallbackPath, $replacements = [])
     }
 
     $queryString = http_build_query($query);
-    return ($queryString === '') ? $fallbackPath : ($fallbackPath . '?' . $queryString);
+    return ($queryString === '') ? $path : ($path . '?' . $queryString);
 }
 
 function trimValue($value)
@@ -756,6 +721,7 @@ $isPostRequest = (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST');
 $isAjaxSaveRequest = ((defined('ZFSAS_FORCE_AJAX_SAVE') && ZFSAS_FORCE_AJAX_SAVE) || ($isPostRequest && isAjaxSaveRequest()));
 
 $installedVersion = $isAjaxSaveRequest ? '' : detectInstalledPluginVersion($pluginName);
+$defaultSettingsReturnUrl = pluginSettingsPageUrl($settingsPagePath, ['saved' => null]);
 
 $config = parseConfigFile($configFile, $defaults);
 $errors = [];
@@ -885,12 +851,13 @@ if ($isPostRequest) {
                     $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap);
                     $datasetPools = buildDatasetPools($datasetRows);
 
-                    $redirectUrl = pluginSettingsPageUrl($settingsPagePath, [
+                    $returnTarget = zfsas_normalize_return_url($_POST['return_to'] ?? '', $defaultSettingsReturnUrl);
+                    $redirectUrl = pluginSettingsPageUrl($returnTarget, [
                         'saved' => '1',
                     ]);
 
                     if ($redirectUrl !== '') {
-                        sendClientRedirectPage($redirectUrl);
+                        zfsas_send_redirect_page($redirectUrl);
                     }
                 }
 
@@ -907,7 +874,7 @@ if ($isPostRequest) {
             $ajaxResolvedCron = '(disabled)';
         }
 
-        sendJsonResponse([
+        zfsas_emit_marked_json([
             'ok' => empty($ajaxErrors),
             'errors' => array_values($ajaxErrors),
             'notices' => array_values($ajaxNotices),
@@ -921,7 +888,18 @@ $resolvedCron = trim((string) ($config['CRON_SCHEDULE'] ?? ''));
 if ($resolvedCron === '') {
     $resolvedCron = '(disabled)';
 }
+$renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 ?>
+<?php if ($renderStandalonePage) : ?>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZFS Auto Snapshot Settings</title>
+</head>
+<body>
+<?php endif; ?>
 <style>
 .zfsas-wrap {
   margin: 16px;
@@ -1328,7 +1306,8 @@ if ($resolvedCron === '') {
     </div>
   <?php endif; ?>
 
-  <form method="post" action="<?php echo h(pluginSettingsPageUrl($settingsPagePath, ['saved' => null])); ?>" data-ajax-action="<?php echo h($saveApiUrl); ?>" id="zfsas_settings_form">
+  <form method="post" action="<?php echo h($saveApiUrl); ?>" data-ajax-action="<?php echo h($saveApiUrl); ?>" id="zfsas_settings_form">
+    <input type="hidden" name="return_to" value="<?php echo h($defaultSettingsReturnUrl); ?>">
     <div class="zfsas-card">
       <h3>Datasets</h3>
       <div class="zfsas-help">
@@ -1660,11 +1639,19 @@ if ($resolvedCron === '') {
 
     var marked = extractMarkedJson(raw);
     if (marked !== null) {
-      return JSON.parse(marked);
+      var markedPayload = JSON.parse(marked);
+      if (isExpectedJsonPayload(markedPayload)) {
+        return markedPayload;
+      }
+      parseError = new Error('Unexpected JSON response shape.');
     }
 
     try {
-      return JSON.parse(raw);
+      var directPayload = JSON.parse(raw);
+      if (isExpectedJsonPayload(directPayload)) {
+        return directPayload;
+      }
+      parseError = new Error('Unexpected JSON response shape.');
     } catch (error) {
       parseError = error;
     }
@@ -1673,13 +1660,76 @@ if ($resolvedCron === '') {
     var end = raw.lastIndexOf('}');
     if (start !== -1 && end > start) {
       var candidate = raw.slice(start, end + 1);
-      var payload = JSON.parse(candidate);
-      if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'ok')) {
-        return payload;
+      try {
+        var payload = JSON.parse(candidate);
+        if (isExpectedJsonPayload(payload)) {
+          return payload;
+        }
+      } catch (candidateError) {
+        parseError = parseError || candidateError;
       }
     }
 
     throw parseError || new Error('Invalid JSON response.');
+  }
+
+  function isExpectedJsonPayload(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return false;
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(payload, 'ok') || typeof payload.ok !== 'boolean') {
+      return false;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(payload, 'errors') && !Array.isArray(payload.errors)) {
+      return false;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(payload, 'notices') && !Array.isArray(payload.notices)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function discoverCsrfToken() {
+    var globalCandidates = [window.csrf_token, window.CSRF_TOKEN, window.csrfToken];
+    for (var i = 0; i < globalCandidates.length; i += 1) {
+      var value = globalCandidates[i];
+      if (typeof value === 'string' && value.length > 0) {
+        return value;
+      }
+    }
+
+    var inputSelectors = [
+      'input[name="csrf_token"]',
+      'input[name="csrf-token"]',
+      'input[name="_csrf"]'
+    ];
+    for (var j = 0; j < inputSelectors.length; j += 1) {
+      var csrfInput = document.querySelector(inputSelectors[j]);
+      if (csrfInput && typeof csrfInput.value === 'string' && csrfInput.value.length > 0) {
+        return csrfInput.value;
+      }
+    }
+
+    var metaSelectors = [
+      'meta[name="csrf_token"]',
+      'meta[name="csrf-token"]',
+      'meta[name="x-csrf-token"]'
+    ];
+    for (var k = 0; k < metaSelectors.length; k += 1) {
+      var metaTag = document.querySelector(metaSelectors[k]);
+      if (metaTag) {
+        var content = metaTag.getAttribute('content');
+        if (typeof content === 'string' && content.length > 0) {
+          return content;
+        }
+      }
+    }
+
+    return '';
   }
 
   function requestJsonFormPost(form, targetUrl, onSuccess, onError, onComplete) {
@@ -1697,7 +1747,7 @@ if ($resolvedCron === '') {
     }
 
     xhr.open('POST', targetUrl || requestTargetUrl(form), true);
-    xhr.timeout = 20000;
+    xhr.timeout = 45000;
     xhr.setRequestHeader('Accept', 'application/json');
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
     xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
@@ -1709,15 +1759,7 @@ if ($resolvedCron === '') {
     });
     requestParams.append('ajax', 'save');
 
-    var csrfToken = '';
-    if (typeof window.csrf_token === 'string' && window.csrf_token.length > 0) {
-      csrfToken = window.csrf_token;
-    } else {
-      var csrfInput = document.querySelector('input[name="csrf_token"]');
-      if (csrfInput && typeof csrfInput.value === 'string' && csrfInput.value.length > 0) {
-        csrfToken = csrfInput.value;
-      }
-    }
+    var csrfToken = discoverCsrfToken();
 
     if (csrfToken !== '') {
       xhr.setRequestHeader('X-CSRF-Token', csrfToken);
@@ -2103,29 +2145,16 @@ if ($resolvedCron === '') {
     xhr.send();
   }
 
-  function requestJsonPost(url, onSuccess, onError) {
-    var bodyParams = {};
-    if (typeof onSuccess !== 'function') {
-      bodyParams = onSuccess || {};
-      onSuccess = arguments[2];
-      onError = arguments[3];
-    }
-
+  function requestJsonPost(url, bodyParams, onSuccess, onError) {
+    bodyParams = bodyParams || {};
     var xhr = new XMLHttpRequest();
     xhr.open('POST', url, true);
+    xhr.timeout = 15000;
     xhr.setRequestHeader('Accept', 'application/json');
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
     xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
-    var csrfToken = '';
-    if (typeof window.csrf_token === 'string' && window.csrf_token.length > 0) {
-      csrfToken = window.csrf_token;
-    } else {
-      var csrfInput = document.querySelector('input[name=\"csrf_token\"]');
-      if (csrfInput && typeof csrfInput.value === 'string' && csrfInput.value.length > 0) {
-        csrfToken = csrfInput.value;
-      }
-    }
+    var csrfToken = discoverCsrfToken();
 
     if (csrfToken !== '') {
       xhr.setRequestHeader('X-CSRF-Token', csrfToken);
@@ -2159,6 +2188,10 @@ if ($resolvedCron === '') {
 
     xhr.onerror = function () {
       onError(new Error('Network error.'));
+    };
+
+    xhr.ontimeout = function () {
+      onError(new Error('Request timed out.'));
     };
 
     var requestParams = new URLSearchParams();
@@ -2409,6 +2442,7 @@ if ($resolvedCron === '') {
 
       requestJsonPost(
         runApiUrl,
+        {},
         function (data) {
           manualRunBusy = false;
           manualRunBtn.disabled = false;
@@ -2455,7 +2489,7 @@ if ($resolvedCron === '') {
         }
         setSaveButtonState(false);
         renderSaveFeedback(['Save is taking longer than expected. Reload the page and verify whether the settings were applied.'], []);
-      }, 25000);
+      }, 50000);
 
       try {
         requestJsonFormPost(
@@ -2517,3 +2551,7 @@ if ($resolvedCron === '') {
   });
 })();
 </script>
+<?php if ($renderStandalonePage) : ?>
+</body>
+</html>
+<?php endif; ?>

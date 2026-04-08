@@ -2,36 +2,15 @@
 ob_start();
 @ini_set('display_errors', '0');
 
-if (!defined('ZFSAS_JSON_BEGIN')) {
-    define('ZFSAS_JSON_BEGIN', 'ZFSAS_JSON_BEGIN');
-}
+require_once __DIR__ . '/response-helpers.php';
 
-if (!defined('ZFSAS_JSON_END')) {
-    define('ZFSAS_JSON_END', 'ZFSAS_JSON_END');
-}
-
-function flushSaveJson($payload, $statusCode = 200)
-{
-    $GLOBALS['zfsas_json_response_sent'] = true;
-
-    while (ob_get_level() > 0) {
-        ob_end_clean();
-    }
-
-    if (!headers_sent()) {
-        http_response_code((int) $statusCode);
-        header('Content-Type: application/json; charset=UTF-8');
-        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-        header('Pragma: no-cache');
-        header('X-Content-Type-Options: nosniff');
-        header('X-Zfsas-Response-Mode: marked-json');
-    }
-
-    echo ZFSAS_JSON_BEGIN;
-    echo json_encode($payload);
-    echo ZFSAS_JSON_END;
-    exit;
-}
+$defaultReturnUrl = '/Settings/ZFSAutoSnapshot';
+$requestMethod = strtoupper($_SERVER['REQUEST_METHOD'] ?? '');
+$requestedWith = (string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '');
+$postAjax = trim((string) ($_POST['ajax'] ?? '')) === 'save';
+$isProbeRequest = trim((string) ($_POST['probe'] ?? '')) === '1';
+$expectsJson = $isProbeRequest || $postAjax || (strcasecmp($requestedWith, 'XMLHttpRequest') === 0);
+$returnUrl = zfsas_normalize_return_url($_POST['return_to'] ?? '', $defaultReturnUrl);
 
 set_error_handler(function ($severity, $message, $file, $line) {
     error_log(sprintf(
@@ -59,11 +38,20 @@ register_shutdown_function(function () {
         return;
     }
 
-    flushSaveJson([
-        'ok' => false,
-        'errors' => ['Save request failed before a valid response could be returned. Reload the page and try again.'],
-        'notices' => [],
-    ], 500);
+    if (!empty($GLOBALS['zfsas_save_endpoint_expects_json'])) {
+        zfsas_emit_marked_json([
+            'ok' => false,
+            'errors' => ['Save request failed before a valid response could be returned. Reload the page and try again.'],
+            'notices' => [],
+        ], 500);
+    }
+
+    zfsas_send_standalone_error_page(
+        'ZFS Auto Snapshot Save Failed',
+        'The save request failed before a valid response could be returned. Reload the settings page and try again.',
+        (string) ($GLOBALS['zfsas_save_endpoint_return_url'] ?? '/Settings/ZFSAutoSnapshot'),
+        500
+    );
 });
 
 set_exception_handler(function ($throwable) {
@@ -74,31 +62,49 @@ set_exception_handler(function ($throwable) {
         (int) $throwable->getLine()
     ));
 
-    flushSaveJson([
-        'ok' => false,
-        'errors' => ['Save request failed unexpectedly. Reload the page and try again.'],
-        'notices' => [],
-    ], 500);
+    if (!empty($GLOBALS['zfsas_save_endpoint_expects_json'])) {
+        zfsas_emit_marked_json([
+            'ok' => false,
+            'errors' => ['Save request failed unexpectedly. Reload the page and try again.'],
+            'notices' => [],
+        ], 500);
+    }
+
+    zfsas_send_standalone_error_page(
+        'ZFS Auto Snapshot Save Failed',
+        'The save request failed unexpectedly. Reload the settings page and try again.',
+        (string) ($GLOBALS['zfsas_save_endpoint_return_url'] ?? '/Settings/ZFSAutoSnapshot'),
+        500
+    );
 });
 
-if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
-    flushSaveJson([
-        'ok' => false,
-        'errors' => ['Use POST for save requests.'],
-        'notices' => [],
-    ], 405);
+$GLOBALS['zfsas_save_endpoint_expects_json'] = $expectsJson;
+$GLOBALS['zfsas_save_endpoint_return_url'] = $returnUrl;
+
+if ($requestMethod !== 'POST') {
+    if ($expectsJson) {
+        zfsas_emit_marked_json([
+            'ok' => false,
+            'errors' => ['Use POST for save requests.'],
+            'notices' => [],
+        ], 405);
+    }
+
+    zfsas_send_redirect_page($returnUrl, 'Returning to the settings page...');
 }
 
-if (!defined('ZFSAS_FORCE_AJAX_SAVE')) {
+if ($expectsJson && !defined('ZFSAS_FORCE_AJAX_SAVE')) {
     define('ZFSAS_FORCE_AJAX_SAVE', true);
 }
 
-$_POST['ajax'] = 'save';
-$_REQUEST['ajax'] = 'save';
-$_SERVER['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest';
+if ($expectsJson) {
+    $_POST['ajax'] = 'save';
+    $_REQUEST['ajax'] = 'save';
+    $_SERVER['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest';
+}
 
-if (trim((string) ($_POST['probe'] ?? '')) === '1') {
-    flushSaveJson([
+if ($isProbeRequest) {
+    zfsas_emit_marked_json([
         'ok' => true,
         'probe' => true,
         'notices' => ['Save endpoint probe completed successfully.'],
@@ -106,10 +112,13 @@ if (trim((string) ($_POST['probe'] ?? '')) === '1') {
     ]);
 }
 
+$GLOBALS['zfsas_render_standalone_page'] = !$expectsJson;
 require __DIR__ . '/settings.php';
 
-flushSaveJson([
-    'ok' => false,
-    'errors' => ['Settings page save handler returned unexpectedly. Reload the page and try again.'],
-    'notices' => [],
-], 500);
+if ($expectsJson) {
+    zfsas_emit_marked_json([
+        'ok' => false,
+        'errors' => ['Settings page save handler returned unexpectedly. Reload the page and try again.'],
+        'notices' => [],
+    ], 500);
+}
