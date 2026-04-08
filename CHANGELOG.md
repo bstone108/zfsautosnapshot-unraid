@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.08.2 (Testing Branch Only)
+
+- Fixed a regression in the previous testing build where the hardened wrapped-response parser was too strict and could break log polling even though settings saves were working.
+- Log refreshes once again accept normal plugin JSON payloads from the log endpoint while still rejecting obvious wrapped HTML noise.
+
 ### 2026.04.08.1 (Testing Branch Only)
 
 - Hardened settings saves so the page now posts directly to the dedicated save endpoint for both AJAX and native form fallbacks instead of relying on Unraid plugin-page POST behavior.

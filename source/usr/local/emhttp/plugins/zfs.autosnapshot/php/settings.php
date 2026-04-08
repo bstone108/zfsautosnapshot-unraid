@@ -1674,9 +1674,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   }
 
   function isExpectedJsonPayload(payload) {
-    var expectedKeys = ['errors', 'notices', 'resolvedCron', 'prefix', 'probe', 'message', 'pid', 'error'];
-    var hasExpectedKey = false;
-
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       return false;
     }
@@ -1693,13 +1690,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       return false;
     }
 
-    expectedKeys.forEach(function (key) {
-      if (Object.prototype.hasOwnProperty.call(payload, key)) {
-        hasExpectedKey = true;
-      }
-    });
-
-    return hasExpectedKey;
+    return true;
   }
 
   function discoverCsrfToken() {
