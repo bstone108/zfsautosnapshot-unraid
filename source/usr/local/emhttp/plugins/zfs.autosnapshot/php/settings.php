@@ -1502,7 +1502,8 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     <div class="zfsas-actions">
       <div id="manual_run_status" class="zfsas-manual-status">Manual run is ready.</div>
       <button type="button" class="btn" id="manual_run">Run Now</button>
-      <button type="submit" class="btn btn-primary">Save Settings</button>
+      <button type="button" class="btn btn-primary" id="zfsas_save_btn">Save Settings</button>
+      <noscript><button type="submit" class="btn btn-primary">Save Settings</button></noscript>
     </div>
 
     <div class="zfsas-card" id="live_run_log">
@@ -1548,7 +1549,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var logStreamSource = null;
   var logFingerprint = '';
   var saveForm = byId('zfsas_settings_form');
-  var saveButton = saveForm ? saveForm.querySelector('button[type="submit"]') : null;
+  var saveButton = byId('zfsas_save_btn');
   var saveButtonDefaultText = saveButton ? saveButton.textContent : 'Save Settings';
   var saveBusy = false;
 
@@ -2472,67 +2473,87 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     });
   }
 
-  if (saveForm) {
-    saveForm.addEventListener('submit', function (event) {
+  function startSave(event) {
+    if (event) {
       event.preventDefault();
-      if (saveBusy) {
+      if (typeof event.stopImmediatePropagation === 'function') {
+        event.stopImmediatePropagation();
+      }
+      if (typeof event.stopPropagation === 'function') {
+        event.stopPropagation();
+      }
+    }
+
+    if (!saveForm) {
+      renderSaveFeedback(['Save form is unavailable. Reload the page and try again.'], []);
+      return;
+    }
+
+    if (saveBusy) {
+      return;
+    }
+
+    var saveFailsafeTimer = null;
+    setSaveButtonState(true);
+    renderSaveFeedback([], ['Saving settings...']);
+
+    saveFailsafeTimer = window.setTimeout(function () {
+      if (!saveBusy) {
         return;
       }
+      setSaveButtonState(false);
+      renderSaveFeedback(['Save is taking longer than expected. Reload the page and verify whether the settings were applied.'], []);
+    }, 50000);
 
-      var saveFailsafeTimer = null;
-      setSaveButtonState(true);
-      renderSaveFeedback([], ['Saving settings...']);
+    try {
+      requestJsonFormPost(
+        saveForm,
+        saveForm.getAttribute('data-ajax-action') || requestTargetUrl(saveForm),
+        function (data) {
+          renderSaveFeedback(data.errors || [], data.notices || ['Settings saved.']);
 
-      saveFailsafeTimer = window.setTimeout(function () {
-        if (!saveBusy) {
-          return;
-        }
-        setSaveButtonState(false);
-        renderSaveFeedback(['Save is taking longer than expected. Reload the page and verify whether the settings were applied.'], []);
-      }, 50000);
-
-      try {
-        requestJsonFormPost(
-          saveForm,
-          saveForm.getAttribute('data-ajax-action') || requestTargetUrl(saveForm),
-          function (data) {
-            renderSaveFeedback(data.errors || [], data.notices || ['Settings saved.']);
-
-            var cronValueEl = byId('resolved_cron_value');
-            if (cronValueEl && typeof data.resolvedCron === 'string') {
-              cronValueEl.textContent = data.resolvedCron;
-            }
-
-            var prefixPreviewEl = byId('prefix_preview');
-            var prefixInputEl = byId('prefix');
-            if (prefixPreviewEl) {
-              prefixPreviewEl.textContent = (typeof data.prefix === 'string' && data.prefix.length > 0)
-                ? data.prefix
-                : (prefixInputEl ? prefixInputEl.value : '');
-            }
-          },
-          function (error, payload) {
-            if (payload && Array.isArray(payload.errors)) {
-              renderSaveFeedback(payload.errors, payload.notices || []);
-            } else {
-              renderSaveFeedback([error.message], []);
-            }
-          },
-          function () {
-            if (saveFailsafeTimer !== null) {
-              window.clearTimeout(saveFailsafeTimer);
-            }
-            setSaveButtonState(false);
+          var cronValueEl = byId('resolved_cron_value');
+          if (cronValueEl && typeof data.resolvedCron === 'string') {
+            cronValueEl.textContent = data.resolvedCron;
           }
-        );
-      } catch (error) {
-        if (saveFailsafeTimer !== null) {
-          window.clearTimeout(saveFailsafeTimer);
+
+          var prefixPreviewEl = byId('prefix_preview');
+          var prefixInputEl = byId('prefix');
+          if (prefixPreviewEl) {
+            prefixPreviewEl.textContent = (typeof data.prefix === 'string' && data.prefix.length > 0)
+              ? data.prefix
+              : (prefixInputEl ? prefixInputEl.value : '');
+          }
+        },
+        function (error, payload) {
+          if (payload && Array.isArray(payload.errors)) {
+            renderSaveFeedback(payload.errors, payload.notices || []);
+          } else {
+            renderSaveFeedback([error.message], []);
+          }
+        },
+        function () {
+          if (saveFailsafeTimer !== null) {
+            window.clearTimeout(saveFailsafeTimer);
+          }
+          setSaveButtonState(false);
         }
-        setSaveButtonState(false);
-        renderSaveFeedback(['Save request could not be started: ' + String(error && error.message ? error.message : error)], []);
+      );
+    } catch (error) {
+      if (saveFailsafeTimer !== null) {
+        window.clearTimeout(saveFailsafeTimer);
       }
-    });
+      setSaveButtonState(false);
+      renderSaveFeedback(['Save request could not be started: ' + String(error && error.message ? error.message : error)], []);
+    }
+  }
+
+  if (saveButton) {
+    saveButton.addEventListener('click', startSave, true);
+  }
+
+  if (saveForm) {
+    saveForm.addEventListener('submit', startSave, true);
   }
 
   applyPoolFilter();
