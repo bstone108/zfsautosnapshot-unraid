@@ -1,0 +1,87 @@
+name: Build Release Artifacts
+
+on:
+  push:
+    branches:
+      - main
+      - testing
+    paths-ignore:
+      - 'dist/**'
+      - 'zfs.autosnapshot.plg'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [[ -z "$VERSION" ]]; then
+            echo "VERSION file is empty." >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "BASE_URL=https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/dist" >> "$GITHUB_ENV"
+
+      - name: Require a new version before publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          CURRENT_VERSION=""
+          if [[ -f dist/zfs.autosnapshot.plg ]]; then
+            CURRENT_VERSION="$(sed -n 's/.* version="\([^"]*\)".*/\1/p' dist/zfs.autosnapshot.plg | head -n 1)"
+          fi
+
+          if [[ -n "$CURRENT_VERSION" && "$CURRENT_VERSION" == "$VERSION" ]]; then
+            echo "VERSION ($VERSION) matches the version already published in dist/zfs.autosnapshot.plg." >&2
+            echo "Bump VERSION, CHANGELOG.md, and zfs.autosnapshot.plg.in before publishing a new build." >&2
+            exit 1
+          fi
+
+      - name: Build release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/build-release.sh "$VERSION" "$BASE_URL"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zfs-autosnapshot-${{ env.VERSION }}
+          path: |
+            dist/zfs-autosnapshot-${{ env.VERSION }}-noarch-1.txz
+            dist/zfs.autosnapshot.plg
+            dist/zfs-autosnapshot.png
+            zfs.autosnapshot.plg
+
+      - name: Commit generated artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            "dist/zfs-autosnapshot-${VERSION}-noarch-1.txz" \
+            "dist/zfs.autosnapshot.plg" \
+            "dist/zfs-autosnapshot.png" \
+            "zfs.autosnapshot.plg"
+
+          if git diff --cached --quiet; then
+            echo "No generated artifact changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Build release ${VERSION}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

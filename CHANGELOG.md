@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.10.1 (Testing Branch Only)
+
+- Fixed install and upgrade behavior so the plugin now repairs the ownership and permissions of its boot-side config directory and config file before the WebGUI tries to save settings.
+- Added a release-package verification step that fails the build if any file from `source/` is missing from the generated `.txz`.
+- Added GitHub Actions release builds for the `testing` and `main` branches so published plugin artifacts no longer depend on a local manual packaging step.
+
 ### 2026.04.09.1 (Testing Branch Only)
 
 - Changed the main Save button to a dedicated button-driven save path so custom Unraid themes are less likely to hijack or swallow the form submit event before the plugin can act.
