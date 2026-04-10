@@ -1,21 +1,47 @@
 #!/bin/bash
 set -euo pipefail
 
-if (( $# != 2 )); then
-  echo "Usage: $0 <version> <base_url>" >&2
-  echo "Example: $0 2026.02.16 https://raw.githubusercontent.com/OWNER/REPO/main/dist" >&2
-  exit 1
-fi
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION_FILE="$ROOT_DIR/VERSION"
+VERIFY_SCRIPT="$ROOT_DIR/scripts/verify-release.sh"
 
-VERSION="$1"
-BASE_URL="${2%/}"
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  build-release.sh <version> <base_url>
+  build-release.sh <base_url>
+
+When <version> is omitted, the script reads it from ./VERSION.
+Example:
+  ./scripts/build-release.sh 2026.02.16 https://raw.githubusercontent.com/OWNER/REPO/main/dist
+  ./scripts/build-release.sh https://raw.githubusercontent.com/OWNER/REPO/main/dist
+EOF
+  exit 1
+}
+
+case $# in
+  1)
+    if [[ ! -f "$VERSION_FILE" ]]; then
+      echo "Missing version file: $VERSION_FILE" >&2
+      exit 1
+    fi
+    VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+    BASE_URL="${1%/}"
+    ;;
+  2)
+    VERSION="$1"
+    BASE_URL="${2%/}"
+    ;;
+  *)
+    usage
+    ;;
+esac
 
 if [[ ! "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "Invalid version '$VERSION'. Use only letters, digits, dot, underscore, dash." >&2
   exit 1
 fi
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="$ROOT_DIR/source"
 DIST_DIR="$ROOT_DIR/dist"
 TEMPLATE="$ROOT_DIR/zfs.autosnapshot.plg.in"
@@ -84,6 +110,10 @@ build_txz() {
 
 # Package as .txz (tar + xz), compatible with Unraid upgradepkg/removepkg flow.
 build_txz
+
+if [[ -x "$VERIFY_SCRIPT" ]]; then
+  "$VERIFY_SCRIPT" "$PKG_PATH" "$ROOT_DIR"
+fi
 
 if command -v md5sum >/dev/null 2>&1; then
   PKG_MD5="$(md5sum "$PKG_PATH" | awk '{print $1}')"

@@ -1,0 +1,24 @@
+name: Verify Package
+
+on:
+  pull_request:
+  push:
+    paths-ignore:
+      - 'dist/**'
+      - 'zfs.autosnapshot.plg'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Build verification package
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="ci-${GITHUB_SHA::12}"
+          BASE_URL="https://example.invalid/${GITHUB_REF_NAME}/dist"
+          ./scripts/build-release.sh "$VERSION" "$BASE_URL"

@@ -5,13 +5,19 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
-### 2026.04.09.1 (2026-04-09)
+### 2026.04.10.1 (Testing Branch Only)
+
+- Fixed install and upgrade behavior so the plugin now repairs the ownership and permissions of its boot-side config directory and config file before the WebGUI tries to save settings.
+- Added a release-package verification step that fails the build if any file from `source/` is missing from the generated `.txz`.
+- Added GitHub Actions release builds for the `testing` and `main` branches so published plugin artifacts no longer depend on a local manual packaging step.
+
+### 2026.04.09.1 (Testing Branch Only)
 
 - Changed the main Save button to a dedicated button-driven save path so custom Unraid themes are less likely to hijack or swallow the form submit event before the plugin can act.
 - Kept a protected form-submit fallback for keyboard and no-JavaScript cases, including a noscript submit button.
 - The save page now listens on both the button click path and the form submit path, with the button path set up to run early enough to avoid common theme submit races.
 
-### 2026.04.08.2 (2026-04-08)
+### 2026.04.08.2 (Testing Branch Only)
 
 - Fixed a regression in the previous testing build where the hardened wrapped-response parser was too strict and could break log polling even though settings saves were working.
 - Log refreshes once again accept normal plugin JSON payloads from the log endpoint while still rejecting obvious wrapped HTML noise.
@@ -23,8 +29,7 @@ It answers one question: "What changed for me?"
 - Increased save-request timeout tolerance on slower systems and added safer redirect handling for native form saves.
 - Refactored duplicate save-response helpers into shared code so the JSON and redirect paths stay in sync.
 
-### 2026.04.03.9 (2026-04-03)
-
+### 2026.04.03.9 (Testing Branch Only)
 
 - Fixed updates again so they can stop a running cleanup job more reliably, including an in-flight snapshot delete and orphaned older `zfs destroy` processes left behind by previous builds.
 - Running jobs now receive an explicit stop request before the updater escalates to process termination, which makes upgrades more dependable when cleanup is active.

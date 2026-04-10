@@ -6,6 +6,7 @@ PLUGIN_DIR="/usr/local/emhttp/plugins/${PLUGIN_NAME}"
 BOOT_PLUGIN_DIR="/boot/config/plugins/${PLUGIN_NAME}"
 DEFAULT_CFG="${PLUGIN_DIR}/config/zfs_autosnapshot.conf.example"
 TARGET_CFG="${BOOT_PLUGIN_DIR}/zfs_autosnapshot.conf"
+REPAIR_PERMS_SCRIPT="${PLUGIN_DIR}/scripts/repair-permissions.sh"
 CRON_FILE="/etc/cron.d/zfs_autosnapshot"
 RUNTIME_DIR="/var/run/zfs-autosnapshot"
 LOCK_FILE="${RUNTIME_DIR}/zfs_autosnapshot.lock"
@@ -192,14 +193,18 @@ refresh_web_runtime() {
   fi
 }
 
-mkdir -p "$BOOT_PLUGIN_DIR"
-
-if [[ ! -f "$TARGET_CFG" ]]; then
-  cp -f "$DEFAULT_CFG" "$TARGET_CFG"
-  chmod 0644 "$TARGET_CFG"
-  echo "Installed default config: $TARGET_CFG"
+if [[ -x "$REPAIR_PERMS_SCRIPT" ]]; then
+  "$REPAIR_PERMS_SCRIPT"
 else
-  echo "Keeping existing config: $TARGET_CFG"
+  mkdir -p "$BOOT_PLUGIN_DIR"
+
+  if [[ ! -f "$TARGET_CFG" ]]; then
+    cp -f "$DEFAULT_CFG" "$TARGET_CFG"
+    chmod 0644 "$TARGET_CFG"
+    echo "Installed default config: $TARGET_CFG"
+  else
+    echo "Keeping existing config: $TARGET_CFG"
+  fi
 fi
 
 # Remove any AppleDouble metadata files that can break Unraid page parsing.

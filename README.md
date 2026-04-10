@@ -68,7 +68,22 @@ When settings are saved, the plugin generates and applies the cron entry automat
 
 ## Build a release
 
-From repo root:
+Release builds now use GitHub Actions as the source of truth so packaging happens on GitHub instead of a local iCloud-backed workspace.
+The checked-in template lives at `zfs.autosnapshot.plg.in`; the publishable `.plg` manifest is generated from that template during the release build.
+
+### Recommended release flow
+
+1. Update `VERSION`
+2. Update `CHANGELOG.md`
+3. Update `zfs.autosnapshot.plg.in`
+4. Push the branch (`testing` or `main`)
+5. Let the `Build Release Artifacts` GitHub Action rebuild `dist/` and commit the generated artifacts back to that branch
+
+The plugin URLs still point at the branch `dist/` directory, so the built-in Unraid updater path does not change.
+
+### Local fallback build
+
+From repo root, if you need to reproduce the package locally:
 
 ```bash
 ./scripts/build-release.sh <version> <base_url>
@@ -80,14 +95,14 @@ Example:
 ./scripts/build-release.sh 2026.02.17 https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist
 ```
 
-This creates:
+This creates and verifies:
 
 - `dist/zfs-autosnapshot-<version>-noarch-1.txz`
 - `dist/zfs.autosnapshot.plg`
 - `dist/zfs-autosnapshot.png`
 - `zfs.autosnapshot.plg` (copied to repo root)
 
-Host both files at `<base_url>`, then install in Unraid using the generated `.plg` URL.
+The build now fails if the generated package does not contain the full `source/` tree.
 
 ## License
 

@@ -1,3 +1,18 @@
+# macOS Finder and filesystem metadata
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
+__MACOSX/
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.apdisk
+Icon?
+
+# Editor swap files
 *.swp
 *.swo
