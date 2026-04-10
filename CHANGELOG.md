@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.09.1 (2026-04-09)
+
+- Changed the main Save button to a dedicated button-driven save path so custom Unraid themes are less likely to hijack or swallow the form submit event before the plugin can act.
+- Kept a protected form-submit fallback for keyboard and no-JavaScript cases, including a noscript submit button.
+- The save page now listens on both the button click path and the form submit path, with the button path set up to run early enough to avoid common theme submit races.
+
 ### 2026.04.08.2 (2026-04-08)
 
 - Fixed a regression in the previous testing build where the hardened wrapped-response parser was too strict and could break log polling even though settings saves were working.
