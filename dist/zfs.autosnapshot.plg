@@ -1,10 +1,10 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.09.1" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.10.1" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.09.1 (2026-04-09)
-- Changed the main Save button to a dedicated button-driven save path so custom Unraid themes are less likely to hijack or swallow the form submit event before the plugin can act.
-- Kept a protected form-submit fallback for keyboard and no-JavaScript cases, including a noscript submit button.
-- The save page now listens on both the button click path and the form submit path, with the button path set up to run early enough to avoid common theme submit races.
+### 2026.04.10.1 (2026-04-10)
+- Fixed install and upgrade behavior so the plugin now repairs the ownership and permissions of its boot-side config directory and config file before the WebGUI tries to save settings.
+- Added a release-package verification step that fails the build if any file from `source/` is missing from the generated `.txz`.
+- Added GitHub Actions release builds for the `testing` and `main` branches so published plugin artifacts no longer depend on a local manual packaging step.
   </CHANGES>
 
   <DESCRIPTION>
@@ -13,9 +13,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.09.1-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.09.1-noarch-1.txz</URL>
-    <MD5>52be68c530bda72cde3cdcd37a5544cd</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.10.1-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.10.1-noarch-1.txz</URL>
+    <MD5>8bb40a9363e9083f890dbfd6dd9e6e55</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -23,10 +23,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.04.09.1-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.04.10.1-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="52be68c530bda72cde3cdcd37a5544cd"
+PKG_MD5="8bb40a9363e9083f890dbfd6dd9e6e55"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
@@ -78,6 +78,10 @@ fi
 if ! ls -1 /var/log/packages 2>/dev/null | grep -q "^${PKG_NAME}"; then
   echo "ERROR: ${PKG_NAME} is still missing from /var/log/packages after install." >&2
   exit 1
+fi
+
+if [ -x /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/repair-permissions.sh ]; then
+  /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/repair-permissions.sh || true
 fi
 
 if [ -x /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/sync-cron.sh ]; then
