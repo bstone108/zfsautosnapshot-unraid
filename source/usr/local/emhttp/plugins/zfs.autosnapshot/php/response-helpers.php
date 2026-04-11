@@ -22,7 +22,7 @@ function zfsas_emit_marked_json($payload, $statusCode = 200)
 
     if (!headers_sent()) {
         http_response_code((int) $statusCode);
-        header('Content-Type: application/json; charset=UTF-8');
+        header('Content-Type: text/plain; charset=UTF-8');
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');
         header('X-Content-Type-Options: nosniff');

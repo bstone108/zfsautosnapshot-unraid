@@ -5,6 +5,24 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.11.4 (Testing Branch Only)
+
+- Adjusted the inline save-error layout so the fixed-width error slot now sits to the left of both action buttons instead of only to the left of Save.
+
+### 2026.04.11.3 (Testing Branch Only)
+
+- Changed the save confirmation again so the Save button itself now switches to `Saved` for a few seconds after a successful save.
+- Save errors now appear in a fixed inline slot just to the left of the Save button instead of at the top of the page, so failures stay visible without shifting the button around.
+
+### 2026.04.11.2 (Testing Branch Only)
+
+- Moved the successful save confirmation out of the large page banner and into a small inline status beside the Save button.
+- The inline success checkmark clears itself after a few seconds, while real save errors still stay visible at the top of the page.
+
+### 2026.04.11.1 (Testing Branch Only)
+
+- Fixed the dedicated save endpoint so its marked response is no longer mislabeled as plain JSON, which avoids noisy browser JSON-parse complaints in DevTools while keeping the wrapped-response protection in place.
+
 ### 2026.04.10.1 (Testing Branch Only)
 
 - Fixed install and upgrade behavior so the plugin now repairs the ownership and permissions of its boot-side config directory and config file before the WebGUI tries to save settings.
