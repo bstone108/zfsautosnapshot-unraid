@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.11.4 (Testing Branch Only)
+
+- Adjusted the inline save-error layout so the fixed-width error slot now sits to the left of both action buttons instead of only to the left of Save.
+
 ### 2026.04.11.3 (Testing Branch Only)
 
 - Changed the save confirmation again so the Save button itself now switches to `Saved` for a few seconds after a successful save.

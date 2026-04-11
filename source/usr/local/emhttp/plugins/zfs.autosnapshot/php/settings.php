@@ -1505,7 +1505,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
     <div class="zfsas-actions">
       <div id="manual_run_status" class="zfsas-manual-status">Manual run is ready.</div>
-      <button type="button" class="btn" id="manual_run">Run Now</button>
       <div id="save_feedback" class="zfsas-save-feedback-inline">
         <?php if (!empty($errors)) : ?>
           <div class="zfsas-alert zfsas-alert-error">
@@ -1515,6 +1514,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
           </div>
         <?php endif; ?>
       </div>
+      <button type="button" class="btn" id="manual_run">Run Now</button>
       <button
         type="button"
         class="btn btn-primary"
