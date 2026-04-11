@@ -1234,37 +1234,20 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   opacity: 1;
 }
 
-.zfsas-save-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.zfsas-save-feedback-inline {
+  flex: 0 0 360px;
+  width: 360px;
   min-height: 28px;
-  padding: 0 2px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #2e7d32;
-  opacity: 0;
-  transform: translateY(2px);
-  transition: opacity 180ms ease, transform 180ms ease;
-  pointer-events: none;
-}
-
-.zfsas-save-status.is-visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-.zfsas-save-status-mark {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 999px;
-  background: rgba(46, 125, 50, 0.12);
-  border: 1px solid rgba(46, 125, 50, 0.22);
+  justify-content: flex-end;
+}
+
+.zfsas-save-feedback-inline .zfsas-alert {
+  width: 100%;
+  margin-bottom: 0;
+  padding: 8px 10px;
   font-size: 12px;
-  line-height: 1;
 }
 
 @media (max-width: 900px) {
@@ -1300,6 +1283,12 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     margin-right: 0;
     width: 100%;
   }
+
+  .zfsas-save-feedback-inline {
+    flex: 1 1 100%;
+    width: 100%;
+    justify-content: flex-start;
+  }
 }
 </style>
 
@@ -1310,16 +1299,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   </div>
   <div class="zfsas-subtitle">
     Manage dataset selection, retention policy, and automatic run schedule.
-  </div>
-
-  <div id="save_feedback">
-    <?php if (!empty($errors)) : ?>
-      <div class="zfsas-alert zfsas-alert-error">
-        <?php foreach ($errors as $error) : ?>
-          <div><?php echo h($error); ?></div>
-        <?php endforeach; ?>
-      </div>
-    <?php endif; ?>
   </div>
 
   <div id="compat_feedback"></div>
@@ -1527,15 +1506,21 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     <div class="zfsas-actions">
       <div id="manual_run_status" class="zfsas-manual-status">Manual run is ready.</div>
       <button type="button" class="btn" id="manual_run">Run Now</button>
-      <button type="button" class="btn btn-primary" id="zfsas_save_btn">Save Settings</button>
-      <div
-        id="save_inline_status"
-        class="zfsas-save-status<?php echo !empty($notices) ? ' is-visible' : ''; ?>"
-        <?php if (!empty($notices)) : ?>data-autoclear="1"<?php endif; ?>
-      >
-        <span class="zfsas-save-status-mark">&#10003;</span>
-        <span id="save_inline_status_text"><?php echo !empty($notices) ? h($notices[0]) : ''; ?></span>
+      <div id="save_feedback" class="zfsas-save-feedback-inline">
+        <?php if (!empty($errors)) : ?>
+          <div class="zfsas-alert zfsas-alert-error">
+            <?php foreach ($errors as $error) : ?>
+              <div><?php echo h($error); ?></div>
+            <?php endforeach; ?>
+          </div>
+        <?php endif; ?>
       </div>
+      <button
+        type="button"
+        class="btn btn-primary"
+        id="zfsas_save_btn"
+        <?php if (!empty($notices)) : ?>data-show-saved="1"<?php endif; ?>
+      >Save Settings</button>
       <noscript><button type="submit" class="btn btn-primary">Save Settings</button></noscript>
     </div>
 
@@ -1583,11 +1568,9 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var logFingerprint = '';
   var saveForm = byId('zfsas_settings_form');
   var saveButton = byId('zfsas_save_btn');
-  var saveInlineStatus = byId('save_inline_status');
-  var saveInlineStatusText = byId('save_inline_status_text');
   var saveButtonDefaultText = saveButton ? saveButton.textContent : 'Save Settings';
   var saveBusy = false;
-  var saveInlineStatusTimer = null;
+  var saveSuccessTimer = null;
 
   function escapeHtml(text) {
     return String(text)
@@ -1624,49 +1607,16 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     feedbackEl.innerHTML = html;
   }
 
-  function clearSaveInlineStatus() {
-    if (!saveInlineStatus) {
+  function clearSaveButtonSuccessState() {
+    if (!saveButton) {
       return;
     }
 
-    if (saveInlineStatusTimer !== null) {
-      window.clearTimeout(saveInlineStatusTimer);
-      saveInlineStatusTimer = null;
+    if (saveSuccessTimer !== null) {
+      window.clearTimeout(saveSuccessTimer);
+      saveSuccessTimer = null;
     }
-
-    saveInlineStatus.classList.remove('is-visible');
-    saveInlineStatus.removeAttribute('data-autoclear');
-    if (saveInlineStatusText) {
-      saveInlineStatusText.textContent = '';
-    }
-  }
-
-  function showSaveInlineStatus(message, autoClear) {
-    if (!saveInlineStatus || !saveInlineStatusText) {
-      return;
-    }
-
-    if (typeof message !== 'string' || message.trim() === '') {
-      clearSaveInlineStatus();
-      return;
-    }
-
-    if (saveInlineStatusTimer !== null) {
-      window.clearTimeout(saveInlineStatusTimer);
-      saveInlineStatusTimer = null;
-    }
-
-    saveInlineStatusText.textContent = message;
-    saveInlineStatus.classList.add('is-visible');
-
-    if (autoClear) {
-      saveInlineStatus.setAttribute('data-autoclear', '1');
-      saveInlineStatusTimer = window.setTimeout(function () {
-        clearSaveInlineStatus();
-      }, 4500);
-    } else {
-      saveInlineStatus.removeAttribute('data-autoclear');
-    }
+    saveButton.textContent = saveButtonDefaultText;
   }
 
   function renderCompatibilityFeedback(message) {
@@ -1914,6 +1864,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     }
 
     if (saveBusy) {
+      clearSaveButtonSuccessState();
       saveButton.disabled = true;
       saveButton.setAttribute('disabled', 'disabled');
       saveButton.setAttribute('aria-busy', 'true');
@@ -1924,8 +1875,22 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     saveButton.disabled = false;
     saveButton.removeAttribute('disabled');
     saveButton.setAttribute('aria-busy', 'false');
-    saveButton.textContent = saveButtonDefaultText;
+    if (saveSuccessTimer === null) {
+      saveButton.textContent = saveButtonDefaultText;
+    }
     saveButton.blur();
+  }
+
+  function showSaveButtonSavedState() {
+    if (!saveButton) {
+      return;
+    }
+
+    clearSaveButtonSuccessState();
+    saveButton.textContent = 'Saved';
+    saveSuccessTimer = window.setTimeout(function () {
+      clearSaveButtonSuccessState();
+    }, 5000);
   }
 
   function pad2(value) {
@@ -2568,7 +2533,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
     var saveFailsafeTimer = null;
     setSaveButtonState(true);
-    clearSaveInlineStatus();
     renderSaveFeedback([], []);
 
     saveFailsafeTimer = window.setTimeout(function () {
@@ -2586,7 +2550,11 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
         function (data) {
           var notices = Array.isArray(data.notices) ? data.notices : [];
           renderSaveFeedback(data.errors || [], []);
-          showSaveInlineStatus(notices[0] || 'Settings saved.', true);
+          if (!Array.isArray(data.errors) || data.errors.length === 0) {
+            showSaveButtonSavedState();
+          } else {
+            clearSaveButtonSuccessState();
+          }
 
           var cronValueEl = byId('resolved_cron_value');
           if (cronValueEl && typeof data.resolvedCron === 'string') {
@@ -2607,7 +2575,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
           } else {
             renderSaveFeedback([error.message], []);
           }
-          clearSaveInlineStatus();
+          clearSaveButtonSuccessState();
         },
         function () {
           if (saveFailsafeTimer !== null) {
@@ -2621,6 +2589,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
         window.clearTimeout(saveFailsafeTimer);
       }
       setSaveButtonState(false);
+      clearSaveButtonSuccessState();
       renderSaveFeedback(['Save request could not be started: ' + String(error && error.message ? error.message : error)], []);
     }
   }
@@ -2633,8 +2602,9 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     saveForm.addEventListener('submit', startSave, true);
   }
 
-  if (saveInlineStatus && saveInlineStatus.getAttribute('data-autoclear') === '1') {
-    showSaveInlineStatus(saveInlineStatusText ? saveInlineStatusText.textContent : '', true);
+  if (saveButton && saveButton.getAttribute('data-show-saved') === '1') {
+    showSaveButtonSavedState();
+    saveButton.removeAttribute('data-show-saved');
   }
 
   applyPoolFilter();

@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.11.3 (Testing Branch Only)
+
+- Changed the save confirmation again so the Save button itself now switches to `Saved` for a few seconds after a successful save.
+- Save errors now appear in a fixed inline slot just to the left of the Save button instead of at the top of the page, so failures stay visible without shifting the button around.
+
 ### 2026.04.11.2 (Testing Branch Only)
 
 - Moved the successful save confirmation out of the large page banner and into a small inline status beside the Save button.
