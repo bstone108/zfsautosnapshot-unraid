@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.11.1 (Testing Branch Only)
+
+- Fixed the dedicated save endpoint so its marked response is no longer mislabeled as plain JSON, which avoids noisy browser JSON-parse complaints in DevTools while keeping the wrapped-response protection in place.
+
 ### 2026.04.10.1 (Testing Branch Only)
 
 - Fixed install and upgrade behavior so the plugin now repairs the ownership and permissions of its boot-side config directory and config file before the WebGUI tries to save settings.
