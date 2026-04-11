@@ -1234,6 +1234,39 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   opacity: 1;
 }
 
+.zfsas-save-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #2e7d32;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+}
+
+.zfsas-save-status.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.zfsas-save-status-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: rgba(46, 125, 50, 0.12);
+  border: 1px solid rgba(46, 125, 50, 0.22);
+  font-size: 12px;
+  line-height: 1;
+}
+
 @media (max-width: 900px) {
   .zfsas-grid {
     grid-template-columns: 1fr;
@@ -1284,14 +1317,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       <div class="zfsas-alert zfsas-alert-error">
         <?php foreach ($errors as $error) : ?>
           <div><?php echo h($error); ?></div>
-        <?php endforeach; ?>
-      </div>
-    <?php endif; ?>
-
-    <?php if (!empty($notices)) : ?>
-      <div class="zfsas-alert zfsas-alert-ok">
-        <?php foreach ($notices as $notice) : ?>
-          <div><?php echo h($notice); ?></div>
         <?php endforeach; ?>
       </div>
     <?php endif; ?>
@@ -1503,6 +1528,14 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       <div id="manual_run_status" class="zfsas-manual-status">Manual run is ready.</div>
       <button type="button" class="btn" id="manual_run">Run Now</button>
       <button type="button" class="btn btn-primary" id="zfsas_save_btn">Save Settings</button>
+      <div
+        id="save_inline_status"
+        class="zfsas-save-status<?php echo !empty($notices) ? ' is-visible' : ''; ?>"
+        <?php if (!empty($notices)) : ?>data-autoclear="1"<?php endif; ?>
+      >
+        <span class="zfsas-save-status-mark">&#10003;</span>
+        <span id="save_inline_status_text"><?php echo !empty($notices) ? h($notices[0]) : ''; ?></span>
+      </div>
       <noscript><button type="submit" class="btn btn-primary">Save Settings</button></noscript>
     </div>
 
@@ -1550,8 +1583,11 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var logFingerprint = '';
   var saveForm = byId('zfsas_settings_form');
   var saveButton = byId('zfsas_save_btn');
+  var saveInlineStatus = byId('save_inline_status');
+  var saveInlineStatusText = byId('save_inline_status_text');
   var saveButtonDefaultText = saveButton ? saveButton.textContent : 'Save Settings';
   var saveBusy = false;
+  var saveInlineStatusTimer = null;
 
   function escapeHtml(text) {
     return String(text)
@@ -1585,15 +1621,52 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       html += '</div>';
     }
 
-    if (Array.isArray(notices) && notices.length > 0) {
-      html += '<div class="zfsas-alert zfsas-alert-ok">';
-      notices.forEach(function (message) {
-        html += '<div>' + escapeHtml(message) + '</div>';
-      });
-      html += '</div>';
+    feedbackEl.innerHTML = html;
+  }
+
+  function clearSaveInlineStatus() {
+    if (!saveInlineStatus) {
+      return;
     }
 
-    feedbackEl.innerHTML = html;
+    if (saveInlineStatusTimer !== null) {
+      window.clearTimeout(saveInlineStatusTimer);
+      saveInlineStatusTimer = null;
+    }
+
+    saveInlineStatus.classList.remove('is-visible');
+    saveInlineStatus.removeAttribute('data-autoclear');
+    if (saveInlineStatusText) {
+      saveInlineStatusText.textContent = '';
+    }
+  }
+
+  function showSaveInlineStatus(message, autoClear) {
+    if (!saveInlineStatus || !saveInlineStatusText) {
+      return;
+    }
+
+    if (typeof message !== 'string' || message.trim() === '') {
+      clearSaveInlineStatus();
+      return;
+    }
+
+    if (saveInlineStatusTimer !== null) {
+      window.clearTimeout(saveInlineStatusTimer);
+      saveInlineStatusTimer = null;
+    }
+
+    saveInlineStatusText.textContent = message;
+    saveInlineStatus.classList.add('is-visible');
+
+    if (autoClear) {
+      saveInlineStatus.setAttribute('data-autoclear', '1');
+      saveInlineStatusTimer = window.setTimeout(function () {
+        clearSaveInlineStatus();
+      }, 4500);
+    } else {
+      saveInlineStatus.removeAttribute('data-autoclear');
+    }
   }
 
   function renderCompatibilityFeedback(message) {
@@ -2495,7 +2568,8 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
     var saveFailsafeTimer = null;
     setSaveButtonState(true);
-    renderSaveFeedback([], ['Saving settings...']);
+    clearSaveInlineStatus();
+    renderSaveFeedback([], []);
 
     saveFailsafeTimer = window.setTimeout(function () {
       if (!saveBusy) {
@@ -2510,7 +2584,9 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
         saveForm,
         saveForm.getAttribute('data-ajax-action') || requestTargetUrl(saveForm),
         function (data) {
-          renderSaveFeedback(data.errors || [], data.notices || ['Settings saved.']);
+          var notices = Array.isArray(data.notices) ? data.notices : [];
+          renderSaveFeedback(data.errors || [], []);
+          showSaveInlineStatus(notices[0] || 'Settings saved.', true);
 
           var cronValueEl = byId('resolved_cron_value');
           if (cronValueEl && typeof data.resolvedCron === 'string') {
@@ -2531,6 +2607,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
           } else {
             renderSaveFeedback([error.message], []);
           }
+          clearSaveInlineStatus();
         },
         function () {
           if (saveFailsafeTimer !== null) {
@@ -2554,6 +2631,10 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
   if (saveForm) {
     saveForm.addEventListener('submit', startSave, true);
+  }
+
+  if (saveInlineStatus && saveInlineStatus.getAttribute('data-autoclear') === '1') {
+    showSaveInlineStatus(saveInlineStatusText ? saveInlineStatusText.textContent : '', true);
   }
 
   applyPoolFilter();
