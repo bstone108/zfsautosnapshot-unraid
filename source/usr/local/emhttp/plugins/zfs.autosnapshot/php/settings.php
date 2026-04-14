@@ -10,6 +10,9 @@ $logStreamApiUrl = "/plugins/{$pluginName}/php/log-stream.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
 $saveApiUrl = "/plugins/{$pluginName}/php/save-settings.php";
 $sendSettingsUrl = "/plugins/{$pluginName}/php/send-settings.php";
+$snapshotManagerListUrl = "/plugins/{$pluginName}/php/snapshot-manager-list.php";
+$snapshotManagerDatasetUrl = "/plugins/{$pluginName}/php/snapshot-manager-dataset.php";
+$snapshotManagerActionUrl = "/plugins/{$pluginName}/php/snapshot-manager-action.php";
 $logPollIntervalMs = 2000;
 
 require_once __DIR__ . '/response-helpers.php';
@@ -749,7 +752,7 @@ $sendParseWarnings = [];
 $sendJobs = zfsas_send_parse_jobs($sendConfig['SEND_JOBS'] ?? '', $sendParseErrors, $sendParseWarnings);
 $sendDestinationPools = zfsas_send_destination_pools_from_jobs($sendJobs);
 $initialSection = trim((string) ($_GET['section'] ?? 'main'));
-if (!in_array($initialSection, ['main', 'special-features', 'repair-tools'], true)) {
+if (!in_array($initialSection, ['main', 'special-features', 'repair-tools', 'snapshot-manager'], true)) {
     $initialSection = 'main';
 }
 
@@ -1332,6 +1335,164 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   font-size: 12px;
 }
 
+.zfsas-sm-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.zfsas-sm-toolbar-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-color, #4f5a66);
+  opacity: 0.82;
+}
+
+.zfsas-sm-toolbar-status.error {
+  color: var(--text-color, #8f2d2a);
+  opacity: 1;
+}
+
+.zfsas-sm-summary-table th:last-child,
+.zfsas-sm-summary-table td:last-child {
+  text-align: right;
+}
+
+.zfsas-sm-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--border-color, #d9e1ea);
+  background: rgba(82, 126, 235, 0.06);
+}
+
+.zfsas-sm-status-chip.is-busy {
+  background: rgba(180, 120, 0, 0.1);
+  border-color: rgba(180, 120, 0, 0.28);
+}
+
+.zfsas-sm-status-chip.is-error {
+  background: rgba(176, 0, 32, 0.08);
+  border-color: rgba(176, 0, 32, 0.28);
+}
+
+.zfsas-sm-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  z-index: 1040;
+}
+
+.zfsas-sm-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(860px, 100vw);
+  height: 100vh;
+  z-index: 1050;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.zfsas-sm-drawer-panel {
+  width: min(860px, 100vw);
+  height: 100vh;
+  overflow: auto;
+  background: var(--background-color, #fff);
+  color: var(--text-color, #1f2933);
+  box-shadow: -12px 0 32px rgba(15, 23, 42, 0.18);
+  padding: 20px 18px 24px;
+}
+
+.zfsas-sm-drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.zfsas-sm-drawer-title {
+  margin: 0;
+}
+
+.zfsas-sm-drawer-subtitle {
+  margin-top: 6px;
+  color: var(--text-color, #4f5a66);
+  opacity: 0.85;
+  font-size: 13px;
+}
+
+.zfsas-sm-bulk-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 0 12px;
+  background: linear-gradient(to bottom, var(--background-color, #fff) 75%, rgba(255,255,255,0));
+}
+
+.zfsas-sm-bulk-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-color, #4f5a66);
+  opacity: 0.82;
+}
+
+.zfsas-sm-feedback {
+  margin: 10px 0 0;
+}
+
+.zfsas-sm-feedback .zfsas-alert {
+  margin-bottom: 0;
+}
+
+.zfsas-sm-table .zfsas-select-cell {
+  width: 38px;
+  text-align: center;
+}
+
+.zfsas-sm-table .zfsas-actions-cell {
+  min-width: 220px;
+  text-align: right;
+}
+
+.zfsas-sm-table .zfsas-actions-cell .btn {
+  margin-left: 6px;
+  margin-top: 4px;
+}
+
+.zfsas-sm-snapshot-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.zfsas-sm-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(82, 126, 235, 0.06);
+  border: 1px solid var(--border-color, #d9e1ea);
+}
+
+.zfsas-sm-meta-chip.is-protected {
+  background: rgba(180, 120, 0, 0.1);
+  border-color: rgba(180, 120, 0, 0.28);
+}
+
 @media (max-width: 900px) {
   .zfsas-grid {
     grid-template-columns: 1fr;
@@ -1371,6 +1532,20 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     width: 100%;
     justify-content: flex-start;
   }
+
+  .zfsas-sm-toolbar-status,
+  .zfsas-sm-bulk-count {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .zfsas-sm-drawer-panel {
+    padding: 18px 14px 24px;
+  }
+
+  .zfsas-sm-table .zfsas-actions-cell {
+    min-width: 160px;
+  }
 }
 </style>
 
@@ -1398,6 +1573,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       <button type="button" class="zfsas-section-tab is-active" id="zfsas_tab_main" data-section-target="main" role="tab" aria-selected="true" aria-controls="zfsas_panel_main">Main Page</button>
       <button type="button" class="zfsas-section-tab" id="zfsas_tab_features" data-section-target="special-features" role="tab" aria-selected="false" aria-controls="zfsas_panel_special_features">Special Features</button>
       <button type="button" class="zfsas-section-tab" id="zfsas_tab_repairs" data-section-target="repair-tools" role="tab" aria-selected="false" aria-controls="zfsas_panel_repair_tools">Repair Tools</button>
+      <button type="button" class="zfsas-section-tab" id="zfsas_tab_snapshot_manager" data-section-target="snapshot-manager" role="tab" aria-selected="false" aria-controls="zfsas_panel_snapshot_manager">Snapshot Manager</button>
     </div>
 
     <div class="zfsas-section-panel is-active" id="zfsas_panel_main" data-section-panel="main" role="tabpanel" aria-labelledby="zfsas_tab_main">
@@ -1661,6 +1837,83 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
         </div>
       </div>
     </div>
+
+    <div class="zfsas-section-panel" id="zfsas_panel_snapshot_manager" data-section-panel="snapshot-manager" role="tabpanel" aria-labelledby="zfsas_tab_snapshot_manager" hidden>
+      <div class="zfsas-card">
+        <h3>Snapshot Manager</h3>
+        <div class="zfsas-help">
+          Browse datasets, review snapshot counts, and queue manual snapshot operations without touching the main autosnapshot engine. Bulk delete, hold, and release actions are queued oldest to newest per dataset; rollback and one-off send actions start immediately when the selected dataset is idle.
+        </div>
+
+        <div class="zfsas-sm-toolbar">
+          <button type="button" class="btn" id="snapshot_manager_refresh">Refresh Snapshot Manager</button>
+          <div id="snapshot_manager_toolbar_status" class="zfsas-sm-toolbar-status">Snapshot manager is ready.</div>
+        </div>
+
+        <div class="zfsas-table-wrap" style="margin-top: 12px;">
+          <table class="zfsas-table zfsas-sm-summary-table">
+            <thead>
+              <tr>
+                <th>Dataset</th>
+                <th class="zfsas-center">Snapshots</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="snapshot_manager_dataset_rows">
+              <tr>
+                <td colspan="4" class="zfsas-help">Snapshot data will load when you open this section.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="snapshot_manager_backdrop" class="zfsas-sm-drawer-backdrop" hidden></div>
+      <div id="snapshot_manager_drawer" class="zfsas-sm-drawer" hidden>
+        <div class="zfsas-sm-drawer-panel">
+          <div class="zfsas-sm-drawer-header">
+            <div>
+              <h3 class="zfsas-sm-drawer-title" id="snapshot_manager_dataset_title">Snapshot Manager</h3>
+              <div class="zfsas-sm-drawer-subtitle" id="snapshot_manager_dataset_subtitle">Choose a dataset from the list to review its snapshots.</div>
+            </div>
+            <button type="button" class="btn" id="snapshot_manager_close">Close</button>
+          </div>
+
+          <div class="zfsas-sm-bulk-bar">
+            <button type="button" class="btn" id="snapshot_manager_take_snapshot">Take Snapshot</button>
+            <button type="button" class="btn" id="snapshot_manager_delete_selected">Delete Selected</button>
+            <button type="button" class="btn" id="snapshot_manager_hold_selected">Hold Selected</button>
+            <button type="button" class="btn" id="snapshot_manager_release_selected">Release Selected</button>
+            <button type="button" class="btn" id="snapshot_manager_refresh_dataset">Refresh Dataset</button>
+            <div id="snapshot_manager_bulk_count" class="zfsas-sm-bulk-count">No dataset selected.</div>
+          </div>
+
+          <div id="snapshot_manager_feedback" class="zfsas-sm-feedback"></div>
+
+          <div class="zfsas-table-wrap">
+            <table class="zfsas-table zfsas-sm-table">
+              <thead>
+                <tr>
+                  <th class="zfsas-select-cell"><input type="checkbox" id="snapshot_manager_select_all"></th>
+                  <th>Snapshot</th>
+                  <th>Created</th>
+                  <th class="zfsas-center">Used</th>
+                  <th class="zfsas-center">Written</th>
+                  <th class="zfsas-center">Holds</th>
+                  <th class="zfsas-actions-cell">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="snapshot_manager_snapshot_rows">
+                <tr>
+                  <td colspan="7" class="zfsas-help">Choose a dataset to inspect its snapshots.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
   </form>
 </div>
 
@@ -1676,6 +1929,9 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
   var saveApiUrl = <?php echo json_encode($saveApiUrl); ?>;
   var sendSettingsUrl = <?php echo json_encode($sendSettingsUrl); ?>;
+  var snapshotManagerListUrl = <?php echo json_encode($snapshotManagerListUrl); ?>;
+  var snapshotManagerDatasetUrl = <?php echo json_encode($snapshotManagerDatasetUrl); ?>;
+  var snapshotManagerActionUrl = <?php echo json_encode($snapshotManagerActionUrl); ?>;
   var initialSection = <?php echo json_encode($initialSection); ?>;
   var logView = 'summary';
   var logPaused = false;
@@ -1689,6 +1945,10 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var saveSuccessTimer = null;
   var sectionTabs = document.querySelectorAll('.zfsas-section-tab');
   var sectionPanels = document.querySelectorAll('.zfsas-section-panel');
+  var snapshotManagerLoaded = false;
+  var snapshotManagerLoading = false;
+  var snapshotManagerCurrentDataset = '';
+  var snapshotManagerSelection = {};
 
   function escapeHtml(text) {
     return String(text)
@@ -1715,6 +1975,278 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       panel.classList.toggle('is-active', isActive);
       panel.hidden = !isActive;
     });
+
+    if (sectionName === 'snapshot-manager') {
+      ensureSnapshotManagerLoaded();
+    }
+  }
+
+  function snapshotManagerDatasetRowsEl() {
+    return byId('snapshot_manager_dataset_rows');
+  }
+
+  function snapshotManagerSnapshotRowsEl() {
+    return byId('snapshot_manager_snapshot_rows');
+  }
+
+  function setSnapshotManagerToolbarStatus(message, isError) {
+    var el = byId('snapshot_manager_toolbar_status');
+    if (!el) {
+      return;
+    }
+    el.textContent = message;
+    el.classList.toggle('error', !!isError);
+  }
+
+  function renderSnapshotManagerFeedback(messages, isError) {
+    var el = byId('snapshot_manager_feedback');
+    if (!el) {
+      return;
+    }
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      el.innerHTML = '';
+      return;
+    }
+
+    var html = '<div class="zfsas-alert ' + (isError ? 'zfsas-alert-error' : 'zfsas-alert-warn') + '">';
+    messages.forEach(function (message) {
+      html += '<div>' + escapeHtml(message) + '</div>';
+    });
+    html += '</div>';
+    el.innerHTML = html;
+  }
+
+  function snapshotManagerSelectedSnapshots() {
+    return Object.keys(snapshotManagerSelection).filter(function (key) {
+      return !!snapshotManagerSelection[key];
+    });
+  }
+
+  function refreshSnapshotManagerBulkCount() {
+    var el = byId('snapshot_manager_bulk_count');
+    if (!el) {
+      return;
+    }
+
+    if (!snapshotManagerCurrentDataset) {
+      el.textContent = 'No dataset selected.';
+      return;
+    }
+
+    var selectedCount = snapshotManagerSelectedSnapshots().length;
+    var pendingRow = byId('snapshot_manager_dataset_title');
+    var label = selectedCount + ' snapshot' + (selectedCount === 1 ? '' : 's') + ' selected';
+    if (pendingRow && pendingRow.textContent) {
+      label += ' on ' + pendingRow.textContent + '.';
+    }
+    el.textContent = label;
+  }
+
+  function closeSnapshotManagerDrawer() {
+    var drawer = byId('snapshot_manager_drawer');
+    var backdrop = byId('snapshot_manager_backdrop');
+    if (drawer) {
+      drawer.hidden = true;
+    }
+    if (backdrop) {
+      backdrop.hidden = true;
+    }
+    snapshotManagerSelection = {};
+    refreshSnapshotManagerBulkCount();
+  }
+
+  function openSnapshotManagerDrawer() {
+    var drawer = byId('snapshot_manager_drawer');
+    var backdrop = byId('snapshot_manager_backdrop');
+    if (drawer) {
+      drawer.hidden = false;
+    }
+    if (backdrop) {
+      backdrop.hidden = false;
+    }
+  }
+
+  function snapshotManagerDatasetStatusHtml(row) {
+    var label = 'Idle';
+    var classes = ['zfsas-sm-status-chip'];
+
+    if (row.lastError) {
+      label = row.lastError;
+      classes.push('is-error');
+    } else if (row.busy && row.currentAction) {
+      label = row.currentAction;
+      classes.push('is-busy');
+    } else if (row.pendingCount > 0) {
+      label = row.pendingCount + ' queued';
+      classes.push('is-busy');
+    } else if (row.lastMessage) {
+      label = row.lastMessage;
+    }
+
+    return '<span class="' + classes.join(' ') + '">' + escapeHtml(label) + '</span>';
+  }
+
+  function renderSnapshotManagerDatasets(datasets) {
+    var tbody = snapshotManagerDatasetRowsEl();
+    if (!tbody) {
+      return;
+    }
+
+    if (!Array.isArray(datasets) || datasets.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" class="zfsas-help">No datasets were found for Snapshot Manager.</td></tr>';
+      return;
+    }
+
+    var html = '';
+    datasets.forEach(function (row) {
+      html += '<tr data-dataset="' + escapeHtml(row.dataset) + '">';
+      html += '<td><code>' + escapeHtml(row.dataset) + '</code></td>';
+      html += '<td class="zfsas-center">' + String(row.snapshotCount || 0) + '</td>';
+      html += '<td>' + snapshotManagerDatasetStatusHtml(row) + '</td>';
+      html += '<td><button type="button" class="btn snapshot-manager-open" data-dataset="' + escapeHtml(row.dataset) + '">Manage</button></td>';
+      html += '</tr>';
+    });
+
+    tbody.innerHTML = html;
+  }
+
+  function ensureSnapshotManagerLoaded() {
+    if (snapshotManagerLoaded || snapshotManagerLoading) {
+      return;
+    }
+    loadSnapshotManagerDatasets();
+  }
+
+  function loadSnapshotManagerDatasets() {
+    snapshotManagerLoading = true;
+    setSnapshotManagerToolbarStatus('Loading dataset snapshot counts...', false);
+
+    requestJson(
+      snapshotManagerListUrl + '?_=' + Date.now(),
+      function (data) {
+        snapshotManagerLoading = false;
+        snapshotManagerLoaded = true;
+        renderSnapshotManagerDatasets(data.datasets || []);
+        setSnapshotManagerToolbarStatus('Snapshot Manager dataset list refreshed.', false);
+      },
+      function (error) {
+        snapshotManagerLoading = false;
+        snapshotManagerLoaded = false;
+        renderSnapshotManagerDatasets([]);
+        setSnapshotManagerToolbarStatus('Snapshot Manager load failed: ' + error.message, true);
+      }
+    );
+  }
+
+  function renderSnapshotRows(dataset, snapshots, status) {
+    var tbody = snapshotManagerSnapshotRowsEl();
+    if (!tbody) {
+      return;
+    }
+
+    if (!Array.isArray(snapshots) || snapshots.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="zfsas-help">No snapshots were found for this dataset.</td></tr>';
+      return;
+    }
+
+    var html = '';
+    snapshots.forEach(function (row) {
+      var isSelected = !!snapshotManagerSelection[row.snapshot];
+      var holdLabel = row.held ? 'Release' : 'Hold';
+      var deleteDisabled = row.sendProtected ? ' disabled' : '';
+      var rollbackDisabled = row.sendProtected ? ' disabled' : '';
+      html += '<tr data-snapshot="' + escapeHtml(row.snapshot) + '">';
+      html += '<td class="zfsas-select-cell"><input type="checkbox" class="snapshot-manager-select" value="' + escapeHtml(row.snapshot) + '"' + (isSelected ? ' checked' : '') + '></td>';
+      html += '<td><code>' + escapeHtml(row.snapshotName) + '</code><div class="zfsas-sm-snapshot-meta">';
+      if (row.sendProtected) {
+        html += '<span class="zfsas-sm-meta-chip is-protected">Protected send checkpoint</span>';
+      }
+      if (row.held) {
+        html += '<span class="zfsas-sm-meta-chip">Held: ' + escapeHtml((row.holdTags || []).join(', ') || 'yes') + '</span>';
+      }
+      html += '</div></td>';
+      html += '<td>' + escapeHtml(row.createdText) + '</td>';
+      html += '<td class="zfsas-center">' + escapeHtml(row.usedText) + '</td>';
+      html += '<td class="zfsas-center">' + escapeHtml(row.writtenText) + '</td>';
+      html += '<td class="zfsas-center">' + String(row.userrefs || 0) + '</td>';
+      html += '<td class="zfsas-actions-cell">';
+      html += '<button type="button" class="btn snapshot-manager-row-action" data-action="rollback" data-snapshot="' + escapeHtml(row.snapshot) + '"' + rollbackDisabled + '>Rollback</button>';
+      html += '<button type="button" class="btn snapshot-manager-row-action" data-action="delete" data-snapshot="' + escapeHtml(row.snapshot) + '"' + deleteDisabled + '>Delete</button>';
+      html += '<button type="button" class="btn snapshot-manager-row-action" data-action="' + (row.held ? 'release' : 'hold') + '" data-snapshot="' + escapeHtml(row.snapshot) + '">' + holdLabel + '</button>';
+      html += '<button type="button" class="btn snapshot-manager-row-action" data-action="send" data-snapshot="' + escapeHtml(row.snapshot) + '">Send</button>';
+      html += '</td>';
+      html += '</tr>';
+    });
+
+    tbody.innerHTML = html;
+
+    var titleEl = byId('snapshot_manager_dataset_title');
+    if (titleEl) {
+      titleEl.textContent = dataset;
+    }
+
+    var subtitleParts = ['Snapshots listed oldest to newest.'];
+    if (status && status.pending_count > 0) {
+      subtitleParts.push(String(status.pending_count) + ' queued operation(s).');
+    } else if (status && status.current_action_label) {
+      subtitleParts.push(status.current_action_label + ' is running.');
+    }
+    var subtitleEl = byId('snapshot_manager_dataset_subtitle');
+    if (subtitleEl) {
+      subtitleEl.textContent = subtitleParts.join(' ');
+    }
+
+    var selectAllEl = byId('snapshot_manager_select_all');
+    if (selectAllEl) {
+      selectAllEl.checked = false;
+    }
+  }
+
+  function loadSnapshotManagerDataset(dataset) {
+    snapshotManagerCurrentDataset = dataset;
+    snapshotManagerSelection = {};
+    refreshSnapshotManagerBulkCount();
+    renderSnapshotManagerFeedback([], false);
+    openSnapshotManagerDrawer();
+    renderSnapshotRows(dataset, [], null);
+
+    requestJson(
+      snapshotManagerDatasetUrl + '?dataset=' + encodeURIComponent(dataset) + '&_=' + Date.now(),
+      function (data) {
+        renderSnapshotRows(dataset, data.snapshots || [], data.status || null);
+        refreshSnapshotManagerBulkCount();
+      },
+      function (error) {
+        renderSnapshotManagerFeedback(['Unable to load snapshots for ' + dataset + ': ' + error.message], true);
+      }
+    );
+  }
+
+  function requestSnapshotManagerAction(body, onSuccess) {
+    requestJsonPost(
+      snapshotManagerActionUrl,
+      body,
+      function (data) {
+        renderSnapshotManagerFeedback([data.message || 'Snapshot manager action accepted.'], false);
+        loadSnapshotManagerDatasets();
+        if (snapshotManagerCurrentDataset) {
+          window.setTimeout(function () {
+            loadSnapshotManagerDataset(snapshotManagerCurrentDataset);
+          }, 400);
+        }
+        if (typeof onSuccess === 'function') {
+          onSuccess(data);
+        }
+      },
+      function (error, payload) {
+        if (payload && payload.error) {
+          renderSnapshotManagerFeedback([payload.error], true);
+        } else {
+          renderSnapshotManagerFeedback([error.message], true);
+        }
+      }
+    );
   }
 
   function requestTargetUrl(form) {
@@ -2345,7 +2877,14 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       }
 
       if (xhr.status < 200 || xhr.status >= 300) {
-        onError(new Error('HTTP ' + xhr.status));
+        var errorPayload = null;
+        try {
+          errorPayload = parsePossiblyWrappedJson(xhr.responseText);
+        } catch (ignoredParseError) {
+          errorPayload = null;
+        }
+
+        onError(new Error((errorPayload && errorPayload.error) ? errorPayload.error : ('HTTP ' + xhr.status)), errorPayload);
         return;
       }
 
@@ -2622,6 +3161,195 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   if (openSendSettingsBtn) {
     openSendSettingsBtn.addEventListener('click', function () {
       window.location.href = sendSettingsUrl;
+    });
+  }
+
+  var snapshotManagerRefreshBtn = byId('snapshot_manager_refresh');
+  if (snapshotManagerRefreshBtn) {
+    snapshotManagerRefreshBtn.addEventListener('click', function () {
+      loadSnapshotManagerDatasets();
+    });
+  }
+
+  var snapshotManagerCloseBtn = byId('snapshot_manager_close');
+  if (snapshotManagerCloseBtn) {
+    snapshotManagerCloseBtn.addEventListener('click', closeSnapshotManagerDrawer);
+  }
+
+  var snapshotManagerBackdrop = byId('snapshot_manager_backdrop');
+  if (snapshotManagerBackdrop) {
+    snapshotManagerBackdrop.addEventListener('click', closeSnapshotManagerDrawer);
+  }
+
+  var snapshotManagerRefreshDatasetBtn = byId('snapshot_manager_refresh_dataset');
+  if (snapshotManagerRefreshDatasetBtn) {
+    snapshotManagerRefreshDatasetBtn.addEventListener('click', function () {
+      if (!snapshotManagerCurrentDataset) {
+        renderSnapshotManagerFeedback(['Choose a dataset first.'], true);
+        return;
+      }
+      loadSnapshotManagerDataset(snapshotManagerCurrentDataset);
+    });
+  }
+
+  var snapshotManagerDatasetRows = snapshotManagerDatasetRowsEl();
+  if (snapshotManagerDatasetRows) {
+    snapshotManagerDatasetRows.addEventListener('click', function (event) {
+      var button = event.target.closest('.snapshot-manager-open');
+      if (!button) {
+        return;
+      }
+
+      var dataset = button.getAttribute('data-dataset') || '';
+      if (!dataset) {
+        return;
+      }
+
+      loadSnapshotManagerDataset(dataset);
+    });
+  }
+
+  var snapshotManagerSnapshotRows = snapshotManagerSnapshotRowsEl();
+  if (snapshotManagerSnapshotRows) {
+    snapshotManagerSnapshotRows.addEventListener('change', function (event) {
+      var checkbox = event.target.closest('.snapshot-manager-select');
+      if (!checkbox) {
+        return;
+      }
+      snapshotManagerSelection[checkbox.value] = checkbox.checked;
+      refreshSnapshotManagerBulkCount();
+    });
+
+    snapshotManagerSnapshotRows.addEventListener('click', function (event) {
+      var button = event.target.closest('.snapshot-manager-row-action');
+      if (!button) {
+        return;
+      }
+
+      var action = button.getAttribute('data-action') || '';
+      var snapshot = button.getAttribute('data-snapshot') || '';
+      if (!snapshotManagerCurrentDataset || !snapshot) {
+        return;
+      }
+
+      if (action === 'delete') {
+        if (!window.confirm('Queue deletion for snapshot ' + snapshot + '?')) {
+          return;
+        }
+      } else if (action === 'rollback') {
+        if (!window.confirm('Rollback ' + snapshotManagerCurrentDataset + ' to ' + snapshot + '? This removes newer snapshots and can discard recent changes.')) {
+          return;
+        }
+      }
+
+      var body = {
+        action: action,
+        dataset: snapshotManagerCurrentDataset,
+        snapshots: [snapshot]
+      };
+
+      if (action === 'send') {
+        var destination = window.prompt('Destination dataset for one-off send from ' + snapshot + ':', '');
+        if (destination === null) {
+          return;
+        }
+        destination = destination.trim();
+        if (destination === '') {
+          renderSnapshotManagerFeedback(['Destination dataset is required for one-off send.'], true);
+          return;
+        }
+        body.destination = destination;
+      }
+
+      requestSnapshotManagerAction(body);
+    });
+  }
+
+  var snapshotManagerSelectAll = byId('snapshot_manager_select_all');
+  if (snapshotManagerSelectAll) {
+    snapshotManagerSelectAll.addEventListener('change', function () {
+      document.querySelectorAll('.snapshot-manager-select').forEach(function (checkbox) {
+        checkbox.checked = snapshotManagerSelectAll.checked;
+        snapshotManagerSelection[checkbox.value] = checkbox.checked;
+      });
+      refreshSnapshotManagerBulkCount();
+    });
+  }
+
+  var snapshotManagerTakeSnapshotBtn = byId('snapshot_manager_take_snapshot');
+  if (snapshotManagerTakeSnapshotBtn) {
+    snapshotManagerTakeSnapshotBtn.addEventListener('click', function () {
+      if (!snapshotManagerCurrentDataset) {
+        renderSnapshotManagerFeedback(['Choose a dataset first.'], true);
+        return;
+      }
+
+      var defaultName = 'manual-' + new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+      var snapshotName = window.prompt('New snapshot name for ' + snapshotManagerCurrentDataset + ':', defaultName);
+      if (snapshotName === null) {
+        return;
+      }
+      snapshotName = snapshotName.trim();
+      if (snapshotName === '') {
+        renderSnapshotManagerFeedback(['Snapshot name cannot be empty.'], true);
+        return;
+      }
+
+      requestSnapshotManagerAction({
+        action: 'take_snapshot',
+        dataset: snapshotManagerCurrentDataset,
+        snapshot_name: snapshotName
+      });
+    });
+  }
+
+  function queueSelectedSnapshotManagerAction(action, confirmMessage) {
+    if (!snapshotManagerCurrentDataset) {
+      renderSnapshotManagerFeedback(['Choose a dataset first.'], true);
+      return;
+    }
+
+    var snapshots = snapshotManagerSelectedSnapshots();
+    if (snapshots.length === 0) {
+      renderSnapshotManagerFeedback(['Select at least one snapshot first.'], true);
+      return;
+    }
+
+    if (confirmMessage && !window.confirm(confirmMessage.replace('{count}', String(snapshots.length)))) {
+      return;
+    }
+
+    requestSnapshotManagerAction({
+      action: action,
+      dataset: snapshotManagerCurrentDataset,
+      snapshots: snapshots
+    }, function () {
+      snapshotManagerSelection = {};
+      if (snapshotManagerSelectAll) {
+        snapshotManagerSelectAll.checked = false;
+      }
+      refreshSnapshotManagerBulkCount();
+    });
+  }
+
+  var snapshotManagerDeleteSelectedBtn = byId('snapshot_manager_delete_selected');
+  if (snapshotManagerDeleteSelectedBtn) {
+    snapshotManagerDeleteSelectedBtn.addEventListener('click', function () {
+      queueSelectedSnapshotManagerAction('delete', 'Queue deletion for {count} selected snapshot(s)?');
+    });
+  }
+
+  var snapshotManagerHoldSelectedBtn = byId('snapshot_manager_hold_selected');
+  if (snapshotManagerHoldSelectedBtn) {
+    snapshotManagerHoldSelectedBtn.addEventListener('click', function () {
+      queueSelectedSnapshotManagerAction('hold', '');
+    });
+  }
+
+  var snapshotManagerReleaseSelectedBtn = byId('snapshot_manager_release_selected');
+  if (snapshotManagerReleaseSelectedBtn) {
+    snapshotManagerReleaseSelectedBtn.addEventListener('click', function () {
+      queueSelectedSnapshotManagerAction('release', '');
     });
   }
 

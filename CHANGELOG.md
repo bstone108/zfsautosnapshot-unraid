@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.14.3 (Testing Branch Only)
+
+- Added a new `Snapshot Manager` section with a dataset summary view, snapshot counts, pending-operation status, and a slide-over snapshot drawer for manual ZFS snapshot work.
+- Added queued manual snapshot actions so bulk delete, hold, and release work one dataset at a time without blocking other datasets, while rollback and one-off send actions start immediately when the selected dataset is idle.
+- Added protection for ZFS send checkpoints inside Snapshot Manager so the dedicated replication snapshot chain is not accidentally broken by manual delete or rollback actions.
+
 ### 2026.04.14.2 (Testing Branch Only)
 
 - Added the first real `Special Features` tool: a dedicated `ZFS Send` page with its own config, manual run button, and scheduled replication jobs.

@@ -17,6 +17,13 @@ SEND_CHILD_PID_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.child.pid"
 SEND_STOP_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.stop"
 SEND_CONFIG_FILE="/boot/config/plugins/zfs.autosnapshot/zfs_send.conf"
 SEND_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_send'
+ALLOW_ORPHAN_DESTROY_MATCHES=1
+SNAPSHOT_MANAGER_RUNTIME_DIR="/var/run/zfs-autosnapshot-manager"
+SNAPSHOT_MANAGER_LOCK_FILE="${SNAPSHOT_MANAGER_RUNTIME_DIR}/snapshot_manager.lock"
+SNAPSHOT_MANAGER_LOCK_DIR="${SNAPSHOT_MANAGER_RUNTIME_DIR}/locks"
+SNAPSHOT_MANAGER_CHILD_PID_FILE="${SNAPSHOT_MANAGER_RUNTIME_DIR}/snapshot_manager.child.pid"
+SNAPSHOT_MANAGER_STOP_FILE="${SNAPSHOT_MANAGER_RUNTIME_DIR}/snapshot_manager.stop"
+SNAPSHOT_MANAGER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_snapshot_manager_worker'
 
 remember_pid() {
   local var_name="$1"
@@ -155,10 +162,12 @@ stop_running_jobs() {
     remember_pid seen_pids "$pid" >/dev/null 2>&1 || true
   done < <(list_running_pids)
 
-  while IFS= read -r pid; do
-    [[ -n "$pid" ]] || continue
-    remember_pid seen_pids "$pid" >/dev/null 2>&1 || true
-  done < <(list_orphaned_destroy_pids)
+  if (( ALLOW_ORPHAN_DESTROY_MATCHES )); then
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      remember_pid seen_pids "$pid" >/dev/null 2>&1 || true
+    done < <(list_orphaned_destroy_pids)
+  fi
 
   if [[ -z "$(printf '%s' "$seen_pids" | sed '/^[[:space:]]*$/d')" ]]; then
     echo "No running zfs_autosnapshot job detected."
@@ -187,6 +196,18 @@ STOP_FILE="$SEND_STOP_FILE"
 CONFIG_FILE="$SEND_CONFIG_FILE"
 RUN_MATCH="$SEND_RUN_MATCH"
 SNAPSHOT_PREFIX='zfs-send-'
+ALLOW_ORPHAN_DESTROY_MATCHES=1
+stop_running_jobs
+
+RUNTIME_DIR="$SNAPSHOT_MANAGER_RUNTIME_DIR"
+LOCK_FILE="$SNAPSHOT_MANAGER_LOCK_FILE"
+LOCK_DIR="$SNAPSHOT_MANAGER_LOCK_DIR"
+CHILD_PID_FILE="$SNAPSHOT_MANAGER_CHILD_PID_FILE"
+STOP_FILE="$SNAPSHOT_MANAGER_STOP_FILE"
+CONFIG_FILE="$SEND_CONFIG_FILE"
+RUN_MATCH="$SNAPSHOT_MANAGER_RUN_MATCH"
+SNAPSHOT_PREFIX='manual-'
+ALLOW_ORPHAN_DESTROY_MATCHES=0
 stop_running_jobs
 
 echo "Removed cron file: $CRON_FILE"
