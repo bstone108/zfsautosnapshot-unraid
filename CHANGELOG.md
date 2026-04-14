@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.14.1 (Testing Branch Only)
+
+- Added a section switcher above the Datasets area so the settings page now has dedicated tabs for `Main Page`, `Special Features`, and `Repair Tools`.
+- Left the `Special Features` and `Repair Tools` tabs as clear placeholders for future planned tools while keeping the full existing settings UI under `Main Page`.
+
 ### 2026.04.11.4 (Testing Branch Only)
 
 - Adjusted the inline save-error layout so the fixed-width error slot now sits to the left of both action buttons instead of only to the left of Save.

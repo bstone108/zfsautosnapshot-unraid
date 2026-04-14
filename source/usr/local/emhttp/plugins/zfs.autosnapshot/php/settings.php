@@ -947,6 +947,52 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   color: var(--text-color, #1f2933);
 }
 
+.zfsas-section-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.zfsas-section-tab {
+  appearance: none;
+  border: 1px solid var(--border-color, #cfd8e3);
+  border-radius: 999px;
+  background: var(--input-background-color, var(--background-color, #fff));
+  color: inherit;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.zfsas-section-tab:hover {
+  border-color: rgba(82, 126, 235, 0.45);
+}
+
+.zfsas-section-tab.is-active {
+  background: rgba(82, 126, 235, 0.12);
+  border-color: rgba(82, 126, 235, 0.45);
+  box-shadow: inset 0 0 0 1px rgba(82, 126, 235, 0.12);
+}
+
+.zfsas-section-panel {
+  display: none;
+}
+
+.zfsas-section-panel.is-active {
+  display: block;
+}
+
+.zfsas-placeholder-copy {
+  max-width: 760px;
+}
+
+.zfsas-placeholder-title {
+  margin: 0 0 6px;
+}
+
 .zfsas-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1312,240 +1358,266 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
   <form method="post" action="<?php echo h($saveApiUrl); ?>" data-ajax-action="<?php echo h($saveApiUrl); ?>" id="zfsas_settings_form">
     <input type="hidden" name="return_to" value="<?php echo h($defaultSettingsReturnUrl); ?>">
-    <div class="zfsas-card">
-      <h3>Datasets</h3>
-      <div class="zfsas-help">
-        Check the datasets you want this plugin to manage. Only checked datasets are included in automated snapshot cleanup and creation.
-      </div>
+    <div class="zfsas-section-nav" role="tablist" aria-label="Plugin sections">
+      <button type="button" class="zfsas-section-tab is-active" id="zfsas_tab_main" data-section-target="main" role="tab" aria-selected="true" aria-controls="zfsas_panel_main">Main Page</button>
+      <button type="button" class="zfsas-section-tab" id="zfsas_tab_features" data-section-target="special-features" role="tab" aria-selected="false" aria-controls="zfsas_panel_special_features">Special Features</button>
+      <button type="button" class="zfsas-section-tab" id="zfsas_tab_repairs" data-section-target="repair-tools" role="tab" aria-selected="false" aria-controls="zfsas_panel_repair_tools">Repair Tools</button>
+    </div>
 
-      <?php if (count($datasetRows) === 0) : ?>
-        <div class="zfsas-empty">
-          No ZFS datasets were found. Create a dataset first, then reload this page.
+    <div class="zfsas-section-panel is-active" id="zfsas_panel_main" data-section-panel="main" role="tabpanel" aria-labelledby="zfsas_tab_main">
+      <div class="zfsas-card">
+        <h3>Datasets</h3>
+        <div class="zfsas-help">
+          Check the datasets you want this plugin to manage. Only checked datasets are included in automated snapshot cleanup and creation.
         </div>
-      <?php else : ?>
-        <div class="zfsas-dataset-toolbar">
-          <div class="zfsas-pool-filter">
-            <label for="dataset_pool_filter">Pool</label>
-            <select id="dataset_pool_filter" class="zfsas-select">
-              <option value="__all">All pools</option>
-              <?php foreach ($datasetPools as $poolName => $poolStats) : ?>
-                <option value="<?php echo h($poolName); ?>">
-                  <?php echo h($poolName); ?> (<?php echo (int) $poolStats['total']; ?>)
-                </option>
-              <?php endforeach; ?>
-            </select>
+
+        <?php if (count($datasetRows) === 0) : ?>
+          <div class="zfsas-empty">
+            No ZFS datasets were found. Create a dataset first, then reload this page.
           </div>
-          <button type="button" class="btn" id="dataset_select_visible">Select shown</button>
-          <button type="button" class="btn" id="dataset_clear_visible">Clear shown</button>
-          <button type="button" class="btn" id="dataset_select_all">Select all</button>
-          <button type="button" class="btn" id="dataset_clear_all">Clear all</button>
-          <div class="zfsas-help zfsas-dataset-count" id="dataset_count"></div>
-        </div>
+        <?php else : ?>
+          <div class="zfsas-dataset-toolbar">
+            <div class="zfsas-pool-filter">
+              <label for="dataset_pool_filter">Pool</label>
+              <select id="dataset_pool_filter" class="zfsas-select">
+                <option value="__all">All pools</option>
+                <?php foreach ($datasetPools as $poolName => $poolStats) : ?>
+                  <option value="<?php echo h($poolName); ?>">
+                    <?php echo h($poolName); ?> (<?php echo (int) $poolStats['total']; ?>)
+                  </option>
+                <?php endforeach; ?>
+              </select>
+            </div>
+            <button type="button" class="btn" id="dataset_select_visible">Select shown</button>
+            <button type="button" class="btn" id="dataset_clear_visible">Clear shown</button>
+            <button type="button" class="btn" id="dataset_select_all">Select all</button>
+            <button type="button" class="btn" id="dataset_clear_all">Clear all</button>
+            <div class="zfsas-help zfsas-dataset-count" id="dataset_count"></div>
+          </div>
 
-        <div class="zfsas-table-wrap">
-          <table class="zfsas-table">
-            <thead>
-              <tr>
-                <th class="zfsas-center">Use</th>
-                <th>Dataset</th>
-                <th class="zfsas-threshold-col">Pool free-space target</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php foreach ($datasetRows as $index => $row) : ?>
-                <tr class="zfsas-dataset-row" data-pool="<?php echo h($row['pool']); ?>">
-                  <td class="zfsas-center">
-                    <input type="hidden" name="dataset_name[<?php echo (int) $index; ?>]" value="<?php echo h($row['dataset']); ?>">
-                    <input class="zfsas-dataset-checkbox" type="checkbox" name="dataset_selected[<?php echo (int) $index; ?>]" value="1" <?php echo $row['selected'] ? 'checked' : ''; ?>>
-                  </td>
-                  <td>
-                    <div class="zfsas-dataset-cell">
-                      <div>
-                        <code><?php echo h($row['dataset']); ?></code>
-                        <span class="zfsas-pool-chip"><?php echo h($row['pool']); ?></span>
-                        <?php if (!$row['available']) : ?>
-                          <span class="zfsas-badge">Not currently detected</span>
-                        <?php endif; ?>
-                      </div>
-                    </div>
-                  </td>
-                  <td class="zfsas-threshold-col">
-                    <input class="zfsas-input zfsas-threshold-input" name="dataset_threshold[<?php echo (int) $index; ?>]" value="<?php echo h($row['threshold']); ?>">
-                    <div class="zfsas-help">Examples: <code>500M</code>, <code>100G</code>, <code>2T</code>.</div>
-                  </td>
+          <div class="zfsas-table-wrap">
+            <table class="zfsas-table">
+              <thead>
+                <tr>
+                  <th class="zfsas-center">Use</th>
+                  <th>Dataset</th>
+                  <th class="zfsas-threshold-col">Pool free-space target</th>
                 </tr>
-              <?php endforeach; ?>
-            </tbody>
-          </table>
-        </div>
-      <?php endif; ?>
-
-      <div class="zfsas-field" style="margin-top: 14px;">
-        <label for="prefix">Snapshot name prefix</label>
-        <input id="prefix" name="prefix" class="zfsas-input" value="<?php echo h($config['PREFIX']); ?>">
-        <div class="zfsas-help">
-          Safety guard: only snapshots containing the prefix <code id="prefix_preview"><?php echo h($config['PREFIX']); ?></code> are eligible for automatic deletion.
-        </div>
-      </div>
-
-      <div class="zfsas-field" style="margin-top: 12px;">
-        <label for="dry_run">Mode</label>
-        <label class="zfsas-checkline" for="dry_run">
-          <input type="checkbox" id="dry_run" name="dry_run" value="1" <?php echo ($config['DRY_RUN'] === '1') ? 'checked' : ''; ?>>
-          <span>Dry run (preview only, no snapshot create/delete)</span>
-        </label>
-        <div class="zfsas-help">
-          Leave this unchecked for normal operation. In Dry Run mode, use Debug Log view to see each action that would be taken.
-        </div>
-      </div>
-    </div>
-
-    <div class="zfsas-card">
-      <h3>Retention Policy (Days)</h3>
-      <div class="zfsas-grid">
-        <div class="zfsas-field">
-          <label for="keep_all_for_days">Keep every snapshot for this many days</label>
-          <input id="keep_all_for_days" name="keep_all_for_days" class="zfsas-input" type="number" min="1" max="36500" value="<?php echo h($config['KEEP_ALL_FOR_DAYS']); ?>">
-          <div class="zfsas-help">
-            All snapshots newer than this age are kept.
-          </div>
-        </div>
-
-        <div class="zfsas-field">
-          <label for="keep_daily_until_days">Then keep 1 snapshot per day until this many days</label>
-          <input id="keep_daily_until_days" name="keep_daily_until_days" class="zfsas-input" type="number" min="2" max="36500" value="<?php echo h($config['KEEP_DAILY_UNTIL_DAYS']); ?>">
-          <div class="zfsas-help">
-            For snapshots older than the first window, keep the newest snapshot from each day.
-          </div>
-        </div>
-
-        <div class="zfsas-field">
-          <label for="keep_weekly_until_days">Then keep 1 snapshot per week until this many days</label>
-          <input id="keep_weekly_until_days" name="keep_weekly_until_days" class="zfsas-input" type="number" min="3" max="36500" value="<?php echo h($config['KEEP_WEEKLY_UNTIL_DAYS']); ?>">
-          <div class="zfsas-help">
-            Snapshots older than this are removed.
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="zfsas-card">
-      <h3>Run Schedule</h3>
-      <div class="zfsas-field">
-        <label for="schedule_mode">How often should automatic runs happen?</label>
-        <select id="schedule_mode" name="schedule_mode" class="zfsas-select">
-          <option value="disabled" <?php echo ($config['SCHEDULE_MODE'] === 'disabled') ? 'selected' : ''; ?>>Disabled (manual only)</option>
-          <option value="minutes" <?php echo ($config['SCHEDULE_MODE'] === 'minutes') ? 'selected' : ''; ?>>Every N minutes</option>
-          <option value="hourly" <?php echo ($config['SCHEDULE_MODE'] === 'hourly') ? 'selected' : ''; ?>>Every N hours</option>
-          <option value="daily" <?php echo ($config['SCHEDULE_MODE'] === 'daily') ? 'selected' : ''; ?>>Every day at a specific time</option>
-          <option value="weekly" <?php echo ($config['SCHEDULE_MODE'] === 'weekly') ? 'selected' : ''; ?>>Once per week</option>
-          <option value="custom" <?php echo ($config['SCHEDULE_MODE'] === 'custom') ? 'selected' : ''; ?>>Advanced: custom cron</option>
-        </select>
-        <div class="zfsas-help">
-          The plugin converts this to a cron job automatically.
-        </div>
-      </div>
-
-      <div class="zfsas-field zfsas-schedule-row" data-mode="minutes" style="margin-top: 12px;">
-        <label for="schedule_every_minutes">Every how many minutes?</label>
-        <input id="schedule_every_minutes" name="schedule_every_minutes" class="zfsas-input" type="number" min="1" max="59" value="<?php echo h($config['SCHEDULE_EVERY_MINUTES']); ?>">
-        <div class="zfsas-help">
-          1 means every minute. 15 means every 15 minutes.
-        </div>
-      </div>
-
-      <div class="zfsas-field zfsas-schedule-row" data-mode="hourly" style="margin-top: 12px;">
-        <label for="schedule_every_hours">Every how many hours?</label>
-        <input id="schedule_every_hours" name="schedule_every_hours" class="zfsas-input" type="number" min="1" max="24" value="<?php echo h($config['SCHEDULE_EVERY_HOURS']); ?>">
-        <div class="zfsas-help">
-          1 means every hour. 6 means every 6 hours.
-        </div>
-      </div>
-
-      <div class="zfsas-field zfsas-schedule-row" data-mode="daily" style="margin-top: 12px;">
-        <label>Daily run time (24-hour clock)</label>
-        <div class="zfsas-inline">
-          <input id="schedule_daily_hour" name="schedule_daily_hour" class="zfsas-input" type="number" min="0" max="23" value="<?php echo h($config['SCHEDULE_DAILY_HOUR']); ?>">
-          <input id="schedule_daily_minute" name="schedule_daily_minute" class="zfsas-input" type="number" min="0" max="59" value="<?php echo h($config['SCHEDULE_DAILY_MINUTE']); ?>">
-        </div>
-        <div class="zfsas-help">
-          Example: 03 and 30 means 3:30 AM every day.
-        </div>
-      </div>
-
-      <div class="zfsas-field zfsas-schedule-row" data-mode="weekly" style="margin-top: 12px;">
-        <label for="schedule_weekly_day">Weekly day and time</label>
-        <div class="zfsas-inline">
-          <select id="schedule_weekly_day" name="schedule_weekly_day" class="zfsas-select">
-            <?php foreach ($weekdayNames as $dayValue => $dayLabel) : ?>
-              <option value="<?php echo h($dayValue); ?>" <?php echo ((string) $config['SCHEDULE_WEEKLY_DAY'] === (string) $dayValue) ? 'selected' : ''; ?>><?php echo h($dayLabel); ?></option>
-            <?php endforeach; ?>
-          </select>
-          <input id="schedule_weekly_hour" name="schedule_weekly_hour" class="zfsas-input" type="number" min="0" max="23" value="<?php echo h($config['SCHEDULE_WEEKLY_HOUR']); ?>">
-          <input id="schedule_weekly_minute" name="schedule_weekly_minute" class="zfsas-input" type="number" min="0" max="59" value="<?php echo h($config['SCHEDULE_WEEKLY_MINUTE']); ?>">
-        </div>
-        <div class="zfsas-help">
-          Example: Sunday, 04 and 00 means every Sunday at 4:00 AM.
-        </div>
-      </div>
-
-      <div class="zfsas-field zfsas-schedule-row" data-mode="custom" style="margin-top: 12px;">
-        <label for="custom_cron_schedule">Custom cron expression (advanced)</label>
-        <input id="custom_cron_schedule" name="custom_cron_schedule" class="zfsas-input" value="<?php echo h($config['CUSTOM_CRON_SCHEDULE']); ?>">
-        <div class="zfsas-help">
-          Use only if you need behavior outside the plain-English options. Format must have exactly 5 fields.
-        </div>
-      </div>
-
-      <div id="schedule_preview" class="zfsas-preview"></div>
-      <div class="zfsas-help" style="margin-top: 10px;">
-        Current cron expression: <code id="resolved_cron_value"><?php echo h($resolvedCron); ?></code>
-      </div>
-    </div>
-
-    <div class="zfsas-actions">
-      <div id="manual_run_status" class="zfsas-manual-status">Manual run is ready.</div>
-      <div id="save_feedback" class="zfsas-save-feedback-inline">
-        <?php if (!empty($errors)) : ?>
-          <div class="zfsas-alert zfsas-alert-error">
-            <?php foreach ($errors as $error) : ?>
-              <div><?php echo h($error); ?></div>
-            <?php endforeach; ?>
+              </thead>
+              <tbody>
+                <?php foreach ($datasetRows as $index => $row) : ?>
+                  <tr class="zfsas-dataset-row" data-pool="<?php echo h($row['pool']); ?>">
+                    <td class="zfsas-center">
+                      <input type="hidden" name="dataset_name[<?php echo (int) $index; ?>]" value="<?php echo h($row['dataset']); ?>">
+                      <input class="zfsas-dataset-checkbox" type="checkbox" name="dataset_selected[<?php echo (int) $index; ?>]" value="1" <?php echo $row['selected'] ? 'checked' : ''; ?>>
+                    </td>
+                    <td>
+                      <div class="zfsas-dataset-cell">
+                        <div>
+                          <code><?php echo h($row['dataset']); ?></code>
+                          <span class="zfsas-pool-chip"><?php echo h($row['pool']); ?></span>
+                          <?php if (!$row['available']) : ?>
+                            <span class="zfsas-badge">Not currently detected</span>
+                          <?php endif; ?>
+                        </div>
+                      </div>
+                    </td>
+                    <td class="zfsas-threshold-col">
+                      <input class="zfsas-input zfsas-threshold-input" name="dataset_threshold[<?php echo (int) $index; ?>]" value="<?php echo h($row['threshold']); ?>">
+                      <div class="zfsas-help">Examples: <code>500M</code>, <code>100G</code>, <code>2T</code>.</div>
+                    </td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
           </div>
         <?php endif; ?>
+
+        <div class="zfsas-field" style="margin-top: 14px;">
+          <label for="prefix">Snapshot name prefix</label>
+          <input id="prefix" name="prefix" class="zfsas-input" value="<?php echo h($config['PREFIX']); ?>">
+          <div class="zfsas-help">
+            Safety guard: only snapshots containing the prefix <code id="prefix_preview"><?php echo h($config['PREFIX']); ?></code> are eligible for automatic deletion.
+          </div>
+        </div>
+
+        <div class="zfsas-field" style="margin-top: 12px;">
+          <label for="dry_run">Mode</label>
+          <label class="zfsas-checkline" for="dry_run">
+            <input type="checkbox" id="dry_run" name="dry_run" value="1" <?php echo ($config['DRY_RUN'] === '1') ? 'checked' : ''; ?>>
+            <span>Dry run (preview only, no snapshot create/delete)</span>
+          </label>
+          <div class="zfsas-help">
+            Leave this unchecked for normal operation. In Dry Run mode, use Debug Log view to see each action that would be taken.
+          </div>
+        </div>
       </div>
-      <button type="button" class="btn" id="manual_run">Run Now</button>
-      <button
-        type="button"
-        class="btn btn-primary"
-        id="zfsas_save_btn"
-        <?php if (!empty($notices)) : ?>data-show-saved="1"<?php endif; ?>
-      >Save Settings</button>
-      <noscript><button type="submit" class="btn btn-primary">Save Settings</button></noscript>
+
+      <div class="zfsas-card">
+        <h3>Retention Policy (Days)</h3>
+        <div class="zfsas-grid">
+          <div class="zfsas-field">
+            <label for="keep_all_for_days">Keep every snapshot for this many days</label>
+            <input id="keep_all_for_days" name="keep_all_for_days" class="zfsas-input" type="number" min="1" max="36500" value="<?php echo h($config['KEEP_ALL_FOR_DAYS']); ?>">
+            <div class="zfsas-help">
+              All snapshots newer than this age are kept.
+            </div>
+          </div>
+
+          <div class="zfsas-field">
+            <label for="keep_daily_until_days">Then keep 1 snapshot per day until this many days</label>
+            <input id="keep_daily_until_days" name="keep_daily_until_days" class="zfsas-input" type="number" min="2" max="36500" value="<?php echo h($config['KEEP_DAILY_UNTIL_DAYS']); ?>">
+            <div class="zfsas-help">
+              For snapshots older than the first window, keep the newest snapshot from each day.
+            </div>
+          </div>
+
+          <div class="zfsas-field">
+            <label for="keep_weekly_until_days">Then keep 1 snapshot per week until this many days</label>
+            <input id="keep_weekly_until_days" name="keep_weekly_until_days" class="zfsas-input" type="number" min="3" max="36500" value="<?php echo h($config['KEEP_WEEKLY_UNTIL_DAYS']); ?>">
+            <div class="zfsas-help">
+              Snapshots older than this are removed.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="zfsas-card">
+        <h3>Run Schedule</h3>
+        <div class="zfsas-field">
+          <label for="schedule_mode">How often should automatic runs happen?</label>
+          <select id="schedule_mode" name="schedule_mode" class="zfsas-select">
+            <option value="disabled" <?php echo ($config['SCHEDULE_MODE'] === 'disabled') ? 'selected' : ''; ?>>Disabled (manual only)</option>
+            <option value="minutes" <?php echo ($config['SCHEDULE_MODE'] === 'minutes') ? 'selected' : ''; ?>>Every N minutes</option>
+            <option value="hourly" <?php echo ($config['SCHEDULE_MODE'] === 'hourly') ? 'selected' : ''; ?>>Every N hours</option>
+            <option value="daily" <?php echo ($config['SCHEDULE_MODE'] === 'daily') ? 'selected' : ''; ?>>Every day at a specific time</option>
+            <option value="weekly" <?php echo ($config['SCHEDULE_MODE'] === 'weekly') ? 'selected' : ''; ?>>Once per week</option>
+            <option value="custom" <?php echo ($config['SCHEDULE_MODE'] === 'custom') ? 'selected' : ''; ?>>Advanced: custom cron</option>
+          </select>
+          <div class="zfsas-help">
+            The plugin converts this to a cron job automatically.
+          </div>
+        </div>
+
+        <div class="zfsas-field zfsas-schedule-row" data-mode="minutes" style="margin-top: 12px;">
+          <label for="schedule_every_minutes">Every how many minutes?</label>
+          <input id="schedule_every_minutes" name="schedule_every_minutes" class="zfsas-input" type="number" min="1" max="59" value="<?php echo h($config['SCHEDULE_EVERY_MINUTES']); ?>">
+          <div class="zfsas-help">
+            1 means every minute. 15 means every 15 minutes.
+          </div>
+        </div>
+
+        <div class="zfsas-field zfsas-schedule-row" data-mode="hourly" style="margin-top: 12px;">
+          <label for="schedule_every_hours">Every how many hours?</label>
+          <input id="schedule_every_hours" name="schedule_every_hours" class="zfsas-input" type="number" min="1" max="24" value="<?php echo h($config['SCHEDULE_EVERY_HOURS']); ?>">
+          <div class="zfsas-help">
+            1 means every hour. 6 means every 6 hours.
+          </div>
+        </div>
+
+        <div class="zfsas-field zfsas-schedule-row" data-mode="daily" style="margin-top: 12px;">
+          <label>Daily run time (24-hour clock)</label>
+          <div class="zfsas-inline">
+            <input id="schedule_daily_hour" name="schedule_daily_hour" class="zfsas-input" type="number" min="0" max="23" value="<?php echo h($config['SCHEDULE_DAILY_HOUR']); ?>">
+            <input id="schedule_daily_minute" name="schedule_daily_minute" class="zfsas-input" type="number" min="0" max="59" value="<?php echo h($config['SCHEDULE_DAILY_MINUTE']); ?>">
+          </div>
+          <div class="zfsas-help">
+            Example: 03 and 30 means 3:30 AM every day.
+          </div>
+        </div>
+
+        <div class="zfsas-field zfsas-schedule-row" data-mode="weekly" style="margin-top: 12px;">
+          <label for="schedule_weekly_day">Weekly day and time</label>
+          <div class="zfsas-inline">
+            <select id="schedule_weekly_day" name="schedule_weekly_day" class="zfsas-select">
+              <?php foreach ($weekdayNames as $dayValue => $dayLabel) : ?>
+                <option value="<?php echo h($dayValue); ?>" <?php echo ((string) $config['SCHEDULE_WEEKLY_DAY'] === (string) $dayValue) ? 'selected' : ''; ?>><?php echo h($dayLabel); ?></option>
+              <?php endforeach; ?>
+            </select>
+            <input id="schedule_weekly_hour" name="schedule_weekly_hour" class="zfsas-input" type="number" min="0" max="23" value="<?php echo h($config['SCHEDULE_WEEKLY_HOUR']); ?>">
+            <input id="schedule_weekly_minute" name="schedule_weekly_minute" class="zfsas-input" type="number" min="0" max="59" value="<?php echo h($config['SCHEDULE_WEEKLY_MINUTE']); ?>">
+          </div>
+          <div class="zfsas-help">
+            Example: Sunday, 04 and 00 means every Sunday at 4:00 AM.
+          </div>
+        </div>
+
+        <div class="zfsas-field zfsas-schedule-row" data-mode="custom" style="margin-top: 12px;">
+          <label for="custom_cron_schedule">Custom cron expression (advanced)</label>
+          <input id="custom_cron_schedule" name="custom_cron_schedule" class="zfsas-input" value="<?php echo h($config['CUSTOM_CRON_SCHEDULE']); ?>">
+          <div class="zfsas-help">
+            Use only if you need behavior outside the plain-English options. Format must have exactly 5 fields.
+          </div>
+        </div>
+
+        <div id="schedule_preview" class="zfsas-preview"></div>
+        <div class="zfsas-help" style="margin-top: 10px;">
+          Current cron expression: <code id="resolved_cron_value"><?php echo h($resolvedCron); ?></code>
+        </div>
+      </div>
+
+      <div class="zfsas-actions">
+        <div id="manual_run_status" class="zfsas-manual-status">Manual run is ready.</div>
+        <div id="save_feedback" class="zfsas-save-feedback-inline">
+          <?php if (!empty($errors)) : ?>
+            <div class="zfsas-alert zfsas-alert-error">
+              <?php foreach ($errors as $error) : ?>
+                <div><?php echo h($error); ?></div>
+              <?php endforeach; ?>
+            </div>
+          <?php endif; ?>
+        </div>
+        <button type="button" class="btn" id="manual_run">Run Now</button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          id="zfsas_save_btn"
+          <?php if (!empty($notices)) : ?>data-show-saved="1"<?php endif; ?>
+        >Save Settings</button>
+        <noscript><button type="submit" class="btn btn-primary">Save Settings</button></noscript>
+      </div>
+
+      <div class="zfsas-card" id="live_run_log">
+        <h3>Run Output</h3>
+        <div class="zfsas-help">
+          Default view shows a concise one-run summary.
+          Use "Show Debug Log" to inspect the verbose debug log.
+          These logs are stored in protected root-owned system paths and are only exposed through this page.
+          "Download Logs" exports both logs in one text file.
+        </div>
+        <div class="zfsas-log-toolbar">
+          <button type="button" class="btn" id="log_view_toggle">Show Debug Log</button>
+          <button type="button" class="btn" id="log_toggle">Pause Live View</button>
+          <button type="button" class="btn" id="log_refresh">Refresh Now</button>
+          <button type="button" class="btn" id="log_download">Download Logs</button>
+          <select id="log_lines" class="zfsas-select">
+            <option value="200">Last 200 lines</option>
+            <option value="400" selected>Last 400 lines</option>
+            <option value="800">Last 800 lines</option>
+            <option value="1200">Last 1200 lines</option>
+          </select>
+          <div id="log_status" class="zfsas-log-status">Loading live log...</div>
+        </div>
+        <pre id="log_output" class="zfsas-log-output">Loading log output...</pre>
+      </div>
     </div>
 
-    <div class="zfsas-card" id="live_run_log">
-      <h3>Run Output</h3>
-      <div class="zfsas-help">
-        Default view shows a concise one-run summary.
-        Use "Show Debug Log" to inspect the verbose debug log.
-        These logs are stored in protected root-owned system paths and are only exposed through this page.
-        "Download Logs" exports both logs in one text file.
+    <div class="zfsas-section-panel" id="zfsas_panel_special_features" data-section-panel="special-features" role="tabpanel" aria-labelledby="zfsas_tab_features" hidden>
+      <div class="zfsas-card zfsas-placeholder-copy">
+        <h3 class="zfsas-placeholder-title">Special Features</h3>
+        <div class="zfsas-help">
+          Placeholder for future planned tools. We will use this section for optional power-user features once they are ready to be exposed in the UI.
+        </div>
       </div>
-      <div class="zfsas-log-toolbar">
-        <button type="button" class="btn" id="log_view_toggle">Show Debug Log</button>
-        <button type="button" class="btn" id="log_toggle">Pause Live View</button>
-        <button type="button" class="btn" id="log_refresh">Refresh Now</button>
-        <button type="button" class="btn" id="log_download">Download Logs</button>
-        <select id="log_lines" class="zfsas-select">
-          <option value="200">Last 200 lines</option>
-          <option value="400" selected>Last 400 lines</option>
-          <option value="800">Last 800 lines</option>
-          <option value="1200">Last 1200 lines</option>
-        </select>
-        <div id="log_status" class="zfsas-log-status">Loading live log...</div>
+    </div>
+
+    <div class="zfsas-section-panel" id="zfsas_panel_repair_tools" data-section-panel="repair-tools" role="tabpanel" aria-labelledby="zfsas_tab_repairs" hidden>
+      <div class="zfsas-card zfsas-placeholder-copy">
+        <h3 class="zfsas-placeholder-title">Repair Tools</h3>
+        <div class="zfsas-help">
+          Placeholder for future planned tools. We will use this section for guided repair and recovery utilities once those tools are ready.
+        </div>
       </div>
-      <pre id="log_output" class="zfsas-log-output">Loading log output...</pre>
     </div>
   </form>
 </div>
@@ -1571,6 +1643,8 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var saveButtonDefaultText = saveButton ? saveButton.textContent : 'Save Settings';
   var saveBusy = false;
   var saveSuccessTimer = null;
+  var sectionTabs = document.querySelectorAll('.zfsas-section-tab');
+  var sectionPanels = document.querySelectorAll('.zfsas-section-panel');
 
   function escapeHtml(text) {
     return String(text)
@@ -1579,6 +1653,24 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
+  }
+
+  function activateSection(sectionName) {
+    if (typeof sectionName !== 'string' || sectionName === '') {
+      sectionName = 'main';
+    }
+
+    sectionTabs.forEach(function (tab) {
+      var isActive = tab.getAttribute('data-section-target') === sectionName;
+      tab.classList.toggle('is-active', isActive);
+      tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+
+    sectionPanels.forEach(function (panel) {
+      var isActive = panel.getAttribute('data-section-panel') === sectionName;
+      panel.classList.toggle('is-active', isActive);
+      panel.hidden = !isActive;
+    });
   }
 
   function requestTargetUrl(form) {
@@ -2421,6 +2513,12 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     box.addEventListener('change', refreshDatasetCount);
   });
 
+  sectionTabs.forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      activateSection(tab.getAttribute('data-section-target') || 'main');
+    });
+  });
+
   var logToggleBtn = byId('log_toggle');
   if (logToggleBtn) {
     logToggleBtn.addEventListener('click', function () {
@@ -2607,6 +2705,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     saveButton.removeAttribute('data-show-saved');
   }
 
+  activateSection('main');
   applyPoolFilter();
   refreshScheduleUI();
   refreshDatasetCount();
