@@ -1,0 +1,23 @@
+# -----------------------------------------------------------------------------
+# ZFS send replication config for ZFS Auto Snapshot
+# Path: /boot/config/plugins/zfs.autosnapshot/zfs_send.conf
+# -----------------------------------------------------------------------------
+
+# SEND_SNAPSHOT_PREFIX
+# Base prefix namespace for send/receive snapshots. The script appends a per-job
+# id automatically, so each replication job keeps an isolated snapshot chain.
+SEND_SNAPSHOT_PREFIX="zfs-send-"
+
+# SEND_JOBS
+# Semicolon-separated entries encoded as:
+#   jobid|source|destination|frequency|threshold
+#
+# Example:
+#   SEND_JOBS="1a2b3c4d5e6f|tank/appdata|backup/appdata|1h|200G"
+#
+# frequency values:
+#   15m, 30m, 1h, 6h, 12h, 1d, 7d
+#
+# threshold = minimum effective free space that must remain on the destination
+# dataset's active pool/quota constraints before a send run proceeds.
+SEND_JOBS=""

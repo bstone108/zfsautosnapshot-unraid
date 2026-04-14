@@ -7,6 +7,8 @@ BOOT_PLUGINS_ROOT="${BOOT_PLUGINS_ROOT:-/boot/config/plugins}"
 BOOT_PLUGIN_DIR="${BOOT_PLUGIN_DIR:-${BOOT_PLUGINS_ROOT}/${PLUGIN_NAME}}"
 DEFAULT_CFG="${DEFAULT_CFG:-${PLUGIN_DIR}/config/zfs_autosnapshot.conf.example}"
 TARGET_CFG="${TARGET_CFG:-${BOOT_PLUGIN_DIR}/zfs_autosnapshot.conf}"
+DEFAULT_SEND_CFG="${DEFAULT_SEND_CFG:-${PLUGIN_DIR}/config/zfs_send.conf.example}"
+TARGET_SEND_CFG="${TARGET_SEND_CFG:-${BOOT_PLUGIN_DIR}/zfs_send.conf}"
 WEBGUI_USER="${WEBGUI_USER:-nobody}"
 WEBGUI_GROUP="${WEBGUI_GROUP:-users}"
 
@@ -60,5 +62,12 @@ if [[ ! -f "$TARGET_CFG" && -f "$DEFAULT_CFG" ]]; then
 fi
 
 ensure_file "$TARGET_CFG"
+
+if [[ ! -f "$TARGET_SEND_CFG" && -f "$DEFAULT_SEND_CFG" ]]; then
+  cp -f "$DEFAULT_SEND_CFG" "$TARGET_SEND_CFG"
+  echo "Installed default config: $TARGET_SEND_CFG"
+fi
+
+ensure_file "$TARGET_SEND_CFG"
 
 echo "Normalized plugin config ownership and permissions under $BOOT_PLUGIN_DIR"

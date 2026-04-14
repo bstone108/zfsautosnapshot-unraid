@@ -6,6 +6,9 @@ PLUGIN_DIR="/usr/local/emhttp/plugins/${PLUGIN_NAME}"
 BOOT_PLUGIN_DIR="/boot/config/plugins/${PLUGIN_NAME}"
 DEFAULT_CFG="${PLUGIN_DIR}/config/zfs_autosnapshot.conf.example"
 TARGET_CFG="${BOOT_PLUGIN_DIR}/zfs_autosnapshot.conf"
+DEFAULT_SEND_CFG="${PLUGIN_DIR}/config/zfs_send.conf.example"
+TARGET_SEND_CFG="${BOOT_PLUGIN_DIR}/zfs_send.conf"
+MAIN_TARGET_CFG="${BOOT_PLUGIN_DIR}/zfs_autosnapshot.conf"
 REPAIR_PERMS_SCRIPT="${PLUGIN_DIR}/scripts/repair-permissions.sh"
 CRON_FILE="/etc/cron.d/zfs_autosnapshot"
 RUNTIME_DIR="/var/run/zfs-autosnapshot"
@@ -15,6 +18,12 @@ CHILD_PID_FILE="${RUNTIME_DIR}/zfs_autosnapshot.child.pid"
 STOP_FILE="${RUNTIME_DIR}/zfs_autosnapshot.stop"
 RUN_MATCH='/usr/local/sbin/zfs_autosnapshot'
 SNAPSHOT_PREFIX='autosnapshot-'
+SEND_RUNTIME_DIR="/var/run/zfs-autosnapshot-send"
+SEND_LOCK_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.lock"
+SEND_LOCK_DIR="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.lockdir"
+SEND_CHILD_PID_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.child.pid"
+SEND_STOP_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.stop"
+SEND_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_send'
 
 remember_pid() {
   local var_name="$1"
@@ -205,6 +214,14 @@ else
   else
     echo "Keeping existing config: $TARGET_CFG"
   fi
+
+  if [[ ! -f "$TARGET_SEND_CFG" ]]; then
+    cp -f "$DEFAULT_SEND_CFG" "$TARGET_SEND_CFG"
+    chmod 0644 "$TARGET_SEND_CFG"
+    echo "Installed default config: $TARGET_SEND_CFG"
+  else
+    echo "Keeping existing config: $TARGET_SEND_CFG"
+  fi
 fi
 
 # Remove any AppleDouble metadata files that can break Unraid page parsing.
@@ -214,13 +231,23 @@ find "$PLUGIN_DIR" -type f \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev
 # old buggy process cannot survive an upgrade.
 stop_running_jobs
 
+RUNTIME_DIR="$SEND_RUNTIME_DIR"
+LOCK_FILE="$SEND_LOCK_FILE"
+LOCK_DIR="$SEND_LOCK_DIR"
+CHILD_PID_FILE="$SEND_CHILD_PID_FILE"
+STOP_FILE="$SEND_STOP_FILE"
+RUN_MATCH="$SEND_RUN_MATCH"
+SNAPSHOT_PREFIX='zfs-send-'
+TARGET_CFG="$TARGET_SEND_CFG"
+stop_running_jobs
+
 sync_exit=0
 if [[ -x "${PLUGIN_DIR}/scripts/sync-cron.sh" ]]; then
   "${PLUGIN_DIR}/scripts/sync-cron.sh" || sync_exit=$?
 fi
 
 # Safety guard: if schedule mode is disabled, ensure cron file is removed.
-schedule_mode="$(awk -F= '/^SCHEDULE_MODE=/{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); gsub(/^"/,"",v); gsub(/"$/,"",v); print tolower(v); exit}' "$TARGET_CFG" 2>/dev/null || true)"
+schedule_mode="$(awk -F= '/^SCHEDULE_MODE=/{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); gsub(/^"/,"",v); gsub(/"$/,"",v); print tolower(v); exit}' "$MAIN_TARGET_CFG" 2>/dev/null || true)"
 if [[ -z "$schedule_mode" ]]; then
   schedule_mode="disabled"
 fi

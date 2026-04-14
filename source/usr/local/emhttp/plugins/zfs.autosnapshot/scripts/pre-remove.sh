@@ -10,6 +10,13 @@ STOP_FILE="${RUNTIME_DIR}/zfs_autosnapshot.stop"
 CONFIG_FILE="/boot/config/plugins/zfs.autosnapshot/zfs_autosnapshot.conf"
 RUN_MATCH='/usr/local/sbin/zfs_autosnapshot'
 SNAPSHOT_PREFIX='autosnapshot-'
+SEND_RUNTIME_DIR="/var/run/zfs-autosnapshot-send"
+SEND_LOCK_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.lock"
+SEND_LOCK_DIR="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.lockdir"
+SEND_CHILD_PID_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.child.pid"
+SEND_STOP_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.stop"
+SEND_CONFIG_FILE="/boot/config/plugins/zfs.autosnapshot/zfs_send.conf"
+SEND_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_send'
 
 remember_pid() {
   local var_name="$1"
@@ -170,6 +177,16 @@ stop_running_jobs() {
 
 rm -f "$CRON_FILE"
 command -v update_cron >/dev/null 2>&1 && update_cron
+stop_running_jobs
+
+RUNTIME_DIR="$SEND_RUNTIME_DIR"
+LOCK_FILE="$SEND_LOCK_FILE"
+LOCK_DIR="$SEND_LOCK_DIR"
+CHILD_PID_FILE="$SEND_CHILD_PID_FILE"
+STOP_FILE="$SEND_STOP_FILE"
+CONFIG_FILE="$SEND_CONFIG_FILE"
+RUN_MATCH="$SEND_RUN_MATCH"
+SNAPSHOT_PREFIX='zfs-send-'
 stop_running_jobs
 
 echo "Removed cron file: $CRON_FILE"

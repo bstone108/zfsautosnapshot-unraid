@@ -3,14 +3,17 @@ $pluginName = 'zfs.autosnapshot';
 $settingsPagePath = '/Settings/ZFSAutoSnapshot';
 $configDir = "/boot/config/plugins/{$pluginName}";
 $configFile = "{$configDir}/zfs_autosnapshot.conf";
+$sendConfigFile = "{$configDir}/zfs_send.conf";
 $syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
 $logApiUrl = "/plugins/{$pluginName}/php/log-tail.php";
 $logStreamApiUrl = "/plugins/{$pluginName}/php/log-stream.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
 $saveApiUrl = "/plugins/{$pluginName}/php/save-settings.php";
+$sendSettingsUrl = "/plugins/{$pluginName}/php/send-settings.php";
 $logPollIntervalMs = 2000;
 
 require_once __DIR__ . '/response-helpers.php';
+require_once __DIR__ . '/send-helpers.php';
 
 $defaults = [
     'DATASETS' => '',
@@ -39,6 +42,11 @@ $weekdayNames = [
     '4' => 'Thursday',
     '5' => 'Friday',
     '6' => 'Saturday',
+];
+
+$sendDefaults = [
+    'SEND_SNAPSHOT_PREFIX' => 'zfs-send-',
+    'SEND_JOBS' => '',
 ];
 
 function h($value)
@@ -410,18 +418,21 @@ function buildDatasetPools($datasetRows)
     return $poolMap;
 }
 
-function buildDatasetRows($availableDatasets, $configuredDatasetMap)
+function buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationPools = [])
 {
     $rows = [];
     $seen = [];
 
     foreach ($availableDatasets as $dataset) {
+        $pool = datasetPoolName($dataset);
+        $locked = isset($sendDestinationPools[$pool]);
         $rows[] = [
             'dataset' => $dataset,
-            'pool' => datasetPoolName($dataset),
-            'selected' => isset($configuredDatasetMap[$dataset]),
+            'pool' => $pool,
+            'selected' => (!$locked && isset($configuredDatasetMap[$dataset])),
             'threshold' => isset($configuredDatasetMap[$dataset]) ? $configuredDatasetMap[$dataset] : '100G',
             'available' => true,
+            'locked' => $locked,
         ];
         $seen[$dataset] = true;
     }
@@ -431,19 +442,22 @@ function buildDatasetRows($availableDatasets, $configuredDatasetMap)
             continue;
         }
 
+        $pool = datasetPoolName($dataset);
+        $locked = isset($sendDestinationPools[$pool]);
         $rows[] = [
             'dataset' => $dataset,
-            'pool' => datasetPoolName($dataset),
-            'selected' => true,
+            'pool' => $pool,
+            'selected' => !$locked,
             'threshold' => $threshold,
             'available' => false,
+            'locked' => $locked,
         ];
     }
 
     return sortDatasetRows($rows);
 }
 
-function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThresholds, $availableDatasets, $configuredDatasetMap)
+function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThresholds, $availableDatasets, $configuredDatasetMap, $sendDestinationPools = [])
 {
     $rows = [];
     $seen = [];
@@ -471,16 +485,17 @@ function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThreshol
         $rows[] = [
             'dataset' => $dataset,
             'pool' => datasetPoolName($dataset),
-            'selected' => isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1',
+            'selected' => (!isset($sendDestinationPools[datasetPoolName($dataset)]) && isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1'),
             'threshold' => strtoupper(str_replace(' ', '', $threshold)),
             'available' => isset($availableSet[$dataset]),
+            'locked' => isset($sendDestinationPools[datasetPoolName($dataset)]),
         ];
     }
 
     return sortDatasetRows($rows);
 }
 
-function buildDatasetsCsvFromPost($postedNames, $postedSelected, $postedThresholds, &$errors)
+function buildDatasetsCsvFromPost($postedNames, $postedSelected, $postedThresholds, &$errors, $sendDestinationPools = [])
 {
     $entries = [];
     $seen = [];
@@ -497,7 +512,9 @@ function buildDatasetsCsvFromPost($postedNames, $postedSelected, $postedThreshol
         }
         $seen[$dataset] = true;
 
-        $isSelected = isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1';
+        $datasetPool = datasetPoolName($dataset);
+        $isLocked = isset($sendDestinationPools[$datasetPool]);
+        $isSelected = (!$isLocked && isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1');
         if (!$isSelected) {
             continue;
         }
@@ -726,6 +743,15 @@ $defaultSettingsReturnUrl = pluginSettingsPageUrl($settingsPagePath, ['saved' =>
 $config = parseConfigFile($configFile, $defaults);
 $errors = [];
 $notices = [];
+$sendConfig = zfsas_send_parse_config_file($sendConfigFile, $sendDefaults);
+$sendParseErrors = [];
+$sendParseWarnings = [];
+$sendJobs = zfsas_send_parse_jobs($sendConfig['SEND_JOBS'] ?? '', $sendParseErrors, $sendParseWarnings);
+$sendDestinationPools = zfsas_send_destination_pools_from_jobs($sendJobs);
+$initialSection = trim((string) ($_GET['section'] ?? 'main'));
+if (!in_array($initialSection, ['main', 'special-features', 'repair-tools'], true)) {
+    $initialSection = 'main';
+}
 
 if (!$isAjaxSaveRequest && (($_GET['saved'] ?? '') === '1')) {
     $notices[] = 'Settings saved and schedule applied.';
@@ -740,16 +766,22 @@ $datasetRows = [];
 $datasetPools = [];
 
 if ($isAjaxSaveRequest) {
-    $datasetRows = buildDatasetRows([], $configuredDatasetMap);
+    $datasetRows = buildDatasetRows([], $configuredDatasetMap, $sendDestinationPools);
     $datasetPools = buildDatasetPools($datasetRows);
 } else {
     $availableDatasets = listZfsDatasets($datasetDiscoveryError);
-    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap);
+    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationPools);
     $datasetPools = buildDatasetPools($datasetRows);
 }
 
 if (!$isAjaxSaveRequest && !empty($datasetParseWarnings)) {
     foreach ($datasetParseWarnings as $warning) {
+        $notices[] = $warning;
+    }
+}
+
+if (!$isAjaxSaveRequest && !empty($sendParseWarnings)) {
+    foreach ($sendParseWarnings as $warning) {
         $notices[] = $warning;
     }
 }
@@ -776,13 +808,13 @@ if ($isPostRequest) {
     $postDatasetSelected = (isset($_POST['dataset_selected']) && is_array($_POST['dataset_selected'])) ? $_POST['dataset_selected'] : [];
     $postDatasetThresholds = (isset($_POST['dataset_threshold']) && is_array($_POST['dataset_threshold'])) ? $_POST['dataset_threshold'] : [];
 
-    $datasetRows = buildDatasetRowsFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $availableDatasets, $configuredDatasetMap);
+    $datasetRows = buildDatasetRowsFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $availableDatasets, $configuredDatasetMap, $sendDestinationPools);
     $datasetPools = buildDatasetPools($datasetRows);
 
     if (count($postDatasetNames) === 0) {
         $errors[] = 'Dataset selection data was not submitted. Refresh the page and try again.';
     } else {
-        $datasetCsv = buildDatasetsCsvFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $errors);
+        $datasetCsv = buildDatasetsCsvFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $errors, $sendDestinationPools);
         if ($datasetCsv !== null) {
             $submitted['DATASETS'] = $datasetCsv;
         }
@@ -848,7 +880,7 @@ if ($isPostRequest) {
                 if (!$isAjaxSaveRequest) {
                     $postSaveWarnings = [];
                     $configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $postSaveWarnings);
-                    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap);
+                    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationPools);
                     $datasetPools = buildDatasetPools($datasetRows);
 
                     $returnTarget = zfsas_normalize_return_url($_POST['return_to'] ?? '', $defaultSettingsReturnUrl);
@@ -1198,6 +1230,10 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   color: inherit;
 }
 
+.zfsas-row-locked {
+  opacity: 0.6;
+}
+
 .zfsas-empty {
   margin-top: 12px;
   padding: 12px;
@@ -1406,16 +1442,19 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
               </thead>
               <tbody>
                 <?php foreach ($datasetRows as $index => $row) : ?>
-                  <tr class="zfsas-dataset-row" data-pool="<?php echo h($row['pool']); ?>">
+                  <tr class="zfsas-dataset-row<?php echo !empty($row['locked']) ? ' zfsas-row-locked' : ''; ?>" data-pool="<?php echo h($row['pool']); ?>">
                     <td class="zfsas-center">
                       <input type="hidden" name="dataset_name[<?php echo (int) $index; ?>]" value="<?php echo h($row['dataset']); ?>">
-                      <input class="zfsas-dataset-checkbox" type="checkbox" name="dataset_selected[<?php echo (int) $index; ?>]" value="1" <?php echo $row['selected'] ? 'checked' : ''; ?>>
+                      <input class="zfsas-dataset-checkbox" type="checkbox" name="dataset_selected[<?php echo (int) $index; ?>]" value="1" <?php echo $row['selected'] ? 'checked' : ''; ?> <?php echo !empty($row['locked']) ? 'disabled' : ''; ?>>
                     </td>
                     <td>
                       <div class="zfsas-dataset-cell">
                         <div>
                           <code><?php echo h($row['dataset']); ?></code>
                           <span class="zfsas-pool-chip"><?php echo h($row['pool']); ?></span>
+                          <?php if (!empty($row['locked'])) : ?>
+                            <span class="zfsas-badge">Reserved for ZFS Send destination</span>
+                          <?php endif; ?>
                           <?php if (!$row['available']) : ?>
                             <span class="zfsas-badge">Not currently detected</span>
                           <?php endif; ?>
@@ -1423,7 +1462,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
                       </div>
                     </td>
                     <td class="zfsas-threshold-col">
-                      <input class="zfsas-input zfsas-threshold-input" name="dataset_threshold[<?php echo (int) $index; ?>]" value="<?php echo h($row['threshold']); ?>">
+                      <input class="zfsas-input zfsas-threshold-input" name="dataset_threshold[<?php echo (int) $index; ?>]" value="<?php echo h($row['threshold']); ?>" <?php echo !empty($row['locked']) ? 'disabled' : ''; ?>>
                       <div class="zfsas-help">Examples: <code>500M</code>, <code>100G</code>, <code>2T</code>.</div>
                     </td>
                   </tr>
@@ -1606,7 +1645,10 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       <div class="zfsas-card zfsas-placeholder-copy">
         <h3 class="zfsas-placeholder-title">Special Features</h3>
         <div class="zfsas-help">
-          Placeholder for future planned tools. We will use this section for optional power-user features once they are ready to be exposed in the UI.
+          Optional power-user features will live here. The first one is ZFS send replication, which now has its own dedicated page so it can keep separate config, logs, and safety rules from the main snapshot manager.
+        </div>
+        <div style="margin-top: 14px;">
+          <button type="button" class="btn btn-primary" id="open_send_settings">Open ZFS Send</button>
         </div>
       </div>
     </div>
@@ -1633,6 +1675,8 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var logStreamApiUrl = <?php echo json_encode($logStreamApiUrl); ?>;
   var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
   var saveApiUrl = <?php echo json_encode($saveApiUrl); ?>;
+  var sendSettingsUrl = <?php echo json_encode($sendSettingsUrl); ?>;
+  var initialSection = <?php echo json_encode($initialSection); ?>;
   var logView = 'summary';
   var logPaused = false;
   var logTimer = null;
@@ -2100,6 +2144,10 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   function setAllDatasetChecks(checked, visibleOnly) {
     var boxes = document.querySelectorAll('.zfsas-dataset-checkbox');
     boxes.forEach(function (box) {
+      if (box.disabled) {
+        box.checked = false;
+        return;
+      }
       if (visibleOnly) {
         var row = box.closest('.zfsas-dataset-row');
         if (row && !rowIsVisible(row)) {
@@ -2510,6 +2558,9 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
   var datasetBoxes = document.querySelectorAll('.zfsas-dataset-checkbox');
   datasetBoxes.forEach(function (box) {
+    if (box.disabled) {
+      box.checked = false;
+    }
     box.addEventListener('change', refreshDatasetCount);
   });
 
@@ -2566,7 +2617,14 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   }
 
   var manualRunBtn = byId('manual_run');
+  var openSendSettingsBtn = byId('open_send_settings');
   var manualRunBusy = false;
+  if (openSendSettingsBtn) {
+    openSendSettingsBtn.addEventListener('click', function () {
+      window.location.href = sendSettingsUrl;
+    });
+  }
+
   if (manualRunBtn) {
     manualRunBtn.addEventListener('click', function () {
       if (manualRunBusy) {
@@ -2705,7 +2763,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     saveButton.removeAttribute('data-show-saved');
   }
 
-  activateSection('main');
+  activateSection(initialSection);
   applyPoolFilter();
   refreshScheduleUI();
   refreshDatasetCount();

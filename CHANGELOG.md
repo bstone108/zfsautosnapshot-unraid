@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.14.2 (Testing Branch Only)
+
+- Added the first real `Special Features` tool: a dedicated `ZFS Send` page with its own config, manual run button, and scheduled replication jobs.
+- ZFS send jobs now use their own send-only snapshot chain, keep only the newest successful send snapshot per job, and can clean older send checkpoints off the destination side when free space gets tight.
+- Destination pools used by ZFS send are now reserved on the main page so regular autosnapshot management cannot be enabled there by mistake.
+
 ### 2026.04.14.1 (Testing Branch Only)
 
 - Added a section switcher above the Datasets area so the settings page now has dedicated tabs for `Main Page`, `Special Features`, and `Repair Tools`.

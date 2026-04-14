@@ -4,8 +4,10 @@ set -euo pipefail
 PLUGIN_NAME="zfs.autosnapshot"
 CONFIG_DIR="/boot/config/plugins/${PLUGIN_NAME}"
 CONFIG_FILE="${CONFIG_DIR}/zfs_autosnapshot.conf"
+SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
 CRON_FILE="/etc/cron.d/zfs_autosnapshot"
 RUN_CMD="/usr/local/sbin/zfs_autosnapshot"
+SEND_RUN_CMD="/usr/local/sbin/zfs_autosnapshot_send"
 
 SCHEDULE_MODE="disabled"
 SCHEDULE_EVERY_MINUTES="15"
@@ -17,6 +19,7 @@ SCHEDULE_WEEKLY_HOUR="3"
 SCHEDULE_WEEKLY_MINUTE="0"
 CUSTOM_CRON_SCHEDULE=""
 CRON_SCHEDULE=""
+SEND_JOBS=""
 
 trim() {
 	local s="$1"
@@ -59,7 +62,7 @@ apply_config_key() {
 	local value="$2"
 
 	case "$key" in
-	SCHEDULE_MODE | SCHEDULE_EVERY_MINUTES | SCHEDULE_EVERY_HOURS | SCHEDULE_DAILY_HOUR | SCHEDULE_DAILY_MINUTE | SCHEDULE_WEEKLY_DAY | SCHEDULE_WEEKLY_HOUR | SCHEDULE_WEEKLY_MINUTE | CUSTOM_CRON_SCHEDULE | CRON_SCHEDULE)
+	SCHEDULE_MODE | SCHEDULE_EVERY_MINUTES | SCHEDULE_EVERY_HOURS | SCHEDULE_DAILY_HOUR | SCHEDULE_DAILY_MINUTE | SCHEDULE_WEEKLY_DAY | SCHEDULE_WEEKLY_HOUR | SCHEDULE_WEEKLY_MINUTE | CUSTOM_CRON_SCHEDULE | CRON_SCHEDULE | SEND_JOBS)
 		if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
 			return 0
 		fi
@@ -248,6 +251,7 @@ build_cron_schedule() {
 mkdir -p "$CONFIG_DIR"
 
 load_config_file "$CONFIG_FILE"
+load_config_file "$SEND_CONFIG_FILE"
 
 CRON_SCHEDULE_EFFECTIVE="$(build_cron_schedule)" || exit 1
 
@@ -272,6 +276,9 @@ fi
 	echo "# Managed by ${PLUGIN_NAME}; edit ${CONFIG_FILE}"
 	# Unraid uses BusyBox crond format in /etc/cron.d: no username column.
 	echo "${CRON_SCHEDULE_EFFECTIVE} ${RUN_CMD} >> /var/log/zfs_autosnapshot.log 2>&1"
+	if [[ -n "$(trim "${SEND_JOBS}")" ]]; then
+		echo "${CRON_SCHEDULE_EFFECTIVE} ${SEND_RUN_CMD} >> /var/log/zfs_autosnapshot_send.log 2>&1"
+	fi
 } >"$CRON_FILE"
 
 chmod 0644 "$CRON_FILE"
