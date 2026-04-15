@@ -201,6 +201,10 @@ $embedded = isset($_GET['embedded']) && $_GET['embedded'] !== '0';
       z-index: 1050;
     }
 
+    .zfsas-sm-drawer-backdrop[hidden] {
+      display: none !important;
+    }
+
     .zfsas-sm-drawer {
       position: fixed;
       inset: 0;
@@ -208,6 +212,10 @@ $embedded = isset($_GET['embedded']) && $_GET['embedded'] !== '0';
       justify-content: flex-end;
       z-index: 1060;
       pointer-events: none;
+    }
+
+    .zfsas-sm-drawer[hidden] {
+      display: none !important;
     }
 
     .zfsas-sm-drawer-panel {

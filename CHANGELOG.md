@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.14.6 (Testing Branch Only)
+
+- Fixed the embedded `Snapshot Manager` drawer so it stays hidden until you actually click `Manage Snapshots`, and the close button now reliably hides the drawer again even on theme-customized systems.
+- Fixed the `Recovery Tools` dataset selector so the automatic refresh no longer wipes out the dataset you just picked before you can start a scan.
+
 ### 2026.04.14.5 (Testing Branch Only)
 
 - Moved `Snapshot Manager` back directly into the `Snapshot Manager` tab so it opens in place instead of sending you off to a separate page, while still lazy-loading the heavy manager UI only when you actually switch to that tab.

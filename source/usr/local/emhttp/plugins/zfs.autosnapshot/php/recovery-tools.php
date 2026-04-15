@@ -472,6 +472,7 @@ $mainSettingsUrl = '/Settings/ZFSAutoSnapshot?section=repair-tools';
     if (!select) {
       return;
     }
+    var currentValue = select.value || '';
     var html = '<option value="">Choose a mounted dataset</option>';
     (datasets || []).forEach(function (row) {
       var mountpoint = row.mountpoint || '';
@@ -479,6 +480,16 @@ $mainSettingsUrl = '/Settings/ZFSAutoSnapshot?section=repair-tools';
       html += '<option value="' + escapeHtml(row.dataset || '') + '"' + (disabled ? ' disabled' : '') + '>' + escapeHtml(row.dataset || '') + (disabled ? ' (not directly mounted)' : '') + '</option>';
     });
     select.innerHTML = html;
+
+    if (currentValue !== '') {
+      Array.prototype.slice.call(select.options || []).some(function (option) {
+        if (option.value === currentValue && !option.disabled) {
+          select.value = currentValue;
+          return true;
+        }
+        return false;
+      });
+    }
   }
 
   function renderScans(scans) {

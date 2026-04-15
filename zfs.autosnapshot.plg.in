@@ -2,10 +2,9 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Reworked scheduled `ZFS Send` into a persistent queue with retry handling, minute-based queue kicking, configurable parallel send workers, and shared queue visibility on the send page.
-- Moved `Snapshot Manager` directly into its own tab on the main settings page while keeping dataset details lazy-loaded and manual snapshot operations queue-aware.
-- Hardened `ZFS Send` settings saves so the page uses the same broader CSRF detection and wrapped-response parsing style as the main settings page.
-- Added the first `Recovery Tools` page with scrub/corruption visibility plus a GUI-driven manual readability scan for cases where scrub detects damage but cannot name the bad file.
+- Fixed the embedded `Snapshot Manager` drawer so it stays hidden until you actually click `Manage Snapshots`, and the close button now reliably hides it again on theme-customized systems.
+- Fixed the `Recovery Tools` dataset selector so the automatic refresh no longer wipes out the dataset you just picked before starting a scan.
+- Keeps the queued `ZFS Send`, embedded `Snapshot Manager`, and first `Recovery Tools` page introduced in the earlier testing builds.
   </CHANGES>
 
   <DESCRIPTION>
