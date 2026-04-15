@@ -8,16 +8,23 @@
 # id automatically, so each replication job keeps an isolated snapshot chain.
 SEND_SNAPSHOT_PREFIX="zfs-send-"
 
+# SEND_MAX_PARALLEL
+# Number of queued send jobs allowed to run at once. Snapshot deletions still
+# run one at a time globally so they do not pile onto the system.
+SEND_MAX_PARALLEL=1
+
 # SEND_JOBS
 # Semicolon-separated entries encoded as:
-#   jobid|source|destination|frequency|threshold
+#   jobid|source|destination|frequency|threshold|children
 #
 # Example:
-#   SEND_JOBS="1a2b3c4d5e6f|tank/appdata|backup/appdata|1h|200G"
+#   SEND_JOBS="1a2b3c4d5e6f|tank/appdata|backup/appdata|1h|200G|0"
 #
 # frequency values:
 #   15m, 30m, 1h, 6h, 12h, 1d, 7d
 #
 # threshold = minimum effective free space that must remain on the destination
 # dataset's active pool/quota constraints before a send run proceeds.
+# children = 1 to send the entire source subtree under the chosen destination
+# root, 0 to send only the selected dataset itself.
 SEND_JOBS=""

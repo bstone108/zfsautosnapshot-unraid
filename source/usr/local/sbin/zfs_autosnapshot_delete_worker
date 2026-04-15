@@ -1,0 +1,227 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+# shellcheck source=/dev/null
+source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
+
+WORKER_LOCK_DIR="${DELETE_WORKER_RUNTIME_DIR}/active.lockdir"
+CURRENT_JOB_ID=""
+CURRENT_JOB_PATH=""
+
+cleanup() {
+  local exit_code="$?"
+  if [[ -n "$CURRENT_JOB_ID" ]]; then
+    release_job_claim "$CURRENT_JOB_ID"
+  fi
+  rm -rf "$WORKER_LOCK_DIR" >/dev/null 2>&1 || true
+  exit "$exit_code"
+}
+
+persist_job() {
+  job_write "$CURRENT_JOB_PATH" job
+}
+
+set_delete_running() {
+  local message="$1"
+  job[STATE]="running"
+  job[PHASE]="deleting"
+  job[WORKER_PID]="$$"
+  job[LAST_MESSAGE]="$message"
+  persist_job
+}
+
+complete_delete_job() {
+  local message="$1"
+  job[STATE]="complete"
+  job[PHASE]="complete"
+  job[WORKER_PID]=""
+  job[LAST_ERROR]=""
+  job[LAST_MESSAGE]="$message"
+  persist_job
+}
+
+skip_delete_job() {
+  local message="$1"
+  job[STATE]="skipped"
+  job[PHASE]="complete"
+  job[WORKER_PID]=""
+  job[LAST_ERROR]=""
+  job[LAST_MESSAGE]="$message"
+  persist_job
+}
+
+fail_delete_job() {
+  local message="$1"
+  job[STATE]="failed"
+  job[PHASE]="failed"
+  job[WORKER_PID]=""
+  job[LAST_ERROR]="$message"
+  job[LAST_MESSAGE]="$message"
+  persist_job
+}
+
+retry_delete_job() {
+  local message="$1"
+  local now_epoch delay
+  now_epoch="$(date +%s)"
+  delay=60
+  job[STATE]="retry_wait"
+  job[PHASE]="retry_wait"
+  job[WORKER_PID]=""
+  job[RETRY_AT]="$((now_epoch + delay))"
+  job[LAST_ERROR]="$message"
+  job[LAST_MESSAGE]="$message"
+  persist_job
+}
+
+verify_snapshot_identity() {
+  local snapshot="$1"
+  local expect_epoch="$2"
+  local expect_guid="$3"
+  local expect_createtxg="$4"
+  local -A props=()
+
+  snapshot_exists "$snapshot" || return 2
+  zfs_get_snapshot_props "$snapshot" props || return 1
+
+  if [[ -n "$expect_guid" && -n "${props[guid]:-}" && "${props[guid]}" != "$expect_guid" ]]; then
+    return 1
+  fi
+
+  if [[ -n "$expect_createtxg" && -n "${props[createtxg]:-}" && "${props[createtxg]}" != "$expect_createtxg" ]]; then
+    return 1
+  fi
+
+  if [[ -n "$expect_epoch" && -n "${props[creation]:-}" && "${props[creation]}" != "$expect_epoch" ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
+delete_single_snapshot() {
+  local snapshot="$1"
+  zfs destroy "$snapshot"
+}
+
+process_send_checkpoint_delete() {
+  local snapshot basename schedule_job_id newest_basename source_root dest_root prefix delete_scope
+  snapshot="$(job_get job SNAPSHOT)"
+  basename="${snapshot##*@}"
+  schedule_job_id="$(job_get job SEND_SCHEDULE_JOB_ID)"
+  delete_scope="$(job_get job DELETE_SCOPE snapshot)"
+
+  [[ -n "$schedule_job_id" ]] || schedule_job_id="$(parse_send_checkpoint_schedule_id "$basename" 2>/dev/null || true)"
+  if [[ -z "$schedule_job_id" || -z "${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}" ]]; then
+    delete_single_snapshot "$snapshot"
+    complete_delete_job "Deleted send-managed snapshot ${snapshot}."
+    return 0
+  fi
+
+  if snapshot_delete_conflicts_with_send_jobs "$snapshot"; then
+    retry_delete_job "Deletion delayed because ${basename} is referenced by a queued or running send job."
+    return 0
+  fi
+
+  latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_basename
+  if [[ -n "$newest_basename" && "$newest_basename" == "$basename" ]]; then
+    fail_delete_job "Cannot delete ${basename} because it is the newest scheduled-send checkpoint. Run another successful send first."
+    return 0
+  fi
+
+  source_root="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]}"
+  dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]}"
+  prefix="$(job_prefix_for_schedule "$schedule_job_id")"
+
+  if [[ "$delete_scope" == "checkpoint" ]]; then
+    dataset_exists "$source_root" && delete_checkpoint_basename_across_tree "$source_root" "$basename" "$prefix" "source"
+    dataset_exists "$dest_root" && delete_checkpoint_basename_across_tree "$dest_root" "$basename" "$prefix" "destination"
+    complete_delete_job "Deleted scheduled-send checkpoint ${basename} across its source and destination trees."
+    return 0
+  fi
+
+  delete_single_snapshot "$snapshot"
+  complete_delete_job "Deleted snapshot ${snapshot}."
+}
+
+process_standard_delete() {
+  local snapshot="$1"
+  delete_single_snapshot "$snapshot"
+  complete_delete_job "Deleted snapshot ${snapshot}."
+}
+
+process_delete_job() {
+  local snapshot basename expect_epoch expect_guid expect_createtxg
+  snapshot="$(job_get job SNAPSHOT)"
+  basename="${snapshot##*@}"
+  expect_epoch="$(job_get job SNAPSHOT_EPOCH)"
+  expect_guid="$(job_get job SNAPSHOT_GUID)"
+  expect_createtxg="$(job_get job SNAPSHOT_CREATETXG)"
+
+  case "$(verify_snapshot_identity "$snapshot" "$expect_epoch" "$expect_guid" "$expect_createtxg"; echo $?)" in
+    2)
+      skip_delete_job "Snapshot ${snapshot} is already gone."
+      return 0
+      ;;
+    1)
+      fail_delete_job "Snapshot identity for ${snapshot} no longer matches the queued request. Refresh the dataset and try again."
+      return 0
+      ;;
+  esac
+
+  if [[ "$(job_get job SEND_PROTECTED 0)" == "1" ]]; then
+    process_send_checkpoint_delete
+    return 0
+  fi
+
+  process_standard_delete "$snapshot"
+}
+
+main() {
+  local candidate_path
+  ensure_runtime_layout || exit 1
+  load_send_config
+  parse_send_jobs_config
+
+  mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
+  trap cleanup EXIT INT TERM
+
+  exec >> "$LOG_FILE" 2>&1
+  log "Delete worker $$ starting"
+
+  while :; do
+    candidate_path=""
+    claim_next_delete_job candidate_path || break
+    [[ -n "$candidate_path" ]] || break
+
+    # shellcheck disable=SC2034
+    declare -A job=()
+    job_load "$candidate_path" job || break
+    CURRENT_JOB_ID="$(job_get job JOB_ID)"
+    CURRENT_JOB_PATH="$candidate_path"
+
+    if ! acquire_job_claim "$CURRENT_JOB_ID"; then
+      CURRENT_JOB_ID=""
+      CURRENT_JOB_PATH=""
+      continue
+    fi
+
+    job_load "$candidate_path" job || {
+      release_job_claim "$CURRENT_JOB_ID"
+      CURRENT_JOB_ID=""
+      CURRENT_JOB_PATH=""
+      continue
+    }
+
+    set_delete_running "Deleting $(job_get job SNAPSHOT)."
+    process_delete_job
+
+    release_job_claim "$CURRENT_JOB_ID"
+    CURRENT_JOB_ID=""
+    CURRENT_JOB_PATH=""
+  done
+
+  log "Delete worker $$ finished"
+}
+
+main "$@"

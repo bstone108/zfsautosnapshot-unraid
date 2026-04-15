@@ -64,7 +64,47 @@ function zfsas_send_frequency_label($value)
 
 function zfsas_send_job_id($source, $destination)
 {
-    return substr(sha1(strtolower(trim((string) $source) . '|' . trim((string) $destination))), 0, 12);
+    return substr(sha1(strtolower(trim((string) $source) . "|" . trim((string) $destination))), 0, 12);
+}
+
+function zfsas_send_paths_overlap($source, $destination)
+{
+    $source = zfsas_send_trim($source);
+    $destination = zfsas_send_trim($destination);
+
+    if ($source === '' || $destination === '') {
+        return false;
+    }
+
+    return $source === $destination
+        || strpos($source . '/', $destination . '/') === 0
+        || strpos($destination . '/', $source . '/') === 0;
+}
+
+function zfsas_send_normalize_children_flag($value)
+{
+    if (is_bool($value)) {
+        return $value ? '1' : '0';
+    }
+
+    $value = strtolower(trim((string) $value));
+    if (in_array($value, ['1', 'true', 'yes', 'on'], true)) {
+        return '1';
+    }
+
+    return '0';
+}
+
+function zfsas_send_normalize_parallel_limit($value)
+{
+    $value = (int) $value;
+    if ($value < 1) {
+        $value = 1;
+    }
+    if ($value > 8) {
+        $value = 8;
+    }
+    return (string) $value;
 }
 
 function zfsas_send_parse_config_file($path, $defaults)
@@ -136,17 +176,23 @@ function zfsas_send_parse_jobs($jobsRaw, &$errors = [], &$warnings = [])
         }
 
         $pieces = explode('|', $entry);
-        if (count($pieces) !== 5) {
+        if (count($pieces) !== 5 && count($pieces) !== 6) {
             $warnings[] = "Ignoring invalid SEND_JOBS entry '{$entry}'.";
             continue;
         }
 
-        list($jobIdRaw, $sourceRaw, $destinationRaw, $frequencyRaw, $thresholdRaw) = $pieces;
+        $jobIdRaw = $pieces[0] ?? '';
+        $sourceRaw = $pieces[1] ?? '';
+        $destinationRaw = $pieces[2] ?? '';
+        $frequencyRaw = $pieces[3] ?? '';
+        $thresholdRaw = $pieces[4] ?? '';
+        $childrenRaw = $pieces[5] ?? '0';
         $jobId = zfsas_send_trim($jobIdRaw);
         $source = zfsas_send_trim($sourceRaw);
         $destination = zfsas_send_trim($destinationRaw);
         $frequency = zfsas_send_normalize_frequency($frequencyRaw);
         $threshold = zfsas_send_normalize_threshold($thresholdRaw);
+        $children = zfsas_send_normalize_children_flag($childrenRaw);
 
         if ($jobId === '' || preg_match('/^[a-f0-9]{12}$/', $jobId) !== 1) {
             $warnings[] = "Ignoring invalid ZFS send job id '{$jobIdRaw}'.";
@@ -160,6 +206,13 @@ function zfsas_send_parse_jobs($jobsRaw, &$errors = [], &$warnings = [])
 
         if ($source === $destination) {
             $warnings[] = "Ignoring ZFS send job '{$source}' because source and destination match.";
+            continue;
+        }
+
+        if (zfsas_send_dataset_pool_name($source) === zfsas_send_dataset_pool_name($destination)
+            && zfsas_send_paths_overlap($source, $destination)
+        ) {
+            $warnings[] = "Ignoring ZFS send job '{$source}' -> '{$destination}' because the datasets overlap on the same pool.";
             continue;
         }
 
@@ -186,6 +239,7 @@ function zfsas_send_parse_jobs($jobsRaw, &$errors = [], &$warnings = [])
             'frequency' => $frequency,
             'frequency_label' => zfsas_send_frequency_label($frequency),
             'threshold' => $threshold,
+            'children' => $children,
         ];
         $seen[$jobId] = true;
     }
@@ -213,8 +267,11 @@ function zfsas_send_render_config($config)
     $lines[] = '# Prefix namespace reserved for send snapshots.';
     $lines[] = 'SEND_SNAPSHOT_PREFIX=' . zfsas_send_quote_config_string($config['SEND_SNAPSHOT_PREFIX']);
     $lines[] = '';
+    $lines[] = '# Maximum number of queued ZFS send jobs allowed to transfer in parallel.';
+    $lines[] = 'SEND_MAX_PARALLEL=' . zfsas_send_normalize_parallel_limit($config['SEND_MAX_PARALLEL']);
+    $lines[] = '';
     $lines[] = '# Semicolon-separated jobs encoded as:';
-    $lines[] = '#   jobid|source|destination|frequency|threshold';
+    $lines[] = '#   jobid|source|destination|frequency|threshold|children';
     $lines[] = '# frequency values: 15m, 30m, 1h, 6h, 12h, 1d, 7d';
     $lines[] = 'SEND_JOBS=' . zfsas_send_quote_config_string($config['SEND_JOBS']);
     $lines[] = '';

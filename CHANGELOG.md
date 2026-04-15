@@ -5,6 +5,13 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.14.4 (Testing Branch Only)
+
+- Reworked scheduled `ZFS Send` into a persistent queue with retry handling, minute-based queue kicking, configurable parallel send workers, child-dataset replication support, and a shared job/status view on the send page.
+- Moved `Snapshot Manager` onto its own dedicated page so the main settings stay light, added dataset-level summary rows with last snapshot time and active send progress, and kept snapshot lists lazy-loaded until you explicitly manage a dataset.
+- Routed manual snapshot deletes through the same central queue as send jobs, hid already queued deletions from the live snapshot list, and matched queued deletions by stable snapshot identity instead of display order.
+- Added the first real `Recovery Tools` page with scrub/corruption visibility plus a GUI-driven manual readability scan for cases where scrub detects damage but cannot map it back to a specific file.
+
 ### 2026.04.14.3 (Testing Branch Only)
 
 - Added a new `Snapshot Manager` section with a dataset summary view, snapshot counts, pending-operation status, and a slide-over snapshot drawer for manual ZFS snapshot work.

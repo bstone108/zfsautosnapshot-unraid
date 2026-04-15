@@ -10,6 +10,8 @@ $logStreamApiUrl = "/plugins/{$pluginName}/php/log-stream.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
 $saveApiUrl = "/plugins/{$pluginName}/php/save-settings.php";
 $sendSettingsUrl = "/plugins/{$pluginName}/php/send-settings.php";
+$snapshotManagerPageUrl = "/plugins/{$pluginName}/php/snapshot-manager-page.php";
+$recoveryToolsUrl = "/plugins/{$pluginName}/php/recovery-tools.php";
 $snapshotManagerListUrl = "/plugins/{$pluginName}/php/snapshot-manager-list.php";
 $snapshotManagerDatasetUrl = "/plugins/{$pluginName}/php/snapshot-manager-dataset.php";
 $snapshotManagerActionUrl = "/plugins/{$pluginName}/php/snapshot-manager-action.php";
@@ -1833,84 +1835,22 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       <div class="zfsas-card zfsas-placeholder-copy">
         <h3 class="zfsas-placeholder-title">Repair Tools</h3>
         <div class="zfsas-help">
-          Placeholder for future planned tools. We will use this section for guided repair and recovery utilities once those tools are ready.
+          Guided repair and recovery utilities live on their own page so they can surface scrub state, corruption diagnostics, and recovery actions without cluttering the main settings page.
+        </div>
+        <div style="margin-top: 14px;">
+          <button type="button" class="btn btn-primary" id="open_recovery_tools">Open Recovery Tools</button>
         </div>
       </div>
     </div>
 
     <div class="zfsas-section-panel" id="zfsas_panel_snapshot_manager" data-section-panel="snapshot-manager" role="tabpanel" aria-labelledby="zfsas_tab_snapshot_manager" hidden>
-      <div class="zfsas-card">
-        <h3>Snapshot Manager</h3>
+      <div class="zfsas-card zfsas-placeholder-copy">
+        <h3 class="zfsas-placeholder-title">Snapshot Manager</h3>
         <div class="zfsas-help">
-          Browse datasets, review snapshot counts, and queue manual snapshot operations without touching the main autosnapshot engine. Bulk delete, hold, and release actions are queued oldest to newest per dataset; rollback and one-off send actions start immediately when the selected dataset is idle.
+          Snapshot Manager now has its own dedicated page so the main settings stay lightweight. The manager page shows dataset-level summary info first, then loads individual snapshot lists only when you choose a dataset to manage.
         </div>
-
-        <div class="zfsas-sm-toolbar">
-          <button type="button" class="btn" id="snapshot_manager_refresh">Refresh Snapshot Manager</button>
-          <div id="snapshot_manager_toolbar_status" class="zfsas-sm-toolbar-status">Snapshot manager is ready.</div>
-        </div>
-
-        <div class="zfsas-table-wrap" style="margin-top: 12px;">
-          <table class="zfsas-table zfsas-sm-summary-table">
-            <thead>
-              <tr>
-                <th>Dataset</th>
-                <th class="zfsas-center">Snapshots</th>
-                <th>Status</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody id="snapshot_manager_dataset_rows">
-              <tr>
-                <td colspan="4" class="zfsas-help">Snapshot data will load when you open this section.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div id="snapshot_manager_backdrop" class="zfsas-sm-drawer-backdrop" hidden></div>
-      <div id="snapshot_manager_drawer" class="zfsas-sm-drawer" hidden>
-        <div class="zfsas-sm-drawer-panel">
-          <div class="zfsas-sm-drawer-header">
-            <div>
-              <h3 class="zfsas-sm-drawer-title" id="snapshot_manager_dataset_title">Snapshot Manager</h3>
-              <div class="zfsas-sm-drawer-subtitle" id="snapshot_manager_dataset_subtitle">Choose a dataset from the list to review its snapshots.</div>
-            </div>
-            <button type="button" class="btn" id="snapshot_manager_close">Close</button>
-          </div>
-
-          <div class="zfsas-sm-bulk-bar">
-            <button type="button" class="btn" id="snapshot_manager_take_snapshot">Take Snapshot</button>
-            <button type="button" class="btn" id="snapshot_manager_delete_selected">Delete Selected</button>
-            <button type="button" class="btn" id="snapshot_manager_hold_selected">Hold Selected</button>
-            <button type="button" class="btn" id="snapshot_manager_release_selected">Release Selected</button>
-            <button type="button" class="btn" id="snapshot_manager_refresh_dataset">Refresh Dataset</button>
-            <div id="snapshot_manager_bulk_count" class="zfsas-sm-bulk-count">No dataset selected.</div>
-          </div>
-
-          <div id="snapshot_manager_feedback" class="zfsas-sm-feedback"></div>
-
-          <div class="zfsas-table-wrap">
-            <table class="zfsas-table zfsas-sm-table">
-              <thead>
-                <tr>
-                  <th class="zfsas-select-cell"><input type="checkbox" id="snapshot_manager_select_all"></th>
-                  <th>Snapshot</th>
-                  <th>Created</th>
-                  <th class="zfsas-center">Used</th>
-                  <th class="zfsas-center">Written</th>
-                  <th class="zfsas-center">Holds</th>
-                  <th class="zfsas-actions-cell">Actions</th>
-                </tr>
-              </thead>
-              <tbody id="snapshot_manager_snapshot_rows">
-                <tr>
-                  <td colspan="7" class="zfsas-help">Choose a dataset to inspect its snapshots.</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+        <div style="margin-top: 14px;">
+          <button type="button" class="btn btn-primary" id="open_snapshot_manager_page">Open Snapshot Manager</button>
         </div>
       </div>
     </div>
@@ -1929,6 +1869,8 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
   var saveApiUrl = <?php echo json_encode($saveApiUrl); ?>;
   var sendSettingsUrl = <?php echo json_encode($sendSettingsUrl); ?>;
+  var snapshotManagerPageUrl = <?php echo json_encode($snapshotManagerPageUrl); ?>;
+  var recoveryToolsUrl = <?php echo json_encode($recoveryToolsUrl); ?>;
   var snapshotManagerListUrl = <?php echo json_encode($snapshotManagerListUrl); ?>;
   var snapshotManagerDatasetUrl = <?php echo json_encode($snapshotManagerDatasetUrl); ?>;
   var snapshotManagerActionUrl = <?php echo json_encode($snapshotManagerActionUrl); ?>;
@@ -1976,9 +1918,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       panel.hidden = !isActive;
     });
 
-    if (sectionName === 'snapshot-manager') {
-      ensureSnapshotManagerLoaded();
-    }
   }
 
   function snapshotManagerDatasetRowsEl() {
@@ -3157,10 +3096,24 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
   var manualRunBtn = byId('manual_run');
   var openSendSettingsBtn = byId('open_send_settings');
+  var openSnapshotManagerPageBtn = byId('open_snapshot_manager_page');
+  var openRecoveryToolsBtn = byId('open_recovery_tools');
   var manualRunBusy = false;
   if (openSendSettingsBtn) {
     openSendSettingsBtn.addEventListener('click', function () {
       window.location.href = sendSettingsUrl;
+    });
+  }
+
+  if (openSnapshotManagerPageBtn) {
+    openSnapshotManagerPageBtn.addEventListener('click', function () {
+      window.location.href = snapshotManagerPageUrl;
+    });
+  }
+
+  if (openRecoveryToolsBtn) {
+    openRecoveryToolsBtn.addEventListener('click', function () {
+      window.location.href = recoveryToolsUrl;
     });
   }
 

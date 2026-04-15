@@ -5,13 +5,17 @@ $configFile = "{$configDir}/zfs_send.conf";
 $syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
 $saveApiUrl = "/plugins/{$pluginName}/php/save-send-settings.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-send-now.php";
+$queueStatusApiUrl = "/plugins/{$pluginName}/php/send-queue-status.php";
+$queueActionApiUrl = "/plugins/{$pluginName}/php/send-queue-action.php";
 $mainSettingsUrl = '/Settings/ZFSAutoSnapshot?section=special-features';
 
 require_once __DIR__ . '/response-helpers.php';
 require_once __DIR__ . '/send-helpers.php';
+require_once __DIR__ . '/send-queue-helpers.php';
 
 $defaults = [
     'SEND_SNAPSHOT_PREFIX' => 'zfs-send-',
+    'SEND_MAX_PARALLEL' => '1',
     'SEND_JOBS' => '',
 ];
 
@@ -62,6 +66,7 @@ function zfsas_send_render_jobs_string($jobs)
             $job['destination'],
             $job['frequency'],
             $job['threshold'],
+            $job['children'] ?? '0',
         ]);
     }
 
@@ -78,6 +83,7 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
     $destinations = (isset($post['job_destination']) && is_array($post['job_destination'])) ? $post['job_destination'] : [];
     $frequencies = (isset($post['job_frequency']) && is_array($post['job_frequency'])) ? $post['job_frequency'] : [];
     $thresholds = (isset($post['job_threshold']) && is_array($post['job_threshold'])) ? $post['job_threshold'] : [];
+    $childrenFlags = (isset($post['job_children']) && is_array($post['job_children'])) ? $post['job_children'] : [];
     $removes = (isset($post['job_remove']) && is_array($post['job_remove'])) ? $post['job_remove'] : [];
 
     foreach ($sources as $index => $sourceRaw) {
@@ -89,6 +95,7 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
         $destination = zfsas_send_trim($destinations[$index] ?? '');
         $frequency = zfsas_send_normalize_frequency($frequencies[$index] ?? '');
         $threshold = zfsas_send_normalize_threshold($thresholds[$index] ?? '');
+        $children = zfsas_send_normalize_children_flag($childrenFlags[$index] ?? '0');
         $jobId = zfsas_send_trim($jobIds[$index] ?? '');
 
         if ($source === '' && $destination === '') {
@@ -107,6 +114,13 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
 
         if ($source === $destination) {
             $errors[] = "Source and destination must be different for '{$source}'.";
+            continue;
+        }
+
+        if (zfsas_send_dataset_pool_name($source) === zfsas_send_dataset_pool_name($destination)
+            && zfsas_send_paths_overlap($source, $destination)
+        ) {
+            $errors[] = "Source '{$source}' and destination '{$destination}' overlap on the same pool.";
             continue;
         }
 
@@ -142,6 +156,7 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
             'frequency' => $frequency,
             'frequency_label' => zfsas_send_frequency_label($frequency),
             'threshold' => $threshold,
+            'children' => $children,
         ];
         $seenJobIds[$jobId] = true;
     }
@@ -150,10 +165,12 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
     $newDestination = zfsas_send_trim($post['new_job_destination'] ?? '');
     $newFrequencyRaw = zfsas_send_trim($post['new_job_frequency'] ?? '');
     $newThresholdRaw = zfsas_send_trim($post['new_job_threshold'] ?? '');
+    $newChildrenRaw = zfsas_send_trim($post['new_job_children'] ?? '0');
 
-    if ($newSource !== '' || $newDestination !== '' || $newFrequencyRaw !== '' || $newThresholdRaw !== '') {
+    if ($newSource !== '' || $newDestination !== '' || $newFrequencyRaw !== '' || $newThresholdRaw !== '' || $newChildrenRaw !== '') {
         $newFrequency = zfsas_send_normalize_frequency($newFrequencyRaw);
         $newThreshold = zfsas_send_normalize_threshold($newThresholdRaw);
+        $newChildren = zfsas_send_normalize_children_flag($newChildrenRaw);
 
         if (!zfsas_send_is_valid_dataset_name($newSource)) {
             $errors[] = 'New ZFS send source dataset is invalid.';
@@ -161,6 +178,10 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
             $errors[] = 'New ZFS send destination dataset is invalid.';
         } elseif ($newSource === $newDestination) {
             $errors[] = 'New ZFS send source and destination must be different.';
+        } elseif (zfsas_send_dataset_pool_name($newSource) === zfsas_send_dataset_pool_name($newDestination)
+            && zfsas_send_paths_overlap($newSource, $newDestination)
+        ) {
+            $errors[] = 'New ZFS send source and destination overlap on the same pool.';
         } elseif (strpos($newDestination, '/') === false) {
             $errors[] = 'New ZFS send destination must include a dataset below a pool root.';
         } elseif ($newFrequency === null) {
@@ -180,6 +201,7 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
                     'frequency' => $newFrequency,
                     'frequency_label' => zfsas_send_frequency_label($newFrequency),
                     'threshold' => $newThreshold,
+                    'children' => $newChildren,
                 ];
             }
         }
@@ -208,6 +230,7 @@ $parseErrors = [];
 $parseWarnings = [];
 $jobs = zfsas_send_parse_jobs($config['SEND_JOBS'] ?? '', $parseErrors, $parseWarnings);
 $formJobs = $jobs;
+$queueJobs = zfsas_ops_recent_send_jobs(120);
 $datasetDiscoveryError = null;
 $availableDatasets = zfsas_send_list_zfs_datasets($datasetDiscoveryError);
 
@@ -222,6 +245,7 @@ foreach ($parseWarnings as $warning) {
 if ($isPostRequest) {
     $submitted = $config;
     $submitted['SEND_SNAPSHOT_PREFIX'] = zfsas_send_trim($_POST['send_snapshot_prefix'] ?? $submitted['SEND_SNAPSHOT_PREFIX']);
+    $submitted['SEND_MAX_PARALLEL'] = zfsas_send_normalize_parallel_limit($_POST['send_max_parallel'] ?? $submitted['SEND_MAX_PARALLEL']);
     $submittedJobs = zfsas_send_collect_submitted_jobs($_POST, $errors);
     $formJobs = $submittedJobs;
 
@@ -339,7 +363,7 @@ if ($isPostRequest) {
     .zfsas-send-table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 860px;
+      min-width: 980px;
     }
 
     .zfsas-send-table th,
@@ -372,10 +396,18 @@ if ($isPostRequest) {
 
     .zfsas-send-add-row {
       display: grid;
-      grid-template-columns: 1.3fr 1.4fr 0.9fr 0.7fr auto;
+      grid-template-columns: 1.2fr 1.3fr 0.8fr 0.8fr 0.7fr auto;
       gap: 10px;
       align-items: end;
       margin-top: 14px;
+    }
+
+    .zfsas-send-inline-grid {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: 1fr 240px;
+      gap: 14px;
+      align-items: end;
     }
 
     .zfsas-send-field {
@@ -439,8 +471,57 @@ if ($isPostRequest) {
       background: rgba(82, 126, 235, 0.04);
     }
 
+    .zfsas-send-progress {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .zfsas-send-progress-track {
+      flex: 1 1 auto;
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(82, 126, 235, 0.12);
+      overflow: hidden;
+    }
+
+    .zfsas-send-progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #4e8ef7, #2db6a3);
+      border-radius: 999px;
+    }
+
+    .zfsas-send-progress-text {
+      min-width: 44px;
+      font-size: 12px;
+      text-align: right;
+      color: var(--text-color, #4f5a66);
+    }
+
+    .zfsas-send-queue-table {
+      min-width: 1080px;
+    }
+
+    .zfsas-send-queue-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: rgba(82, 126, 235, 0.12);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .zfsas-send-queue-badge.error {
+      background: rgba(176, 0, 32, 0.12);
+    }
+
     @media (max-width: 980px) {
       .zfsas-send-add-row {
+        grid-template-columns: 1fr;
+      }
+
+      .zfsas-send-inline-grid {
         grid-template-columns: 1fr;
       }
 
@@ -493,10 +574,17 @@ if ($isPostRequest) {
         Saving an empty job list disables scheduled ZFS send runs without affecting your regular autosnapshot jobs.
       </div>
 
-      <div class="zfsas-send-field" style="margin-top:14px; max-width:320px;">
-        <label for="send_snapshot_prefix">Send snapshot prefix base</label>
-        <input id="send_snapshot_prefix" name="send_snapshot_prefix" class="zfsas-send-input" value="<?php echo zfsas_send_h($config['SEND_SNAPSHOT_PREFIX']); ?>">
-        <div class="zfsas-send-help">The script appends a per-job id automatically so each replication path gets its own isolated send snapshot namespace.</div>
+      <div class="zfsas-send-inline-grid">
+        <div class="zfsas-send-field">
+          <label for="send_snapshot_prefix">Send snapshot prefix base</label>
+          <input id="send_snapshot_prefix" name="send_snapshot_prefix" class="zfsas-send-input" value="<?php echo zfsas_send_h($config['SEND_SNAPSHOT_PREFIX']); ?>">
+          <div class="zfsas-send-help">The script appends a per-job id automatically so each replication path gets its own isolated send snapshot namespace.</div>
+        </div>
+        <div class="zfsas-send-field">
+          <label for="send_max_parallel">Parallel send jobs</label>
+          <input id="send_max_parallel" name="send_max_parallel" class="zfsas-send-input" type="number" min="1" max="8" value="<?php echo zfsas_send_h($config['SEND_MAX_PARALLEL']); ?>">
+          <div class="zfsas-send-help">How many queued send jobs may transfer at the same time. Deletes still run one at a time.</div>
+        </div>
       </div>
 
       <?php if (count($formJobs) === 0) : ?>
@@ -510,6 +598,7 @@ if ($isPostRequest) {
               <th>Source dataset</th>
               <th>Destination dataset</th>
               <th>Frequency</th>
+              <th>Children</th>
               <th>Destination free-space target</th>
               <th style="width:90px;">Remove</th>
             </tr>
@@ -531,6 +620,12 @@ if ($isPostRequest) {
                     <?php foreach (zfsas_send_frequency_options() as $value => $label) : ?>
                       <option value="<?php echo zfsas_send_h($value); ?>" <?php echo ($value === $job['frequency']) ? 'selected' : ''; ?>><?php echo zfsas_send_h($label); ?></option>
                     <?php endforeach; ?>
+                  </select>
+                </td>
+                <td>
+                  <select name="job_children[<?php echo (int) $index; ?>]" class="zfsas-send-select">
+                    <option value="0" <?php echo (($job['children'] ?? '0') === '0') ? 'selected' : ''; ?>>No</option>
+                    <option value="1" <?php echo (($job['children'] ?? '0') === '1') ? 'selected' : ''; ?>>Yes</option>
                   </select>
                 </td>
                 <td><input class="zfsas-send-input" name="job_threshold[<?php echo (int) $index; ?>]" value="<?php echo zfsas_send_h($job['threshold']); ?>"></td>
@@ -567,6 +662,13 @@ if ($isPostRequest) {
           </select>
         </div>
         <div class="zfsas-send-field">
+          <label for="new_job_children">Send all children as well</label>
+          <select id="new_job_children" name="new_job_children" class="zfsas-send-select">
+            <option value="0">No</option>
+            <option value="1">Yes</option>
+          </select>
+        </div>
+        <div class="zfsas-send-field">
           <label for="new_job_threshold">Destination free-space target</label>
           <input id="new_job_threshold" name="new_job_threshold" class="zfsas-send-input" placeholder="100G" value="100G">
         </div>
@@ -593,6 +695,65 @@ if ($isPostRequest) {
       <noscript><button type="submit" class="btn btn-primary">Save ZFS Send Settings</button></noscript>
     </div>
   </form>
+
+  <div class="zfsas-send-card">
+    <h3 style="margin-top:0;">Send Queue</h3>
+    <div class="zfsas-send-help">
+      Scheduled sends and one-off snapshot sends use the same persistent queue. Failed jobs can be retried from here, and active jobs show phase-based progress.
+    </div>
+
+    <div class="zfsas-send-table-wrap">
+      <table class="zfsas-send-table zfsas-send-queue-table">
+        <thead>
+          <tr>
+            <th>Source</th>
+            <th>Destination</th>
+            <th>Type</th>
+            <th>Status</th>
+            <th>Progress</th>
+            <th>Message</th>
+            <th style="width:120px;">Action</th>
+          </tr>
+        </thead>
+        <tbody id="send_queue_rows">
+          <?php if (empty($queueJobs)) : ?>
+            <tr>
+              <td colspan="7" class="zfsas-send-help">No queued or recent send jobs yet.</td>
+            </tr>
+          <?php else : ?>
+            <?php foreach ($queueJobs as $queueJob) : ?>
+              <tr data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">
+                <td><code><?php echo zfsas_send_h($queueJob['SOURCE_ROOT'] ?? $queueJob['DATASET'] ?? ''); ?></code></td>
+                <td><code><?php echo zfsas_send_h($queueJob['DESTINATION_ROOT'] ?? ''); ?></code></td>
+                <td>
+                  <span class="zfsas-send-queue-badge"><?php echo zfsas_send_h(((string) ($queueJob['JOB_MODE'] ?? '') === 'manual_snapshot') ? 'Manual send' : 'Scheduled send'); ?></span>
+                </td>
+                <td>
+                  <span class="zfsas-send-queue-badge<?php echo ((string) ($queueJob['STATE'] ?? '') === 'failed') ? ' error' : ''; ?>">
+                    <?php echo zfsas_send_h(zfsas_ops_send_job_state_label($queueJob)); ?>
+                  </span>
+                </td>
+                <td>
+                  <div class="zfsas-send-progress">
+                    <div class="zfsas-send-progress-track"><div class="zfsas-send-progress-fill" style="width: <?php echo (int) zfsas_ops_send_job_progress_percent($queueJob); ?>%;"></div></div>
+                    <div class="zfsas-send-progress-text"><?php echo (int) zfsas_ops_send_job_progress_percent($queueJob); ?>%</div>
+                  </div>
+                </td>
+                <td><?php echo zfsas_send_h((string) (($queueJob['LAST_ERROR'] ?? '') !== '' ? $queueJob['LAST_ERROR'] : ($queueJob['LAST_MESSAGE'] ?? ''))); ?></td>
+                <td>
+                  <?php if ((string) ($queueJob['STATE'] ?? '') === 'failed') : ?>
+                    <button type="button" class="btn zfsas-send-retry-job" data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">Retry</button>
+                  <?php else : ?>
+                    <span class="zfsas-send-help">-</span>
+                  <?php endif; ?>
+                </td>
+              </tr>
+            <?php endforeach; ?>
+          <?php endif; ?>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -610,7 +771,11 @@ if ($isPostRequest) {
   var runBusy = false;
   var saveApiUrl = <?php echo json_encode($saveApiUrl); ?>;
   var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
+  var queueStatusApiUrl = <?php echo json_encode($queueStatusApiUrl); ?>;
+  var queueActionApiUrl = <?php echo json_encode($queueActionApiUrl); ?>;
   var jobsBody = byId('zfsas_send_jobs_body');
+  var queueRowsBody = byId('send_queue_rows');
+  var queuePollTimer = null;
 
   function escapeHtml(text) {
     return String(text)
@@ -722,6 +887,87 @@ if ($isPostRequest) {
     }
 
     feedbackEl.innerHTML = html;
+  }
+
+  function queueBadge(label, isError) {
+    return '<span class="zfsas-send-queue-badge' + (isError ? ' error' : '') + '">' + escapeHtml(label) + '</span>';
+  }
+
+  function queueProgressHtml(progress) {
+    var percent = parseInt(progress, 10);
+    if (isNaN(percent) || percent < 0) {
+      percent = 0;
+    }
+    if (percent > 100) {
+      percent = 100;
+    }
+
+    return ''
+      + '<div class="zfsas-send-progress">'
+      + '<div class="zfsas-send-progress-track"><div class="zfsas-send-progress-fill" style="width: ' + percent + '%;"></div></div>'
+      + '<div class="zfsas-send-progress-text">' + percent + '%</div>'
+      + '</div>';
+  }
+
+  function renderQueueJobs(jobs) {
+    if (!queueRowsBody) {
+      return;
+    }
+
+    if (!Array.isArray(jobs) || jobs.length === 0) {
+      queueRowsBody.innerHTML = '<tr><td colspan="7" class="zfsas-send-help">No queued or recent send jobs yet.</td></tr>';
+      return;
+    }
+
+    var html = '';
+    jobs.forEach(function (job) {
+      var message = job.lastError || job.lastMessage || '';
+      var modeLabel = (job.mode === 'manual_snapshot') ? 'Manual send' : 'Scheduled send';
+      if (job.includeChildren) {
+        modeLabel += ' + children';
+      }
+
+      html += '<tr data-job-id="' + escapeHtml(job.id || '') + '">';
+      html += '<td><code>' + escapeHtml(job.source || '') + '</code></td>';
+      html += '<td><code>' + escapeHtml(job.destination || '') + '</code></td>';
+      html += '<td>' + queueBadge(modeLabel, false) + '</td>';
+      html += '<td>' + queueBadge(job.stateLabel || job.state || 'Queued', job.state === 'failed') + '</td>';
+      html += '<td>' + queueProgressHtml(job.progress) + '</td>';
+      html += '<td>' + escapeHtml(message) + '</td>';
+      html += '<td>';
+      if (job.canRetry) {
+        html += '<button type="button" class="btn zfsas-send-retry-job" data-job-id="' + escapeHtml(job.id || '') + '">Retry</button>';
+      } else {
+        html += '<span class="zfsas-send-help">-</span>';
+      }
+      html += '</td>';
+      html += '</tr>';
+    });
+
+    queueRowsBody.innerHTML = html;
+  }
+
+  function loadQueueJobs() {
+    requestJson(
+      queueStatusApiUrl + '?_=' + Date.now(),
+      function (payload) {
+        renderQueueJobs(payload.jobs || []);
+      },
+      function (error) {
+        if (!queueRowsBody) {
+          return;
+        }
+        queueRowsBody.innerHTML = '<tr><td colspan="7" class="zfsas-send-help">Queue refresh failed: ' + escapeHtml(error.message) + '</td></tr>';
+      }
+    );
+  }
+
+  function startQueuePolling() {
+    if (queuePollTimer !== null) {
+      window.clearInterval(queuePollTimer);
+    }
+    loadQueueJobs();
+    queuePollTimer = window.setInterval(loadQueueJobs, 5000);
   }
 
   function clearSaveButtonSuccessState() {
@@ -957,10 +1203,12 @@ if ($isPostRequest) {
       var sourceEl = byId('new_job_source');
       var destinationEl = byId('new_job_destination');
       var frequencyEl = byId('new_job_frequency');
+      var childrenEl = byId('new_job_children');
       var thresholdEl = byId('new_job_threshold');
       var source = sourceEl ? sourceEl.value.trim() : '';
       var destination = destinationEl ? destinationEl.value.trim() : '';
       var frequency = frequencyEl ? frequencyEl.value : '1h';
+      var children = childrenEl ? childrenEl.value : '0';
       var threshold = thresholdEl ? thresholdEl.value.trim() : '100G';
 
       if (source === '' || destination === '') {
@@ -971,6 +1219,7 @@ if ($isPostRequest) {
       var index = nextRowIndex();
       var sourceOptions = sourceEl ? sourceEl.innerHTML : '';
       var frequencyOptions = frequencyEl ? frequencyEl.innerHTML : '';
+      var childrenOptions = childrenEl ? childrenEl.innerHTML : '<option value="0">No</option><option value="1">Yes</option>';
       var row = document.createElement('tr');
       row.innerHTML = '' +
         '<td>' +
@@ -979,6 +1228,7 @@ if ($isPostRequest) {
         '</td>' +
         '<td><input class="zfsas-send-input" name="job_destination[' + index + ']" value="' + escapeHtml(destination) + '"></td>' +
         '<td><select name="job_frequency[' + index + ']" class="zfsas-send-select">' + frequencyOptions + '</select></td>' +
+        '<td><select name="job_children[' + index + ']" class="zfsas-send-select">' + childrenOptions + '</select></td>' +
         '<td><input class="zfsas-send-input" name="job_threshold[' + index + ']" value="' + escapeHtml(threshold) + '"></td>' +
         '<td><input type="hidden" name="job_remove[' + index + ']" value="0" class="zfsas-send-remove-flag"><button type="button" class="btn zfsas-send-remove-row">Remove</button></td>';
       if (jobsBody) {
@@ -993,12 +1243,19 @@ if ($isPostRequest) {
       if (frequencySelect) {
         frequencySelect.value = frequency;
       }
+      var childrenSelect = row.querySelector('select[name^="job_children["]');
+      if (childrenSelect) {
+        childrenSelect.value = children;
+      }
 
       if (sourceEl) {
         sourceEl.value = '';
       }
       if (destinationEl) {
         destinationEl.value = '';
+      }
+      if (childrenEl) {
+        childrenEl.value = '0';
       }
       if (thresholdEl) {
         thresholdEl.value = '100G';
@@ -1086,6 +1343,7 @@ if ($isPostRequest) {
             return;
           }
           setRunStatus((typeof data.message === 'string' && data.message.length > 0) ? data.message : 'Manual ZFS send started.', false);
+          loadQueueJobs();
         },
         function (error) {
           runBusy = false;
@@ -1095,6 +1353,36 @@ if ($isPostRequest) {
       );
     });
   }
+
+  if (queueRowsBody) {
+    queueRowsBody.addEventListener('click', function (event) {
+      var button = event.target.closest('.zfsas-send-retry-job');
+      if (!button) {
+        return;
+      }
+
+      var jobId = button.getAttribute('data-job-id') || '';
+      if (!jobId) {
+        return;
+      }
+
+      button.disabled = true;
+      requestJsonPost(
+        queueActionApiUrl,
+        {action: 'retry', job_id: jobId},
+        function (payload) {
+          setRunStatus(payload && payload.message ? payload.message : 'Send job queued for retry.', false);
+          loadQueueJobs();
+        },
+        function (error, payload) {
+          button.disabled = false;
+          setRunStatus((payload && payload.error) ? payload.error : error.message, true);
+        }
+      );
+    });
+  }
+
+  startQueuePolling();
 })();
 </script>
 </body>

@@ -7,7 +7,7 @@ CONFIG_FILE="${CONFIG_DIR}/zfs_autosnapshot.conf"
 SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
 CRON_FILE="/etc/cron.d/zfs_autosnapshot"
 RUN_CMD="/usr/local/sbin/zfs_autosnapshot"
-SEND_RUN_CMD="/usr/local/sbin/zfs_autosnapshot_send"
+QUEUE_KICKER_CMD="/usr/local/sbin/zfs_autosnapshot_queue_kicker"
 
 SCHEDULE_MODE="disabled"
 SCHEDULE_EVERY_MINUTES="15"
@@ -19,7 +19,6 @@ SCHEDULE_WEEKLY_HOUR="3"
 SCHEDULE_WEEKLY_MINUTE="0"
 CUSTOM_CRON_SCHEDULE=""
 CRON_SCHEDULE=""
-SEND_JOBS=""
 
 trim() {
 	local s="$1"
@@ -62,7 +61,7 @@ apply_config_key() {
 	local value="$2"
 
 	case "$key" in
-	SCHEDULE_MODE | SCHEDULE_EVERY_MINUTES | SCHEDULE_EVERY_HOURS | SCHEDULE_DAILY_HOUR | SCHEDULE_DAILY_MINUTE | SCHEDULE_WEEKLY_DAY | SCHEDULE_WEEKLY_HOUR | SCHEDULE_WEEKLY_MINUTE | CUSTOM_CRON_SCHEDULE | CRON_SCHEDULE | SEND_JOBS)
+	SCHEDULE_MODE | SCHEDULE_EVERY_MINUTES | SCHEDULE_EVERY_HOURS | SCHEDULE_DAILY_HOUR | SCHEDULE_DAILY_MINUTE | SCHEDULE_WEEKLY_DAY | SCHEDULE_WEEKLY_HOUR | SCHEDULE_WEEKLY_MINUTE | CUSTOM_CRON_SCHEDULE | CRON_SCHEDULE)
 		if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
 			return 0
 		fi
@@ -255,33 +254,32 @@ load_config_file "$SEND_CONFIG_FILE"
 
 CRON_SCHEDULE_EFFECTIVE="$(build_cron_schedule)" || exit 1
 
-if [[ -z "$CRON_SCHEDULE_EFFECTIVE" ]]; then
-	rm -f "$CRON_FILE"
-	refresh_cron_runtime
-	echo "Cron schedule disabled."
-	exit 0
-fi
+if [[ -n "$CRON_SCHEDULE_EFFECTIVE" ]]; then
+	if ! validate_cron_5_fields "$CRON_SCHEDULE_EFFECTIVE"; then
+		echo "Invalid cron schedule '$CRON_SCHEDULE_EFFECTIVE' (expected 5 fields)." >&2
+		exit 1
+	fi
 
-if ! validate_cron_5_fields "$CRON_SCHEDULE_EFFECTIVE"; then
-	echo "Invalid cron schedule '$CRON_SCHEDULE_EFFECTIVE' (expected 5 fields)." >&2
-	exit 1
-fi
-
-if ! validate_cron_safe_chars "$CRON_SCHEDULE_EFFECTIVE"; then
-	echo "Invalid cron schedule '$CRON_SCHEDULE_EFFECTIVE' (contains unsupported characters)." >&2
-	exit 1
+	if ! validate_cron_safe_chars "$CRON_SCHEDULE_EFFECTIVE"; then
+		echo "Invalid cron schedule '$CRON_SCHEDULE_EFFECTIVE' (contains unsupported characters)." >&2
+		exit 1
+	fi
 fi
 
 {
 	echo "# Managed by ${PLUGIN_NAME}; edit ${CONFIG_FILE}"
 	# Unraid uses BusyBox crond format in /etc/cron.d: no username column.
-	echo "${CRON_SCHEDULE_EFFECTIVE} ${RUN_CMD} >> /var/log/zfs_autosnapshot.log 2>&1"
-	if [[ -n "$(trim "${SEND_JOBS}")" ]]; then
-		echo "${CRON_SCHEDULE_EFFECTIVE} ${SEND_RUN_CMD} >> /var/log/zfs_autosnapshot_send.log 2>&1"
+	if [[ -n "$CRON_SCHEDULE_EFFECTIVE" ]]; then
+		echo "${CRON_SCHEDULE_EFFECTIVE} ${RUN_CMD} >> /var/log/zfs_autosnapshot.log 2>&1"
 	fi
+	echo "* * * * * ${QUEUE_KICKER_CMD} >> /var/log/zfs_autosnapshot_send.log 2>&1"
 } >"$CRON_FILE"
 
 chmod 0644 "$CRON_FILE"
 refresh_cron_runtime
 
-echo "Cron schedule applied: $CRON_SCHEDULE_EFFECTIVE"
+if [[ -n "$CRON_SCHEDULE_EFFECTIVE" ]]; then
+	echo "Cron schedule applied: $CRON_SCHEDULE_EFFECTIVE (queue kicker runs every minute)"
+else
+	echo "Main autosnapshot schedule disabled; queue kicker still runs every minute for send/delete queue processing."
+fi

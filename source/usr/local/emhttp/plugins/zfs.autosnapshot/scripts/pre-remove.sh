@@ -18,6 +18,21 @@ SEND_STOP_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.stop"
 SEND_CONFIG_FILE="/boot/config/plugins/zfs.autosnapshot/zfs_send.conf"
 SEND_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_send'
 ALLOW_ORPHAN_DESTROY_MATCHES=1
+OPS_RUNTIME_DIR="/var/run/zfs-autosnapshot-ops"
+OPS_STOP_FILE="${OPS_RUNTIME_DIR}/queue.stop"
+OPS_LOCK_FILE="${OPS_RUNTIME_DIR}/queue.lock"
+OPS_LOCK_DIR="${OPS_RUNTIME_DIR}/queue.lockdir"
+OPS_CHILD_PID_FILE="${OPS_RUNTIME_DIR}/queue.child.pid"
+OPS_KICKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_queue_kicker'
+OPS_SEND_WORKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_send_worker'
+OPS_DELETE_WORKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_delete_worker'
+OPS_JOB_LOCKS_DIR="${OPS_RUNTIME_DIR}/job-locks"
+RECOVERY_RUNTIME_DIR="/var/run/zfs-autosnapshot-recovery"
+RECOVERY_STOP_FILE="${RECOVERY_RUNTIME_DIR}/recovery.stop"
+RECOVERY_LOCK_FILE="${RECOVERY_RUNTIME_DIR}/recovery.lock"
+RECOVERY_LOCK_DIR="${RECOVERY_RUNTIME_DIR}/recovery.lockdir"
+RECOVERY_CHILD_PID_FILE="${RECOVERY_RUNTIME_DIR}/recovery.child.pid"
+RECOVERY_SCAN_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_recovery_scan'
 SNAPSHOT_MANAGER_RUNTIME_DIR="/var/run/zfs-autosnapshot-manager"
 SNAPSHOT_MANAGER_LOCK_FILE="${SNAPSHOT_MANAGER_RUNTIME_DIR}/snapshot_manager.lock"
 SNAPSHOT_MANAGER_LOCK_DIR="${SNAPSHOT_MANAGER_RUNTIME_DIR}/locks"
@@ -208,6 +223,30 @@ CONFIG_FILE="$SEND_CONFIG_FILE"
 RUN_MATCH="$SNAPSHOT_MANAGER_RUN_MATCH"
 SNAPSHOT_PREFIX='manual-'
 ALLOW_ORPHAN_DESTROY_MATCHES=0
+stop_running_jobs
+
+RUNTIME_DIR="$OPS_RUNTIME_DIR"
+LOCK_FILE="$OPS_LOCK_FILE"
+LOCK_DIR="$OPS_LOCK_DIR"
+CHILD_PID_FILE="$OPS_CHILD_PID_FILE"
+STOP_FILE="$OPS_STOP_FILE"
+CONFIG_FILE="$SEND_CONFIG_FILE"
+SNAPSHOT_PREFIX='zfs-send-'
+ALLOW_ORPHAN_DESTROY_MATCHES=0
+for RUN_MATCH in "$OPS_KICKER_RUN_MATCH" "$OPS_SEND_WORKER_RUN_MATCH" "$OPS_DELETE_WORKER_RUN_MATCH"; do
+  stop_running_jobs
+done
+rm -rf "$OPS_JOB_LOCKS_DIR" >/dev/null 2>&1 || true
+
+RUNTIME_DIR="$RECOVERY_RUNTIME_DIR"
+LOCK_FILE="$RECOVERY_LOCK_FILE"
+LOCK_DIR="$RECOVERY_LOCK_DIR"
+CHILD_PID_FILE="$RECOVERY_CHILD_PID_FILE"
+STOP_FILE="$RECOVERY_STOP_FILE"
+CONFIG_FILE="$SEND_CONFIG_FILE"
+SNAPSHOT_PREFIX='manual-recovery-'
+ALLOW_ORPHAN_DESTROY_MATCHES=0
+RUN_MATCH="$RECOVERY_SCAN_RUN_MATCH"
 stop_running_jobs
 
 echo "Removed cron file: $CRON_FILE"

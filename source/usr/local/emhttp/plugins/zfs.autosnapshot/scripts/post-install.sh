@@ -10,7 +10,6 @@ DEFAULT_SEND_CFG="${PLUGIN_DIR}/config/zfs_send.conf.example"
 TARGET_SEND_CFG="${BOOT_PLUGIN_DIR}/zfs_send.conf"
 MAIN_TARGET_CFG="${BOOT_PLUGIN_DIR}/zfs_autosnapshot.conf"
 REPAIR_PERMS_SCRIPT="${PLUGIN_DIR}/scripts/repair-permissions.sh"
-CRON_FILE="/etc/cron.d/zfs_autosnapshot"
 RUNTIME_DIR="/var/run/zfs-autosnapshot"
 LOCK_FILE="${RUNTIME_DIR}/zfs_autosnapshot.lock"
 LOCK_DIR="${RUNTIME_DIR}/zfs_autosnapshot.lockdir"
@@ -25,6 +24,21 @@ SEND_CHILD_PID_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.child.pid"
 SEND_STOP_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.stop"
 SEND_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_send'
 ALLOW_ORPHAN_DESTROY_MATCHES=1
+OPS_RUNTIME_DIR="/var/run/zfs-autosnapshot-ops"
+OPS_STOP_FILE="${OPS_RUNTIME_DIR}/queue.stop"
+OPS_LOCK_FILE="${OPS_RUNTIME_DIR}/queue.lock"
+OPS_LOCK_DIR="${OPS_RUNTIME_DIR}/queue.lockdir"
+OPS_CHILD_PID_FILE="${OPS_RUNTIME_DIR}/queue.child.pid"
+OPS_KICKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_queue_kicker'
+OPS_SEND_WORKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_send_worker'
+OPS_DELETE_WORKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_delete_worker'
+OPS_JOB_LOCKS_DIR="${OPS_RUNTIME_DIR}/job-locks"
+RECOVERY_RUNTIME_DIR="/var/run/zfs-autosnapshot-recovery"
+RECOVERY_STOP_FILE="${RECOVERY_RUNTIME_DIR}/recovery.stop"
+RECOVERY_LOCK_FILE="${RECOVERY_RUNTIME_DIR}/recovery.lock"
+RECOVERY_LOCK_DIR="${RECOVERY_RUNTIME_DIR}/recovery.lockdir"
+RECOVERY_CHILD_PID_FILE="${RECOVERY_RUNTIME_DIR}/recovery.child.pid"
+RECOVERY_SCAN_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_recovery_scan'
 SNAPSHOT_MANAGER_RUNTIME_DIR="/var/run/zfs-autosnapshot-manager"
 SNAPSHOT_MANAGER_LOCK_FILE="${SNAPSHOT_MANAGER_RUNTIME_DIR}/snapshot_manager.lock"
 SNAPSHOT_MANAGER_LOCK_DIR="${SNAPSHOT_MANAGER_RUNTIME_DIR}/locks"
@@ -262,20 +276,33 @@ TARGET_CFG="$MAIN_TARGET_CFG"
 ALLOW_ORPHAN_DESTROY_MATCHES=0
 stop_running_jobs
 
+RUNTIME_DIR="$OPS_RUNTIME_DIR"
+LOCK_FILE="$OPS_LOCK_FILE"
+LOCK_DIR="$OPS_LOCK_DIR"
+CHILD_PID_FILE="$OPS_CHILD_PID_FILE"
+STOP_FILE="$OPS_STOP_FILE"
+SNAPSHOT_PREFIX='zfs-send-'
+TARGET_CFG="$TARGET_SEND_CFG"
+ALLOW_ORPHAN_DESTROY_MATCHES=0
+for RUN_MATCH in "$OPS_KICKER_RUN_MATCH" "$OPS_SEND_WORKER_RUN_MATCH" "$OPS_DELETE_WORKER_RUN_MATCH"; do
+  stop_running_jobs
+done
+rm -rf "$OPS_JOB_LOCKS_DIR" >/dev/null 2>&1 || true
+
+RUNTIME_DIR="$RECOVERY_RUNTIME_DIR"
+LOCK_FILE="$RECOVERY_LOCK_FILE"
+LOCK_DIR="$RECOVERY_LOCK_DIR"
+CHILD_PID_FILE="$RECOVERY_CHILD_PID_FILE"
+STOP_FILE="$RECOVERY_STOP_FILE"
+SNAPSHOT_PREFIX='manual-recovery-'
+TARGET_CFG="$MAIN_TARGET_CFG"
+ALLOW_ORPHAN_DESTROY_MATCHES=0
+RUN_MATCH="$RECOVERY_SCAN_RUN_MATCH"
+stop_running_jobs
+
 sync_exit=0
 if [[ -x "${PLUGIN_DIR}/scripts/sync-cron.sh" ]]; then
   "${PLUGIN_DIR}/scripts/sync-cron.sh" || sync_exit=$?
-fi
-
-# Safety guard: if schedule mode is disabled, ensure cron file is removed.
-schedule_mode="$(awk -F= '/^SCHEDULE_MODE=/{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); gsub(/^"/,"",v); gsub(/"$/,"",v); print tolower(v); exit}' "$MAIN_TARGET_CFG" 2>/dev/null || true)"
-if [[ -z "$schedule_mode" ]]; then
-  schedule_mode="disabled"
-fi
-
-if [[ "$schedule_mode" == "disabled" ]]; then
-  rm -f "$CRON_FILE"
-  echo "Schedule mode is disabled; ensured cron entry is removed."
 fi
 
 # Force cron runtime refresh on every install/upgrade so users do not need

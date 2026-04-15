@@ -86,7 +86,7 @@ if (isset($_POST['snapshots'])) {
 }
 $selectedSnapshots = array_keys($selectedSnapshots);
 
-$immediateActions = ['take_snapshot', 'rollback', 'send'];
+$immediateActions = ['take_snapshot', 'rollback'];
 $isImmediate = in_array($action, $immediateActions, true);
 if ($isImmediate && (zfsas_sm_dataset_busy($dataset) || zfsas_sm_queue_pending_count($dataset) > 0)) {
     zfsas_sm_json_error('This dataset already has pending snapshot-manager work. Let it finish first, then retry the immediate action.', 409, [
@@ -155,20 +155,30 @@ if ($action === 'take_snapshot') {
         }
 
         $row = $ordered[0];
-        $operations[] = [
-            'action' => $action,
-            'action_label' => zfsas_sm_action_label($action),
+        $error = null;
+        if (!zfsas_ops_enqueue_manual_send(
+            $dataset,
+            $row['snapshot'],
+            $row['snapshotName'],
+            $destination,
+            (int) $row['createdEpoch'],
+            $error
+        )) {
+            zfsas_sm_json_error($error ?: 'Unable to queue the one-off send.', 409);
+        }
+
+        $kickError = null;
+        zfsas_ops_start_queue_kicker($kickError);
+
+        zfsas_emit_marked_json([
+            'ok' => true,
             'dataset' => $dataset,
-            'snapshot' => $row['snapshot'],
-            'snapshot_name' => $row['snapshotName'],
-            'snapshot_epoch' => (int) $row['createdEpoch'],
-            'destination' => $destination,
-            'requested_at' => $requestedAt,
-            'requested_epoch' => $requestedEpoch,
-        ];
+            'message' => 'One-off send queued for ' . $dataset . '.',
+            'pendingCount' => zfsas_sm_queue_pending_count($dataset) + (int) (zfsas_ops_queue_pending_counts_by_dataset()[$dataset] ?? 0),
+        ]);
     } else {
         foreach ($ordered as $row) {
-            if (!empty($row['sendProtected']) && in_array($action, ['delete', 'rollback'], true)) {
+            if (!empty($row['sendProtected']) && $action === 'rollback') {
                 zfsas_sm_json_error('Send-chain snapshots are protected from delete and rollback in Snapshot Manager.', 409);
             }
 
@@ -188,6 +198,38 @@ if ($action === 'take_snapshot') {
 
 if ($action === 'rollback' && count($operations) !== 1) {
     zfsas_sm_json_error('Rollback works on one snapshot at a time.');
+}
+
+if ($action === 'delete') {
+    $forceCheckpointDelete = (($_POST['confirm_send_delete'] ?? '') === '1');
+    $queuedCount = 0;
+
+    foreach ($operations as $index => $operation) {
+        $row = $snapshotMap[$operation['snapshot']] ?? null;
+        if (!is_array($row)) {
+            zfsas_sm_json_error('One or more selected snapshots no longer exist. Refresh the snapshot list and try again.');
+        }
+
+        if (!empty($row['sendProtected']) && !$forceCheckpointDelete) {
+            zfsas_sm_json_error('Deleting a send-managed checkpoint requires confirmation because it can disrupt future replication if used carelessly.', 409);
+        }
+
+        $error = null;
+        if (!zfsas_ops_enqueue_snapshot_delete($dataset, $row, $forceCheckpointDelete, $error)) {
+            zfsas_sm_json_error($error ?: 'Unable to queue the snapshot deletion.', 500);
+        }
+        $queuedCount++;
+    }
+
+    $kickError = null;
+    zfsas_ops_start_queue_kicker($kickError);
+
+    zfsas_emit_marked_json([
+        'ok' => true,
+        'dataset' => $dataset,
+        'message' => $queuedCount . ' snapshot deletion(s) queued for ' . $dataset . '.',
+        'pendingCount' => zfsas_sm_queue_pending_count($dataset) + (int) (zfsas_ops_queue_pending_counts_by_dataset()[$dataset] ?? 0),
+    ]);
 }
 
 foreach ($operations as $index => $operation) {

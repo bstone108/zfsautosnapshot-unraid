@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/send-queue-helpers.php';
+
 function zfsas_sm_trim($value)
 {
     return trim((string) $value);
@@ -267,53 +269,74 @@ function zfsas_sm_list_datasets(&$error = null)
     return array_values($datasets);
 }
 
-function zfsas_sm_snapshot_counts_map()
+function zfsas_sm_snapshot_summary_map()
 {
-    $counts = [];
-    $command = 'zfs list -H -o name -t snapshot';
+    $summary = [];
+    $command = 'zfs list -H -p -o name,creation -t snapshot';
     $lines = zfsas_sm_exec_lines($command, $exitCode);
     if ($exitCode !== 0) {
-        return $counts;
+        return $summary;
     }
 
     foreach ($lines as $line) {
-        $snapshot = trim((string) $line);
+        $parts = preg_split('/\t+/', trim((string) $line));
+        if (!is_array($parts) || count($parts) < 2) {
+            continue;
+        }
+        $snapshot = (string) $parts[0];
+        $createdEpoch = (int) $parts[1];
         if ($snapshot === '' || strpos($snapshot, '@') === false) {
             continue;
         }
+
         list($dataset) = explode('@', $snapshot, 2);
-        if (!isset($counts[$dataset])) {
-            $counts[$dataset] = 0;
+        if (!isset($summary[$dataset])) {
+            $summary[$dataset] = [
+                'count' => 0,
+                'lastSnapshotEpoch' => 0,
+            ];
         }
-        $counts[$dataset]++;
+        $summary[$dataset]['count']++;
+        if ($createdEpoch > $summary[$dataset]['lastSnapshotEpoch']) {
+            $summary[$dataset]['lastSnapshotEpoch'] = $createdEpoch;
+        }
     }
 
-    return $counts;
+    return $summary;
 }
 
 function zfsas_sm_dataset_summary_rows(&$error = null)
 {
     $datasets = zfsas_sm_list_datasets($error);
-    $counts = zfsas_sm_snapshot_counts_map();
+    $summary = zfsas_sm_snapshot_summary_map();
+    $opsPending = zfsas_ops_queue_pending_counts_by_dataset();
+    $sendActivity = zfsas_ops_dataset_send_activity_map();
     $rows = [];
 
     foreach ($datasets as $dataset) {
         $status = zfsas_sm_read_json_file(zfsas_sm_dataset_status_file($dataset));
-        $pending = zfsas_sm_queue_pending_count($dataset);
-        $busy = zfsas_sm_dataset_busy($dataset);
+        $localPending = zfsas_sm_queue_pending_count($dataset);
+        $queuePending = (int) ($opsPending[$dataset] ?? 0);
+        $pending = $localPending + $queuePending;
+        $busy = zfsas_sm_dataset_busy($dataset) || !empty($sendActivity[$dataset]);
         $currentAction = is_array($status) ? (string) ($status['current_action_label'] ?? '') : '';
         $lastError = is_array($status) ? (string) ($status['last_error'] ?? '') : '';
         $lastMessage = is_array($status) ? (string) ($status['last_message'] ?? '') : '';
+        $lastSnapshotEpoch = (int) ($summary[$dataset]['lastSnapshotEpoch'] ?? 0);
+        $activeSend = !empty($sendActivity[$dataset]) ? $sendActivity[$dataset][0] : null;
 
         $rows[] = [
             'dataset' => $dataset,
             'pool' => strtok($dataset, '/'),
-            'snapshotCount' => (int) ($counts[$dataset] ?? 0),
+            'snapshotCount' => (int) ($summary[$dataset]['count'] ?? 0),
             'pendingCount' => $pending,
             'busy' => $busy,
             'currentAction' => $currentAction,
             'lastError' => $lastError,
             'lastMessage' => $lastMessage,
+            'lastSnapshotEpoch' => $lastSnapshotEpoch,
+            'lastSnapshotText' => ($lastSnapshotEpoch > 0) ? date('Y-m-d H:i:s', $lastSnapshotEpoch) : '',
+            'sendActivity' => $activeSend,
         ];
     }
 
@@ -359,6 +382,8 @@ function zfsas_sm_dataset_snapshots($dataset, &$error = null)
         return [];
     }
 
+    $queuedDeletes = zfsas_ops_delete_snapshot_map();
+    $sendPrefixBase = zfsas_sm_read_send_snapshot_prefix_base();
     $rows = [];
     foreach ($lines as $line) {
         $parts = preg_split('/\t+/', trim((string) $line));
@@ -376,12 +401,17 @@ function zfsas_sm_dataset_snapshots($dataset, &$error = null)
             continue;
         }
 
+        if (isset($queuedDeletes[$fullName])) {
+            continue;
+        }
+
         $createdEpoch = (int) $parts[1];
         $used = (int) $parts[2];
         $written = (int) $parts[3];
         $userrefs = (int) $parts[4];
         $holdTags = ($userrefs > 0) ? zfsas_sm_snapshot_hold_tags($fullName) : [];
         $sendProtected = zfsas_sm_is_send_protected_snapshot($snapshotName);
+        $sendScheduleJobId = $sendProtected ? zfsas_ops_schedule_job_id_from_snapshot_name($snapshotName, $sendPrefixBase) : '';
 
         $rows[] = [
             'dataset' => $dataset,
@@ -397,6 +427,7 @@ function zfsas_sm_dataset_snapshots($dataset, &$error = null)
             'held' => $userrefs > 0,
             'holdTags' => $holdTags,
             'sendProtected' => $sendProtected,
+            'sendScheduleJobId' => $sendScheduleJobId,
         ];
     }
 

@@ -1,0 +1,281 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+# shellcheck source=/dev/null
+source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
+
+WORKER_LOCK_DIR="${SEND_WORKER_RUNTIME_DIR}/worker-$$.lockdir"
+CURRENT_JOB_ID=""
+CURRENT_JOB_PATH=""
+
+cleanup() {
+  local exit_code="$?"
+  if [[ -n "$CURRENT_JOB_ID" ]]; then
+    release_job_claim "$CURRENT_JOB_ID"
+  fi
+  rm -rf "$WORKER_LOCK_DIR" >/dev/null 2>&1 || true
+  exit "$exit_code"
+}
+
+persist_job() {
+  job_write "$CURRENT_JOB_PATH" job
+}
+
+set_job_progress() {
+  local phase="$1"
+  local percent="$2"
+  local message="$3"
+  job[STATE]="running"
+  job[PHASE]="$phase"
+  job[PROGRESS_PERCENT]="$percent"
+  job[LAST_MESSAGE]="$message"
+  job[WORKER_PID]="$$"
+  persist_job
+}
+
+complete_job() {
+  local message="$1"
+  job[STATE]="complete"
+  job[PHASE]="complete"
+  job[PROGRESS_PERCENT]="100"
+  job[LAST_MESSAGE]="$message"
+  job[LAST_ERROR]=""
+  job[WORKER_PID]=""
+  persist_job
+}
+
+fail_current_job() {
+  local message="$1"
+  local now_epoch
+  now_epoch="$(date +%s)"
+  mark_job_failed_or_retry job "$message" "$now_epoch"
+  persist_job || true
+}
+
+prepare_scheduled_job_snapshot() {
+  local basename source_root include_children create_cmd previous_basename=""
+
+  source_root="$(job_get job SOURCE_ROOT)"
+  include_children="$(job_get job INCLUDE_CHILDREN 0)"
+
+  if [[ -n "$(job_get job SOURCE_SNAPSHOT)" ]]; then
+    if ! snapshot_exists "$(job_get job SOURCE_SNAPSHOT)"; then
+      return 1
+    fi
+    build_members_for_job job "$(job_get job SOURCE_SNAPSHOT_NAME)"
+    persist_job
+    return 0
+  fi
+
+  latest_checkpoint_basename_for_schedule "$(job_get job SCHEDULE_JOB_ID)" previous_basename
+  job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
+
+  basename="$(job_get job SNAPSHOT_PREFIX)$(date +%Y-%m-%d_%H-%M-%S)"
+  if [[ "$include_children" == "1" ]]; then
+    create_cmd=(zfs snapshot -r "${source_root}@${basename}")
+  else
+    create_cmd=(zfs snapshot "${source_root}@${basename}")
+  fi
+
+  log "Creating scheduled send checkpoint ${source_root}@${basename}"
+  "${create_cmd[@]}"
+
+  job[SOURCE_SNAPSHOT]="${source_root}@${basename}"
+  job[SOURCE_SNAPSHOT_NAME]="$basename"
+  job[SOURCE_SNAPSHOT_EPOCH]="$(date +%s)"
+  build_members_for_job job "$basename"
+  persist_job
+  return 0
+}
+
+prepare_manual_snapshot_job() {
+  local snapshot dataset destination
+  snapshot="$(job_get job SOURCE_SNAPSHOT)"
+  dataset="$(job_get job DATASET)"
+  destination="$(job_get job DESTINATION_ROOT)"
+
+  snapshot_exists "$snapshot" || return 1
+
+  job[SOURCE_ROOT]="$dataset"
+  job[DESTINATION_ROOT]="$destination"
+  job[INCLUDE_CHILDREN]="0"
+  job[MEMBER_COUNT]="1"
+  job[MEMBER_0_SOURCE]="$dataset"
+  job[MEMBER_0_DESTINATION]="$destination"
+  job[MEMBER_0_SNAPSHOT]="$snapshot"
+  persist_job
+  return 0
+}
+
+send_member_snapshot() {
+  local member_index="$1"
+  local member_count="$2"
+  local source_dataset destination snapshot basename latest_common cmd description progress
+
+  source_dataset="$(job_get job MEMBER_"${member_index}"_SOURCE)"
+  destination="$(job_get job MEMBER_"${member_index}"_DESTINATION)"
+  snapshot="$(job_get job MEMBER_"${member_index}"_SNAPSHOT)"
+  basename="${snapshot##*@}"
+
+  if [[ "$(job_get job JOB_MODE)" == "scheduled" ]]; then
+    ensure_destination_space_for_schedule_job "$(job_get job SCHEDULE_JOB_ID)" || return 1
+  fi
+
+  ensure_destination_parent_exists "$destination" || return 1
+
+  if snapshot_exists "${destination}@${basename}"; then
+    log "Destination already has ${destination}@${basename}; skipping receive for this member."
+    return 0
+  fi
+
+  progress=$((30 + (member_index * 40 / (member_count == 0 ? 1 : member_count))))
+  set_job_progress "sending" "$progress" "Sending ${source_dataset}@${basename} to ${destination}."
+
+  if [[ "$(job_get job JOB_MODE)" == "scheduled" ]]; then
+    latest_common=""
+    find_latest_common_basename_for_member "$source_dataset" "$destination" "$(job_get job SNAPSHOT_PREFIX)" latest_common
+    if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
+      description="Incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
+      cmd="zfs send -I $(printf '%q' "${source_dataset}@${latest_common}") $(printf '%q' "$snapshot") | zfs receive -uF $(printf '%q' "$destination")"
+    else
+      description="Full send ${snapshot} -> ${destination}"
+      cmd="zfs send $(printf '%q' "$snapshot") | zfs receive -uF $(printf '%q' "$destination")"
+    fi
+  else
+    latest_common=""
+    find_latest_common_snapshot_for_target "$source_dataset" "$destination" "$basename" latest_common
+    if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
+      description="Manual incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
+      cmd="zfs send -I $(printf '%q' "${source_dataset}@${latest_common}") $(printf '%q' "$snapshot") | zfs receive -uF $(printf '%q' "$destination")"
+    else
+      description="Manual full send ${snapshot} -> ${destination}"
+      cmd="zfs send $(printf '%q' "$snapshot") | zfs receive -uF $(printf '%q' "$destination")"
+    fi
+  fi
+
+  run_pipeline_with_status "$description" "$cmd"
+
+  set_job_progress "verifying" "$((progress + 15))" "Verifying ${destination}@${basename}."
+  snapshot_exists "${destination}@${basename}"
+}
+
+cleanup_previous_scheduled_checkpoint() {
+  local previous_basename source_root dest_root prefix current_basename
+  previous_basename="$(job_get job PREVIOUS_SNAPSHOT_NAME)"
+  current_basename="$(job_get job SOURCE_SNAPSHOT_NAME)"
+  [[ -n "$previous_basename" ]] || return 0
+  [[ "$previous_basename" != "$current_basename" ]] || return 0
+
+  source_root="$(job_get job SOURCE_ROOT)"
+  dest_root="$(job_get job DESTINATION_ROOT)"
+  prefix="$(job_get job SNAPSHOT_PREFIX)"
+
+  set_job_progress "cleanup" "95" "Removing previous send checkpoint ${previous_basename}."
+  dataset_exists "$source_root" && delete_checkpoint_basename_across_tree "$source_root" "$previous_basename" "$prefix" "source"
+  dataset_exists "$dest_root" && delete_checkpoint_basename_across_tree "$dest_root" "$previous_basename" "$prefix" "destination"
+}
+
+process_send_job() {
+  local mode member_count index
+  mode="$(job_get job JOB_MODE)"
+
+  set_job_progress "preparing" "15" "Preparing send job."
+
+  case "$mode" in
+    scheduled)
+      jobs_are_same_pool_overlap "$(job_get job SOURCE_ROOT)" "$(job_get job DESTINATION_ROOT)" && return 1
+      prepare_scheduled_job_snapshot || return 1
+      ;;
+    manual_snapshot)
+      jobs_are_same_pool_overlap "$(job_get job DATASET)" "$(job_get job DESTINATION_ROOT)" && return 1
+      prepare_manual_snapshot_job || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  set_job_progress "snapshot_created" "30" "Snapshot ready. Starting transfer."
+
+  member_count="$(job_get job MEMBER_COUNT 0)"
+  [[ "$member_count" =~ ^[0-9]+$ ]] || member_count=0
+  (( member_count > 0 )) || return 1
+
+  for ((index = 0; index < member_count; index++)); do
+    send_member_snapshot "$index" "$member_count" || return 1
+  done
+
+  if [[ "$mode" == "scheduled" ]]; then
+    cleanup_previous_scheduled_checkpoint || return 1
+  fi
+
+  complete_job "Send job completed successfully."
+  return 0
+}
+
+main() {
+  local now_epoch candidate_path
+  ensure_runtime_layout || exit 1
+  load_send_config
+  require_numeric_in_range "SEND_MAX_PARALLEL" "$SEND_MAX_PARALLEL" 1 8 || SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
+  parse_send_jobs_config
+
+  mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
+  trap cleanup EXIT INT TERM
+
+  exec >> "$LOG_FILE" 2>&1
+  log "Send worker $$ starting"
+
+  while :; do
+    now_epoch="$(date +%s)"
+    candidate_path=""
+    claim_next_send_job "$now_epoch" candidate_path || break
+    [[ -n "$candidate_path" ]] || break
+
+    # shellcheck disable=SC2034
+    declare -A job=()
+    job_load "$candidate_path" job || break
+    CURRENT_JOB_ID="$(job_get job JOB_ID)"
+    CURRENT_JOB_PATH="$candidate_path"
+
+    if ! acquire_job_claim "$CURRENT_JOB_ID"; then
+      CURRENT_JOB_ID=""
+      CURRENT_JOB_PATH=""
+      continue
+    fi
+
+    job_load "$candidate_path" job || {
+      release_job_claim "$CURRENT_JOB_ID"
+      CURRENT_JOB_ID=""
+      CURRENT_JOB_PATH=""
+      continue
+    }
+
+    if ! job_is_retry_ready "$(job_get job STATE)" "$(job_get job RETRY_AT 0)" "$now_epoch"; then
+      release_job_claim "$CURRENT_JOB_ID"
+      CURRENT_JOB_ID=""
+      CURRENT_JOB_PATH=""
+      continue
+    fi
+
+    log "Processing send job $(job_get job JOB_ID) ($(job_get job JOB_MODE))"
+    job[STATE]="running"
+    # shellcheck disable=SC2034
+    job[WORKER_PID]="$$"
+    persist_job
+
+    if process_send_job; then
+      :
+    else
+      fail_current_job "Send job failed during phase '$(job_get job PHASE)'. Review the send log and retry if needed."
+    fi
+
+    release_job_claim "$CURRENT_JOB_ID"
+    CURRENT_JOB_ID=""
+    CURRENT_JOB_PATH=""
+  done
+
+  log "Send worker $$ finished"
+}
+
+main "$@"
