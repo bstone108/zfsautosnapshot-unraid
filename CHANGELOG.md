@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.15.1 (Testing Branch Only)
+
+- Reissued the latest testing build under a new date-based version because some Unraid updater paths appear to sort `2026.04.14.10` as if it were older than `2026.04.14.9`, even though the manifest itself was correct.
+- Carries forward the `ZFS Send` dedicated save-handler fix from `2026.04.14.10` without additional code changes.
+
 ### 2026.04.14.10 (Testing Branch Only)
 
 - Reworked the `ZFS Send` save flow so `save-send-settings.php` now performs the save directly instead of including the full `send-settings.php` page file, which should eliminate the strange bare `1` response seen on some Unraid systems.
