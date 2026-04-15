@@ -11,6 +11,7 @@ $runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
 $saveApiUrl = "/plugins/{$pluginName}/php/save-settings.php";
 $sendSettingsUrl = "/plugins/{$pluginName}/php/send-settings.php";
 $snapshotManagerPageUrl = "/plugins/{$pluginName}/php/snapshot-manager-page.php";
+$snapshotManagerEmbeddedUrl = $snapshotManagerPageUrl . '?embedded=1';
 $recoveryToolsUrl = "/plugins/{$pluginName}/php/recovery-tools.php";
 $snapshotManagerListUrl = "/plugins/{$pluginName}/php/snapshot-manager-list.php";
 $snapshotManagerDatasetUrl = "/plugins/{$pluginName}/php/snapshot-manager-dataset.php";
@@ -1030,6 +1031,29 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   margin: 0 0 6px;
 }
 
+.zfsas-embedded-shell {
+  max-width: none;
+}
+
+.zfsas-embedded-shell .zfsas-help {
+  margin-bottom: 12px;
+}
+
+.zfsas-embedded-frame-wrap {
+  border: 1px solid var(--border-color, #d9e1ea);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--background-color, #fff);
+}
+
+.zfsas-embedded-frame {
+  display: block;
+  width: 100%;
+  min-height: 980px;
+  border: 0;
+  background: transparent;
+}
+
 .zfsas-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1844,13 +1868,19 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     </div>
 
     <div class="zfsas-section-panel" id="zfsas_panel_snapshot_manager" data-section-panel="snapshot-manager" role="tabpanel" aria-labelledby="zfsas_tab_snapshot_manager" hidden>
-      <div class="zfsas-card zfsas-placeholder-copy">
+      <div class="zfsas-card zfsas-embedded-shell">
         <h3 class="zfsas-placeholder-title">Snapshot Manager</h3>
         <div class="zfsas-help">
-          Snapshot Manager now has its own dedicated page so the main settings stay lightweight. The manager page shows dataset-level summary info first, then loads individual snapshot lists only when you choose a dataset to manage.
+          Snapshot Manager is available directly in this tab. It still stays lightweight by waiting to load the full dataset summary and drawer UI until you switch here.
         </div>
-        <div style="margin-top: 14px;">
-          <button type="button" class="btn btn-primary" id="open_snapshot_manager_page">Open Snapshot Manager</button>
+        <div class="zfsas-embedded-frame-wrap">
+          <iframe
+            id="snapshot_manager_frame"
+            class="zfsas-embedded-frame"
+            title="Snapshot Manager"
+            loading="lazy"
+            data-src="<?php echo h($snapshotManagerEmbeddedUrl); ?>"
+          ></iframe>
         </div>
       </div>
     </div>
@@ -1869,7 +1899,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
   var saveApiUrl = <?php echo json_encode($saveApiUrl); ?>;
   var sendSettingsUrl = <?php echo json_encode($sendSettingsUrl); ?>;
-  var snapshotManagerPageUrl = <?php echo json_encode($snapshotManagerPageUrl); ?>;
+  var snapshotManagerEmbeddedUrl = <?php echo json_encode($snapshotManagerEmbeddedUrl); ?>;
   var recoveryToolsUrl = <?php echo json_encode($recoveryToolsUrl); ?>;
   var snapshotManagerListUrl = <?php echo json_encode($snapshotManagerListUrl); ?>;
   var snapshotManagerDatasetUrl = <?php echo json_encode($snapshotManagerDatasetUrl); ?>;
@@ -1891,6 +1921,8 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var snapshotManagerLoading = false;
   var snapshotManagerCurrentDataset = '';
   var snapshotManagerSelection = {};
+  var snapshotManagerFrame = byId('snapshot_manager_frame');
+  var snapshotManagerFrameLoaded = false;
 
   function escapeHtml(text) {
     return String(text)
@@ -1918,6 +1950,38 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       panel.hidden = !isActive;
     });
 
+    if (sectionName === 'snapshot-manager') {
+      ensureSnapshotManagerEmbeddedLoaded();
+    }
+
+  }
+
+  function requestSnapshotManagerEmbeddedHeight() {
+    if (!snapshotManagerFrame || !snapshotManagerFrame.contentWindow) {
+      return;
+    }
+
+    try {
+      snapshotManagerFrame.contentWindow.postMessage({
+        type: 'zfsas:snapshot-manager:request-height'
+      }, window.location.origin);
+    } catch (error) {
+      // Ignore postMessage errors here.
+    }
+  }
+
+  function ensureSnapshotManagerEmbeddedLoaded() {
+    if (!snapshotManagerFrame || snapshotManagerFrameLoaded) {
+      return;
+    }
+
+    var src = snapshotManagerFrame.getAttribute('data-src') || snapshotManagerEmbeddedUrl;
+    if (!src) {
+      return;
+    }
+
+    snapshotManagerFrameLoaded = true;
+    snapshotManagerFrame.src = src;
   }
 
   function snapshotManagerDatasetRowsEl() {
@@ -3096,7 +3160,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
   var manualRunBtn = byId('manual_run');
   var openSendSettingsBtn = byId('open_send_settings');
-  var openSnapshotManagerPageBtn = byId('open_snapshot_manager_page');
   var openRecoveryToolsBtn = byId('open_recovery_tools');
   var manualRunBusy = false;
   if (openSendSettingsBtn) {
@@ -3105,17 +3168,33 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     });
   }
 
-  if (openSnapshotManagerPageBtn) {
-    openSnapshotManagerPageBtn.addEventListener('click', function () {
-      window.location.href = snapshotManagerPageUrl;
-    });
-  }
-
   if (openRecoveryToolsBtn) {
     openRecoveryToolsBtn.addEventListener('click', function () {
       window.location.href = recoveryToolsUrl;
     });
   }
+
+  if (snapshotManagerFrame) {
+    snapshotManagerFrame.addEventListener('load', function () {
+      requestSnapshotManagerEmbeddedHeight();
+    });
+  }
+
+  window.addEventListener('message', function (event) {
+    if (event.origin !== window.location.origin) {
+      return;
+    }
+
+    var data = event.data;
+    if (!data || data.type !== 'zfsas:snapshot-manager:height') {
+      return;
+    }
+
+    var nextHeight = parseInt(data.height, 10);
+    if (snapshotManagerFrame && !isNaN(nextHeight) && nextHeight > 0) {
+      snapshotManagerFrame.style.height = Math.max(nextHeight, 980) + 'px';
+    }
+  });
 
   var snapshotManagerRefreshBtn = byId('snapshot_manager_refresh');
   if (snapshotManagerRefreshBtn) {

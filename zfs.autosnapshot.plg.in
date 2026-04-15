@@ -3,7 +3,8 @@
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
 - Reworked scheduled `ZFS Send` into a persistent queue with retry handling, minute-based queue kicking, configurable parallel send workers, and shared queue visibility on the send page.
-- Moved `Snapshot Manager` onto its own dedicated page with lazy-loaded dataset details, dataset-level summary rows, and queue-aware manual snapshot operations.
+- Moved `Snapshot Manager` directly into its own tab on the main settings page while keeping dataset details lazy-loaded and manual snapshot operations queue-aware.
+- Hardened `ZFS Send` settings saves so the page uses the same broader CSRF detection and wrapped-response parsing style as the main settings page.
 - Added the first `Recovery Tools` page with scrub/corruption visibility plus a GUI-driven manual readability scan for cases where scrub detects damage but cannot name the bad file.
   </CHANGES>
 

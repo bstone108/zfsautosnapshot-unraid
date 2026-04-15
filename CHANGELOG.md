@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.14.5 (Testing Branch Only)
+
+- Moved `Snapshot Manager` back directly into the `Snapshot Manager` tab so it opens in place instead of sending you off to a separate page, while still lazy-loading the heavy manager UI only when you actually switch to that tab.
+- Hardened the `ZFS Send` settings save flow so it uses the same broader CSRF detection and wrapped-response parsing style as the main settings page, which makes custom theme interference less likely to show up as an invalid save response.
+
 ### 2026.04.14.4 (Testing Branch Only)
 
 - Reworked scheduled `ZFS Send` into a persistent queue with retry handling, minute-based queue kicking, configurable parallel send workers, child-dataset replication support, and a shared job/status view on the send page.

@@ -807,6 +807,21 @@ if ($isPostRequest) {
       }
     }
 
+    var metaSelectors = [
+      'meta[name="csrf_token"]',
+      'meta[name="csrf-token"]',
+      'meta[name="x-csrf-token"]'
+    ];
+    for (var k = 0; k < metaSelectors.length; k += 1) {
+      var metaTag = document.querySelector(metaSelectors[k]);
+      if (metaTag) {
+        var content = metaTag.getAttribute('content');
+        if (typeof content === 'string' && content.length > 0) {
+          return content;
+        }
+      }
+    }
+
     return '';
   }
 
@@ -866,6 +881,20 @@ if ($isPostRequest) {
       parseError = new Error('Unexpected JSON response shape.');
     } catch (error) {
       parseError = error;
+    }
+
+    var start = raw.indexOf('{');
+    var end = raw.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      var candidate = raw.slice(start, end + 1);
+      try {
+        var candidatePayload = JSON.parse(candidate);
+        if (isExpectedJsonPayload(candidatePayload)) {
+          return candidatePayload;
+        }
+      } catch (candidateError) {
+        parseError = parseError || candidateError;
+      }
     }
 
     throw parseError || new Error('Invalid JSON response.');
@@ -1130,16 +1159,21 @@ if ($isPostRequest) {
         return;
       }
 
-      if (xhr.status < 200 || xhr.status >= 300) {
-        onError(new Error('HTTP ' + xhr.status));
-        return;
-      }
-
       var payload;
       try {
         payload = parsePossiblyWrappedJson(xhr.responseText);
       } catch (parseError) {
-        onError(new Error('Invalid JSON response.'));
+        var raw = String(xhr.responseText || '').trim();
+        if (raw.charAt(0) === '<') {
+          onError(new Error('Request response was wrapped by the web UI or theme. Reload the page and try again.'));
+        } else {
+          onError(new Error('Invalid JSON response.'));
+        }
+        return;
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        onError(new Error((payload && payload.error) ? payload.error : ('HTTP ' + xhr.status)), payload);
         return;
       }
 

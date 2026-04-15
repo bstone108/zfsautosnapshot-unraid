@@ -4,6 +4,7 @@ $snapshotManagerListUrl = "/plugins/{$pluginName}/php/snapshot-manager-list.php"
 $snapshotManagerDatasetUrl = "/plugins/{$pluginName}/php/snapshot-manager-dataset.php";
 $snapshotManagerActionUrl = "/plugins/{$pluginName}/php/snapshot-manager-action.php";
 $mainSettingsUrl = '/Settings/ZFSAutoSnapshot?section=snapshot-manager';
+$embedded = isset($_GET['embedded']) && $_GET['embedded'] !== '0';
 ?>
 <!doctype html>
 <html lang="en">
@@ -23,6 +24,16 @@ $mainSettingsUrl = '/Settings/ZFSAutoSnapshot?section=snapshot-manager';
       max-width: 1320px;
       margin: 20px auto;
       padding: 0 18px 24px;
+    }
+
+    body.zfsas-sm-embedded {
+      background: transparent;
+    }
+
+    body.zfsas-sm-embedded .zfsas-sm-page {
+      max-width: none;
+      margin: 0;
+      padding: 0;
     }
 
     .zfsas-sm-header {
@@ -274,16 +285,18 @@ $mainSettingsUrl = '/Settings/ZFSAutoSnapshot?section=snapshot-manager';
     }
   </style>
 </head>
-<body>
+<body class="<?php echo $embedded ? 'zfsas-sm-embedded' : ''; ?>">
 <div class="zfsas-sm-page">
   <div class="zfsas-sm-header">
     <div>
       <h2 style="margin:0;">Snapshot Manager</h2>
       <div class="zfsas-sm-subtitle">Dataset-level snapshot summary, queue-aware manual actions, and one-off sends without loading every snapshot until you actually open a dataset.</div>
     </div>
+    <?php if (!$embedded) : ?>
     <div>
       <a class="btn" href="<?php echo htmlspecialchars($mainSettingsUrl, ENT_QUOTES, 'UTF-8'); ?>">Back to Main Settings</a>
     </div>
+    <?php endif; ?>
   </div>
 
   <div class="zfsas-sm-card">
@@ -369,13 +382,46 @@ $mainSettingsUrl = '/Settings/ZFSAutoSnapshot?section=snapshot-manager';
   var listUrl = <?php echo json_encode($snapshotManagerListUrl); ?>;
   var datasetUrl = <?php echo json_encode($snapshotManagerDatasetUrl); ?>;
   var actionUrl = <?php echo json_encode($snapshotManagerActionUrl); ?>;
+  var embeddedMode = <?php echo $embedded ? 'true' : 'false'; ?>;
   var refreshTimer = null;
   var currentDataset = '';
   var currentSnapshotMap = {};
   var currentSelection = {};
+  var parentHeightTimer = null;
 
   function byId(id) {
     return document.getElementById(id);
+  }
+
+  function postParentHeight() {
+    if (!embeddedMode || window.parent === window) {
+      return;
+    }
+
+    var height = Math.max(
+      document.documentElement ? document.documentElement.scrollHeight : 0,
+      document.body ? document.body.scrollHeight : 0
+    );
+
+    window.parent.postMessage({
+      type: 'zfsas:snapshot-manager:height',
+      height: height
+    }, window.location.origin);
+  }
+
+  function scheduleParentHeight() {
+    if (!embeddedMode || window.parent === window) {
+      return;
+    }
+
+    if (parentHeightTimer !== null) {
+      window.clearTimeout(parentHeightTimer);
+    }
+
+    parentHeightTimer = window.setTimeout(function () {
+      parentHeightTimer = null;
+      postParentHeight();
+    }, 40);
   }
 
   function escapeHtml(text) {
@@ -1028,6 +1074,26 @@ $mainSettingsUrl = '/Settings/ZFSAutoSnapshot?section=snapshot-manager';
 
   loadDatasetList();
   refreshTimer = window.setInterval(loadDatasetList, 5000);
+
+  if (embeddedMode && window.parent !== window) {
+    var heightObserver = new MutationObserver(function () {
+      scheduleParentHeight();
+    });
+    heightObserver.observe(document.body, {childList: true, subtree: true, attributes: true});
+
+    window.addEventListener('resize', scheduleParentHeight);
+    window.addEventListener('message', function (event) {
+      if (event.origin !== window.location.origin) {
+        return;
+      }
+
+      if (event.data && event.data.type === 'zfsas:snapshot-manager:request-height') {
+        scheduleParentHeight();
+      }
+    });
+
+    scheduleParentHeight();
+  }
 })();
 </script>
 </body>
