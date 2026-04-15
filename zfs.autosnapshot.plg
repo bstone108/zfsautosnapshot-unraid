@@ -1,7 +1,7 @@
 <?xml version='1.0' standalone='yes'?>
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.14.4" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.14.4 (2026-04-14)
+### 2026.04.14.4 (2026-04-15)
 - Reworked scheduled `ZFS Send` into a persistent queue with retry handling, minute-based queue kicking, configurable parallel send workers, and shared queue visibility on the send page.
 - Moved `Snapshot Manager` onto its own dedicated page with lazy-loaded dataset details, dataset-level summary rows, and queue-aware manual snapshot operations.
 - Added the first `Recovery Tools` page with scrub/corruption visibility plus a GUI-driven manual readability scan for cases where scrub detects damage but cannot name the bad file.
@@ -15,7 +15,7 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.14.4-noarch-1.txz" Min="6.12.0">
     <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.14.4-noarch-1.txz</URL>
-    <MD5>6f9c22b9b48d20e1b0213613fedb7918</MD5>
+    <MD5>bf7e13b8f71242f4e6341028bc31db94</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -26,7 +26,7 @@ PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
 PKG_FILE="zfs-autosnapshot-2026.04.14.4-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="6f9c22b9b48d20e1b0213613fedb7918"
+PKG_MD5="bf7e13b8f71242f4e6341028bc31db94"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
