@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.14.7 (Testing Branch Only)
+
+- Replaced the `ZFS Send` save endpoint with a real dedicated save handler instead of the old thin include wrapper, which should stop the send settings button from falling back into a full HTML page response and throwing `Invalid save response`.
+
 ### 2026.04.14.6 (Testing Branch Only)
 
 - Fixed the embedded `Snapshot Manager` drawer so it stays hidden until you actually click `Manage Snapshots`, and the close button now reliably hides the drawer again even on theme-customized systems.
