@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.14.10 (Testing Branch Only)
+
+- Reworked the `ZFS Send` save flow so `save-send-settings.php` now performs the save directly instead of including the full `send-settings.php` page file, which should eliminate the strange bare `1` response seen on some Unraid systems.
+
 ### 2026.04.14.9 (Testing Branch Only)
 
 - Changed the `ZFS Send` save button to post its AJAX request directly back to `send-settings.php`, which bypasses the flaky dedicated save route that was still returning a bare `1` on some systems instead of the marked JSON response the page expects.

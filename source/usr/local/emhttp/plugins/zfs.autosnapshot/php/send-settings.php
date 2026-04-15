@@ -3,7 +3,7 @@ $pluginName = 'zfs.autosnapshot';
 $configDir = "/boot/config/plugins/{$pluginName}";
 $configFile = "{$configDir}/zfs_send.conf";
 $syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
-$saveApiUrl = "/plugins/{$pluginName}/php/send-settings.php";
+$saveApiUrl = "/plugins/{$pluginName}/php/save-send-settings.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-send-now.php";
 $queueStatusApiUrl = "/plugins/{$pluginName}/php/send-queue-status.php";
 $queueActionApiUrl = "/plugins/{$pluginName}/php/send-queue-action.php";
@@ -13,211 +13,7 @@ require_once __DIR__ . '/response-helpers.php';
 require_once __DIR__ . '/send-helpers.php';
 require_once __DIR__ . '/send-queue-helpers.php';
 
-$defaults = [
-    'SEND_SNAPSHOT_PREFIX' => 'zfs-send-',
-    'SEND_MAX_PARALLEL' => '1',
-    'SEND_JOBS' => '',
-];
-
-function zfsas_send_is_ajax_request()
-{
-    if (($_POST['ajax'] ?? '') === 'save') {
-        return true;
-    }
-
-    $requestedWith = $_SERVER['HTTP_X_REQUESTED_WITH'] ?? '';
-    return is_string($requestedWith) && strcasecmp($requestedWith, 'XMLHttpRequest') === 0;
-}
-
-function zfsas_send_current_page_url($fallback)
-{
-    $requestUri = (string) ($_SERVER['REQUEST_URI'] ?? '');
-    if ($requestUri === '') {
-        return $fallback;
-    }
-
-    $parts = parse_url($requestUri);
-    if (!is_array($parts)) {
-        return $fallback;
-    }
-
-    $path = (string) ($parts['path'] ?? '');
-    if ($path === '') {
-        return $fallback;
-    }
-
-    $query = [];
-    if (isset($parts['query'])) {
-        parse_str((string) $parts['query'], $query);
-    }
-    unset($query['saved']);
-
-    $queryString = http_build_query($query);
-    return ($queryString === '') ? $path : ($path . '?' . $queryString);
-}
-
-function zfsas_send_render_jobs_string($jobs)
-{
-    $parts = [];
-    foreach ($jobs as $job) {
-        $parts[] = implode('|', [
-            $job['id'],
-            $job['source'],
-            $job['destination'],
-            $job['frequency'],
-            $job['threshold'],
-            $job['children'] ?? '0',
-        ]);
-    }
-
-    return implode(';', $parts);
-}
-
-function zfsas_send_collect_submitted_jobs($post, &$errors)
-{
-    $jobs = [];
-    $seenJobIds = [];
-
-    $jobIds = (isset($post['job_id']) && is_array($post['job_id'])) ? $post['job_id'] : [];
-    $sources = (isset($post['job_source']) && is_array($post['job_source'])) ? $post['job_source'] : [];
-    $destinations = (isset($post['job_destination']) && is_array($post['job_destination'])) ? $post['job_destination'] : [];
-    $frequencies = (isset($post['job_frequency']) && is_array($post['job_frequency'])) ? $post['job_frequency'] : [];
-    $thresholds = (isset($post['job_threshold']) && is_array($post['job_threshold'])) ? $post['job_threshold'] : [];
-    $childrenFlags = (isset($post['job_children']) && is_array($post['job_children'])) ? $post['job_children'] : [];
-    $removes = (isset($post['job_remove']) && is_array($post['job_remove'])) ? $post['job_remove'] : [];
-
-    foreach ($sources as $index => $sourceRaw) {
-        if (isset($removes[$index]) && (string) $removes[$index] === '1') {
-            continue;
-        }
-
-        $source = zfsas_send_trim($sourceRaw);
-        $destination = zfsas_send_trim($destinations[$index] ?? '');
-        $frequency = zfsas_send_normalize_frequency($frequencies[$index] ?? '');
-        $threshold = zfsas_send_normalize_threshold($thresholds[$index] ?? '');
-        $children = zfsas_send_normalize_children_flag($childrenFlags[$index] ?? '0');
-        $jobId = zfsas_send_trim($jobIds[$index] ?? '');
-
-        if ($source === '' && $destination === '') {
-            continue;
-        }
-
-        if (!zfsas_send_is_valid_dataset_name($source)) {
-            $errors[] = "Invalid source dataset '{$source}'.";
-            continue;
-        }
-
-        if (!zfsas_send_is_valid_dataset_name($destination)) {
-            $errors[] = "Invalid destination dataset '{$destination}'.";
-            continue;
-        }
-
-        if ($source === $destination) {
-            $errors[] = "Source and destination must be different for '{$source}'.";
-            continue;
-        }
-
-        if (zfsas_send_dataset_pool_name($source) === zfsas_send_dataset_pool_name($destination)
-            && zfsas_send_paths_overlap($source, $destination)
-        ) {
-            $errors[] = "Source '{$source}' and destination '{$destination}' overlap on the same pool.";
-            continue;
-        }
-
-        if (strpos($destination, '/') === false) {
-            $errors[] = "Destination '{$destination}' must include a dataset below a pool root.";
-            continue;
-        }
-
-        if ($frequency === null) {
-            $errors[] = "Invalid frequency for '{$source}' -> '{$destination}'.";
-            continue;
-        }
-
-        if ($threshold === null) {
-            $errors[] = "Destination free-space target for '{$source}' -> '{$destination}' is invalid.";
-            continue;
-        }
-
-        if ($jobId === '') {
-            $jobId = zfsas_send_job_id($source, $destination);
-        }
-
-        if (isset($seenJobIds[$jobId])) {
-            $errors[] = "Duplicate ZFS send job '{$source}' -> '{$destination}' detected.";
-            continue;
-        }
-
-        $jobs[] = [
-            'id' => $jobId,
-            'source' => $source,
-            'destination' => $destination,
-            'destination_pool' => zfsas_send_dataset_pool_name($destination),
-            'frequency' => $frequency,
-            'frequency_label' => zfsas_send_frequency_label($frequency),
-            'threshold' => $threshold,
-            'children' => $children,
-        ];
-        $seenJobIds[$jobId] = true;
-    }
-
-    $newSource = zfsas_send_trim($post['new_job_source'] ?? '');
-    $newDestination = zfsas_send_trim($post['new_job_destination'] ?? '');
-    $newFrequencyRaw = zfsas_send_trim($post['new_job_frequency'] ?? '');
-    $newThresholdRaw = zfsas_send_trim($post['new_job_threshold'] ?? '');
-    $newChildrenRaw = zfsas_send_trim($post['new_job_children'] ?? '0');
-
-    if ($newSource !== '' || $newDestination !== '' || $newFrequencyRaw !== '' || $newThresholdRaw !== '' || $newChildrenRaw !== '') {
-        $newFrequency = zfsas_send_normalize_frequency($newFrequencyRaw);
-        $newThreshold = zfsas_send_normalize_threshold($newThresholdRaw);
-        $newChildren = zfsas_send_normalize_children_flag($newChildrenRaw);
-
-        if (!zfsas_send_is_valid_dataset_name($newSource)) {
-            $errors[] = 'New ZFS send source dataset is invalid.';
-        } elseif (!zfsas_send_is_valid_dataset_name($newDestination)) {
-            $errors[] = 'New ZFS send destination dataset is invalid.';
-        } elseif ($newSource === $newDestination) {
-            $errors[] = 'New ZFS send source and destination must be different.';
-        } elseif (zfsas_send_dataset_pool_name($newSource) === zfsas_send_dataset_pool_name($newDestination)
-            && zfsas_send_paths_overlap($newSource, $newDestination)
-        ) {
-            $errors[] = 'New ZFS send source and destination overlap on the same pool.';
-        } elseif (strpos($newDestination, '/') === false) {
-            $errors[] = 'New ZFS send destination must include a dataset below a pool root.';
-        } elseif ($newFrequency === null) {
-            $errors[] = 'New ZFS send frequency is invalid.';
-        } elseif ($newThreshold === null) {
-            $errors[] = 'New ZFS send destination free-space target is invalid.';
-        } else {
-            $newJobId = zfsas_send_job_id($newSource, $newDestination);
-            if (isset($seenJobIds[$newJobId])) {
-                $errors[] = 'This ZFS send source/destination pair already exists.';
-            } else {
-                $jobs[] = [
-                    'id' => $newJobId,
-                    'source' => $newSource,
-                    'destination' => $newDestination,
-                    'destination_pool' => zfsas_send_dataset_pool_name($newDestination),
-                    'frequency' => $newFrequency,
-                    'frequency_label' => zfsas_send_frequency_label($newFrequency),
-                    'threshold' => $newThreshold,
-                    'children' => $newChildren,
-                ];
-            }
-        }
-    }
-
-    usort($jobs, function ($a, $b) {
-        $sourceCompare = strnatcasecmp((string) ($a['source'] ?? ''), (string) ($b['source'] ?? ''));
-        if ($sourceCompare !== 0) {
-            return $sourceCompare;
-        }
-
-        return strnatcasecmp((string) ($a['destination'] ?? ''), (string) ($b['destination'] ?? ''));
-    });
-
-    return $jobs;
-}
+$defaults = zfsas_send_defaults();
 
 $isPostRequest = (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST');
 $isAjaxSaveRequest = ((defined('ZFSAS_FORCE_SEND_AJAX_SAVE') && ZFSAS_FORCE_SEND_AJAX_SAVE) || ($isPostRequest && zfsas_send_is_ajax_request()));
@@ -243,49 +39,18 @@ foreach ($parseWarnings as $warning) {
 }
 
 if ($isPostRequest) {
-    $submitted = $config;
-    $submitted['SEND_SNAPSHOT_PREFIX'] = zfsas_send_trim($_POST['send_snapshot_prefix'] ?? $submitted['SEND_SNAPSHOT_PREFIX']);
-    $submitted['SEND_MAX_PARALLEL'] = zfsas_send_normalize_parallel_limit($_POST['send_max_parallel'] ?? $submitted['SEND_MAX_PARALLEL']);
-    $submittedJobs = zfsas_send_collect_submitted_jobs($_POST, $errors);
-    $formJobs = $submittedJobs;
+    $saveResult = zfsas_send_handle_save_request($_POST, $configDir, $configFile, $syncScript, $config, $defaultReturnUrl);
+    $config = $saveResult['config'];
+    $formJobs = $saveResult['formJobs'];
+    $errors = $saveResult['errors'];
+    $notices = array_merge($notices, $saveResult['notices']);
 
-    if ($submitted['SEND_SNAPSHOT_PREFIX'] === '') {
-        $errors[] = 'Send snapshot prefix cannot be empty.';
-    } elseif (strpos($submitted['SEND_SNAPSHOT_PREFIX'], '@') !== false) {
-        $errors[] = 'Send snapshot prefix cannot contain @.';
-    } elseif (preg_match('/^[A-Za-z0-9._:-]+$/', $submitted['SEND_SNAPSHOT_PREFIX']) !== 1) {
-        $errors[] = 'Send snapshot prefix can only contain letters, numbers, dot, underscore, colon, and dash.';
-    }
-
-    if (empty($errors)) {
-        $submitted['SEND_JOBS'] = zfsas_send_render_jobs_string($submittedJobs);
-        $config = $submitted;
-
-        if (!is_dir($configDir)) {
-            @mkdir($configDir, 0775, true);
-        }
-
-        $written = @file_put_contents($configFile, zfsas_send_render_config($config));
-        if ($written === false) {
-            $errors[] = "Unable to write config file: {$configFile}";
-        } else {
-            @chmod($configFile, 0644);
-            $syncOutput = [];
-            $syncExit = 0;
-            @exec(escapeshellcmd($syncScript) . ' 2>&1', $syncOutput, $syncExit);
-
-            if ($syncExit !== 0) {
-                $errors[] = 'Settings saved, but failed to apply scheduler: ' . implode(' | ', $syncOutput);
-            } else {
-                $notices[] = 'ZFS send settings saved and schedule applied.';
-
-                if (!$isAjaxSaveRequest) {
-                    $returnTarget = zfsas_normalize_return_url($_POST['return_to'] ?? '', $defaultReturnUrl);
-                    $separator = (strpos($returnTarget, '?') === false) ? '?' : '&';
-                    zfsas_send_redirect_page($returnTarget . $separator . 'saved=1', 'ZFS send settings saved. Returning to the send settings page...');
-                }
-            }
-        }
+    if ($saveResult['saved'] && !$isAjaxSaveRequest) {
+        $separator = (strpos($saveResult['returnTarget'], '?') === false) ? '?' : '&';
+        zfsas_send_redirect_page(
+            $saveResult['returnTarget'] . $separator . 'saved=1',
+            'ZFS send settings saved. Returning to the send settings page...'
+        );
     }
 
     if ($isAjaxSaveRequest) {

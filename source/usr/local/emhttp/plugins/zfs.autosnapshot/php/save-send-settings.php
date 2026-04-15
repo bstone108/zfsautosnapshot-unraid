@@ -3,6 +3,7 @@ ob_start();
 @ini_set('display_errors', '0');
 
 require_once __DIR__ . '/response-helpers.php';
+require_once __DIR__ . '/send-helpers.php';
 
 $defaultReturnUrl = '/plugins/zfs.autosnapshot/php/send-settings.php';
 $requestMethod = strtoupper($_SERVER['REQUEST_METHOD'] ?? '');
@@ -102,12 +103,36 @@ if ($expectsJson) {
     $_SERVER['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest';
 }
 
-require __DIR__ . '/send-settings.php';
+$pluginName = 'zfs.autosnapshot';
+$configDir = "/boot/config/plugins/{$pluginName}";
+$configFile = "{$configDir}/zfs_send.conf";
+$syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
+$defaultConfig = zfsas_send_defaults();
+$config = zfsas_send_parse_config_file($configFile, $defaultConfig);
+$saveResult = zfsas_send_handle_save_request($_POST, $configDir, $configFile, $syncScript, $config, $returnUrl);
 
 if ($expectsJson) {
     zfsas_emit_marked_json([
-        'ok' => false,
-        'errors' => ['ZFS send settings handler returned unexpectedly. Reload the page and try again.'],
-        'notices' => [],
-    ], 500);
+        'ok' => empty($saveResult['errors']),
+        'errors' => array_values($saveResult['errors']),
+        'notices' => array_values($saveResult['notices']),
+        'jobCount' => count($saveResult['formJobs']),
+    ], empty($saveResult['errors']) ? 200 : 400);
 }
+
+if ($saveResult['saved']) {
+    $separator = (strpos($saveResult['returnTarget'], '?') === false) ? '?' : '&';
+    zfsas_send_redirect_page(
+        $saveResult['returnTarget'] . $separator . 'saved=1',
+        'ZFS send settings saved. Returning to the send settings page...'
+    );
+}
+
+zfsas_send_standalone_error_page(
+    'ZFS Send Save Failed',
+    count($saveResult['errors']) > 0
+        ? implode(' ', array_values($saveResult['errors']))
+        : 'The ZFS send save request failed unexpectedly. Reload the send settings page and try again.',
+    $saveResult['returnTarget'],
+    400
+);
