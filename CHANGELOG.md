@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.14.9 (Testing Branch Only)
+
+- Changed the `ZFS Send` save button to post its AJAX request directly back to `send-settings.php`, which bypasses the flaky dedicated save route that was still returning a bare `1` on some systems instead of the marked JSON response the page expects.
+
 ### 2026.04.14.8 (Testing Branch Only)
 
 - Fixed a JavaScript regression on the `ZFS Send` page where the queue/status loader was calling a missing `requestJson()` helper, which caused the page script to throw during startup instead of running cleanly.
