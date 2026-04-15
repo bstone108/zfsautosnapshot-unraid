@@ -1141,6 +1141,40 @@ if ($isPostRequest) {
     xhr.send(params.toString());
   }
 
+  function requestJson(url, onSuccess, onError) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', url, true);
+    xhr.setRequestHeader('Accept', 'application/json');
+
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) {
+        return;
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        onError(new Error('HTTP ' + xhr.status));
+        return;
+      }
+
+      try {
+        onSuccess(parsePossiblyWrappedJson(xhr.responseText));
+      } catch (error) {
+        var raw = String(xhr.responseText || '').trim();
+        if (raw.charAt(0) === '<') {
+          onError(new Error('Request response was wrapped by the web UI or theme. Reload the page and try again.'));
+        } else {
+          onError(new Error('Invalid JSON response.'));
+        }
+      }
+    };
+
+    xhr.onerror = function () {
+      onError(new Error('Network error.'));
+    };
+
+    xhr.send();
+  }
+
   function requestJsonPost(url, bodyParams, onSuccess, onError) {
     var xhr = new XMLHttpRequest();
     xhr.open('POST', url, true);

@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.14.8 (Testing Branch Only)
+
+- Fixed a JavaScript regression on the `ZFS Send` page where the queue/status loader was calling a missing `requestJson()` helper, which caused the page script to throw during startup instead of running cleanly.
+
 ### 2026.04.14.7 (Testing Branch Only)
 
 - Replaced the `ZFS Send` save endpoint with a real dedicated save handler instead of the old thin include wrapper, which should stop the send settings button from falling back into a full HTML page response and throwing `Invalid save response`.
