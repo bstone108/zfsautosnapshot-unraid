@@ -1,7 +1,9 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.16.06" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.16.07" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.16.06 (2026-04-16)
+### 2026.04.16.07 (2026-04-16)
+- Reworked recursive `ZFS Send` queue handling so after the initial scheduled-send prep finishes, child datasets now fan out into their own top-down queue items for the actual transfer work and their own follow-up zero-change cleanup steps instead of appearing as one giant queue row.
+- Changed successful queued send and cleanup items to disappear automatically about `5` seconds after completion, while unrecoverable failed send items now stay visible with both `Retry` and `Confirm Clear` controls so you can decide when to remove them from the queue.
 - Removed `ZFS Send` schedule options shorter than `6` hours so the scheduler now only offers `6h`, `12h`, `1d`, and `7d`, which better matches how long real replication runs can take.
 - Added compatibility handling so older saved `ZFS Send` jobs that were set to `15m`, `30m`, or `1h` are automatically upgraded to `6h` instead of being dropped outright.
 - Hardened the `Dataset Migrator` folder-to-container mapping so it now canonicalizes Docker mount source paths and keeps migration batching strictly confined to the selected dataset root, preventing containers with other host paths from pulling unrelated locations into the migration plan.
@@ -28,9 +30,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.16.06-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.16.06-noarch-1.txz</URL>
-    <MD5>ab7c1af78a31e299edb550c3b290f3f0</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.16.07-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.16.07-noarch-1.txz</URL>
+    <MD5>68c84361cb49a8b6ce3f6533231e0a3d</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -38,10 +40,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.04.16.06-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.04.16.07-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="ab7c1af78a31e299edb550c3b290f3f0"
+PKG_MD5="68c84361cb49a8b6ce3f6533231e0a3d"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
