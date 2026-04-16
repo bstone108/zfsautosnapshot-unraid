@@ -38,9 +38,9 @@ NEEDS_CONTAINER_RECOVERY=0
 TOTAL_FOLDERS=0
 COMPLETED_FOLDERS=0
 
-LAST_RUNNING_CONTAINER_NAMES=""
-
 DATASET=""
+CURRENT_BATCH_FOLDERS=""
+CURRENT_BATCH_CONTAINERS=""
 
 # Folder state arrays
 FOLDER_NAMES=()
@@ -50,22 +50,75 @@ FOLDER_SIZE_BYTES=()
 FOLDER_STATES=()
 FOLDER_PROGRESS=()
 FOLDER_MESSAGES=()
+FOLDER_CONTAINER_INDEXES=()
 
 # Container state arrays
 CONTAINER_IDS=()
 CONTAINER_NAMES=()
 CONTAINER_RESTART_NAMES=()
 CONTAINER_RESTART_MAXS=()
+CONTAINER_NETWORK_MODES=()
+CONTAINER_FOLDER_INDEXES=()
+CONTAINER_DEPENDENCY_REFS=()
+CONTAINER_DEPENDENCY_INDEXES=()
 CONTAINER_WAS_RUNNING=()
+CONTAINER_CURRENTLY_RUNNING=()
 CONTAINER_POLICY_DISABLED=()
 CONTAINER_START_STATES=()
 CONTAINER_LAST_ERRORS=()
+
+declare -A FOLDER_INDEX_BY_NAME=()
+declare -A CONTAINER_INDEX_BY_NAME=()
+declare -A CONTAINER_INDEX_BY_ID=()
 
 trim() {
   local s="$1"
   s="${s#"${s%%[![:space:]]*}"}"
   s="${s%"${s##*[![:space:]]}"}"
   printf '%s' "$s"
+}
+
+list_has_word() {
+  local list="$1"
+  local value="$2"
+  local item
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    [[ "$item" == "$value" ]] && return 0
+  done <<< "$list"
+  return 1
+}
+
+list_append_unique() {
+  local list="$1"
+  local value="$2"
+  if [[ -z "$value" ]]; then
+    printf '%s' "$list"
+    return 0
+  fi
+  if list_has_word "$list" "$value"; then
+    printf '%s' "$list"
+    return 0
+  fi
+  if [[ -n "$list" ]]; then
+    printf '%s\n%s' "$list" "$value"
+    return 0
+  fi
+  printf '%s' "$value"
+}
+
+list_remove_word() {
+  local list="$1"
+  local value="$2"
+  local item result=""
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    if [[ "$item" == "$value" ]]; then
+      continue
+    fi
+    result="$(list_append_unique "$result" "$item")"
+  done <<< "$list"
+  printf '%s' "$result"
 }
 
 log() {
@@ -589,27 +642,236 @@ docker_daemon_is_running() {
 
 container_inspect_line() {
   local container_id="$1"
-  docker inspect -f '{{.Id}}|{{.Name}}|{{.HostConfig.RestartPolicy.Name}}|{{.HostConfig.RestartPolicy.MaximumRetryCount}}' "$container_id" 2>/dev/null || true
+  docker inspect -f '{{.Id}}|{{.Name}}|{{.HostConfig.RestartPolicy.Name}}|{{.HostConfig.RestartPolicy.MaximumRetryCount}}|{{.HostConfig.NetworkMode}}|{{range $i, $v := .HostConfig.VolumesFrom}}{{if $i}},{{end}}{{$v}}{{end}}|{{index .Config.Labels "com.docker.compose.depends_on"}}' "$container_id" 2>/dev/null || true
+}
+
+container_mount_sources() {
+  local container_id="$1"
+  docker inspect -f '{{range .Mounts}}{{println .Source}}{{end}}' "$container_id" 2>/dev/null || true
+}
+
+container_is_running_by_id() {
+  local container_id="$1"
+  [[ "$(docker inspect -f '{{.State.Running}}' "$container_id" 2>/dev/null || printf 'false')" == "true" ]]
+}
+
+normalize_container_ref() {
+  local ref
+  ref="$(trim "$1")"
+  ref="${ref#/}"
+  if [[ "$ref" == "<no value>" || "$ref" == "null" ]]; then
+    printf ''
+    return 0
+  fi
+  ref="${ref%%:*}"
+  printf '%s' "$ref"
+}
+
+parse_container_dependency_refs() {
+  local network_mode="$1"
+  local volumes_from="$2"
+  local depends_label="$3"
+  local refs="" item ref
+
+  if [[ "$network_mode" == container:* ]]; then
+    ref="$(normalize_container_ref "${network_mode#container:}")"
+    refs="$(list_append_unique "$refs" "$ref")"
+  fi
+
+  IFS=',' read -r -a _volumes_from_parts <<< "$volumes_from"
+  for item in "${_volumes_from_parts[@]}"; do
+    ref="$(normalize_container_ref "$item")"
+    refs="$(list_append_unique "$refs" "$ref")"
+  done
+
+  depends_label="${depends_label//,/ }"
+  depends_label="${depends_label//[/ }"
+  depends_label="${depends_label//]/ }"
+  depends_label="${depends_label//\"/ }"
+  depends_label="${depends_label//;/ }"
+  depends_label="${depends_label//=/ }"
+  for item in $depends_label; do
+    ref="$(normalize_container_ref "$item")"
+    refs="$(list_append_unique "$refs" "$ref")"
+  done
+
+  printf '%s' "$refs"
+}
+
+folder_indexes_for_mount_source() {
+  local source="$1"
+  local rest folder_name list="" folder_index
+
+  source="$(trim "$source")"
+  [[ -n "$source" ]] || {
+    printf ''
+    return 0
+  }
+
+  if [[ "$source" == "$ACTIVE_MOUNTPOINT" ]]; then
+    for folder_index in "${!FOLDER_NAMES[@]}"; do
+      list="$(list_append_unique "$list" "$folder_index")"
+    done
+    printf '%s' "$list"
+    return 0
+  fi
+
+  case "$source" in
+    "$ACTIVE_MOUNTPOINT"/*)
+      rest="${source#"$ACTIVE_MOUNTPOINT"/}"
+      folder_name="${rest%%/*}"
+      if [[ -n "${FOLDER_INDEX_BY_NAME[$folder_name]+x}" ]]; then
+        list="$(list_append_unique "$list" "${FOLDER_INDEX_BY_NAME[$folder_name]}")"
+      fi
+      ;;
+  esac
+
+  printf '%s' "$list"
+}
+
+container_folder_indexes_from_mounts() {
+  local container_id="$1"
+  local source list="" folder_indexes folder_index
+  while IFS= read -r source; do
+    folder_indexes="$(folder_indexes_for_mount_source "$source")"
+    for folder_index in $folder_indexes; do
+      list="$(list_append_unique "$list" "$folder_index")"
+    done
+  done < <(container_mount_sources "$container_id")
+  printf '%s' "$list"
+}
+
+container_has_pending_folders() {
+  local container_index="$1"
+  local folder_index
+  for folder_index in ${CONTAINER_FOLDER_INDEXES[$container_index]}; do
+    if [[ "${FOLDER_STATES[$folder_index]}" != "complete" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_container_dependencies() {
+  local container_index ref dependency_index dependencies
+  for container_index in "${!CONTAINER_IDS[@]}"; do
+    dependencies=""
+    for ref in ${CONTAINER_DEPENDENCY_REFS[$container_index]}; do
+      dependency_index=""
+      if [[ -n "${CONTAINER_INDEX_BY_ID[$ref]+x}" ]]; then
+        dependency_index="${CONTAINER_INDEX_BY_ID[$ref]}"
+      elif [[ -n "${CONTAINER_INDEX_BY_NAME[$ref]+x}" ]]; then
+        dependency_index="${CONTAINER_INDEX_BY_NAME[$ref]}"
+      fi
+
+      if [[ -n "$dependency_index" && "$dependency_index" != "$container_index" ]]; then
+        dependencies="$(list_append_unique "$dependencies" "$dependency_index")"
+      fi
+    done
+    CONTAINER_DEPENDENCY_INDEXES[container_index]="$dependencies"
+  done
 }
 
 record_running_containers() {
-  local running_ids=() id inspect name policy max_retry index
+  local running_ids=() id inspect name policy max_retry network_mode volumes_from depends_label folder_indexes dependency_refs
+  local container_index folder_index
   mapfile -t running_ids < <(docker ps -q 2>/dev/null || true)
   for id in "${running_ids[@]}"; do
     [[ -n "$id" ]] || continue
     inspect="$(container_inspect_line "$id")"
     [[ -n "$inspect" ]] || continue
-    IFS='|' read -r id name policy max_retry <<< "$inspect"
+    IFS='|' read -r id name policy max_retry network_mode volumes_from depends_label <<< "$inspect"
+
+    folder_indexes="$(container_folder_indexes_from_mounts "$id")"
+    [[ -n "$folder_indexes" ]] || continue
+
+    dependency_refs="$(parse_container_dependency_refs "$network_mode" "$volumes_from" "$depends_label")"
+    container_index="${#CONTAINER_IDS[@]}"
     CONTAINER_IDS+=("$id")
     CONTAINER_NAMES+=("${name#/}")
     CONTAINER_RESTART_NAMES+=("${policy:-no}")
     CONTAINER_RESTART_MAXS+=("${max_retry:-0}")
+    CONTAINER_NETWORK_MODES+=("${network_mode:-default}")
+    CONTAINER_FOLDER_INDEXES+=("$folder_indexes")
+    CONTAINER_DEPENDENCY_REFS+=("$dependency_refs")
+    CONTAINER_DEPENDENCY_INDEXES+=("")
     CONTAINER_WAS_RUNNING+=("1")
+    CONTAINER_CURRENTLY_RUNNING+=("1")
     CONTAINER_POLICY_DISABLED+=("0")
-    CONTAINER_START_STATES+=("queued_for_stop")
+    CONTAINER_START_STATES+=("running")
     CONTAINER_LAST_ERRORS+=("")
+    CONTAINER_INDEX_BY_NAME["${name#/}"]="$container_index"
+    CONTAINER_INDEX_BY_ID["$id"]="$container_index"
+
+    for folder_index in $folder_indexes; do
+      FOLDER_CONTAINER_INDEXES[folder_index]="$(list_append_unique "${FOLDER_CONTAINER_INDEXES[$folder_index]}" "$container_index")"
+    done
   done
+
+  resolve_container_dependencies
   write_status_file
+}
+
+container_related_pending_indexes() {
+  local container_index="$1"
+  local related="" dependency_index other_index
+
+  for dependency_index in ${CONTAINER_DEPENDENCY_INDEXES[$container_index]}; do
+    if container_has_pending_folders "$dependency_index"; then
+      related="$(list_append_unique "$related" "$dependency_index")"
+    fi
+  done
+
+  for other_index in "${!CONTAINER_IDS[@]}"; do
+    for dependency_index in ${CONTAINER_DEPENDENCY_INDEXES[$other_index]}; do
+      if [[ "$dependency_index" == "$container_index" ]] && container_has_pending_folders "$other_index"; then
+        related="$(list_append_unique "$related" "$other_index")"
+      fi
+    done
+  done
+
+  printf '%s' "$related"
+}
+
+select_batch_for_folder() {
+  local start_folder_index="$1"
+  local batch_folders="$start_folder_index"
+  local batch_containers=""
+  local changed=1
+  local folder_index container_index related_index related_containers
+
+  while (( changed == 1 )); do
+    changed=0
+
+    for folder_index in $batch_folders; do
+      for container_index in ${FOLDER_CONTAINER_INDEXES[$folder_index]}; do
+        if container_has_pending_folders "$container_index" && ! list_has_word "$batch_containers" "$container_index"; then
+          batch_containers="$(list_append_unique "$batch_containers" "$container_index")"
+          changed=1
+        fi
+      done
+    done
+
+    for container_index in $batch_containers; do
+      for folder_index in ${CONTAINER_FOLDER_INDEXES[$container_index]}; do
+        if [[ "${FOLDER_STATES[$folder_index]}" != "complete" ]] && ! list_has_word "$batch_folders" "$folder_index"; then
+          batch_folders="$(list_append_unique "$batch_folders" "$folder_index")"
+          changed=1
+        fi
+      done
+
+      related_containers="$(container_related_pending_indexes "$container_index")"
+      for related_index in $related_containers; do
+        if ! list_has_word "$batch_containers" "$related_index"; then
+          batch_containers="$(list_append_unique "$batch_containers" "$related_index")"
+          changed=1
+        fi
+      done
+    done
+  done
+
+  CURRENT_BATCH_FOLDERS="$batch_folders"
+  CURRENT_BATCH_CONTAINERS="$batch_containers"
 }
 
 restart_policy_spec() {
@@ -622,10 +884,89 @@ restart_policy_spec() {
   printf '%s' "$name"
 }
 
+next_pending_folder_index() {
+  local folder_index
+  for folder_index in "${!FOLDER_NAMES[@]}"; do
+    if [[ "${FOLDER_STATES[$folder_index]}" != "complete" ]]; then
+      printf '%s' "$folder_index"
+      return 0
+    fi
+  done
+  return 1
+}
+
+build_container_start_order() {
+  local remaining="$1"
+  local order="" progress container_index dependency_index unresolved snapshot
+
+  while [[ -n "$remaining" ]]; do
+    progress=0
+    snapshot="$remaining"
+    for container_index in $snapshot; do
+      unresolved=0
+      for dependency_index in ${CONTAINER_DEPENDENCY_INDEXES[$container_index]}; do
+        if list_has_word "$remaining" "$dependency_index"; then
+          unresolved=1
+          break
+        fi
+      done
+      if (( unresolved == 0 )); then
+        order="$(list_append_unique "$order" "$container_index")"
+        remaining="$(list_remove_word "$remaining" "$container_index")"
+        progress=1
+      fi
+    done
+
+    if (( progress == 0 )); then
+      for container_index in $remaining; do
+        order="$(list_append_unique "$order" "$container_index")"
+      done
+      break
+    fi
+  done
+
+  printf '%s' "$order"
+}
+
+reverse_index_list() {
+  local input="$1"
+  local -a indexes=()
+  local i output=""
+  mapfile -t indexes <<< "$input"
+  for (( i=${#indexes[@]} - 1; i>=0; i-- )); do
+    output="$(list_append_unique "$output" "${indexes[$i]}")"
+  done
+  printf '%s' "$output"
+}
+
+build_folder_batch_order() {
+  local batch_folders="$1"
+  local batch_containers="$2"
+  local folder_order="" container_order container_index folder_index
+
+  container_order="$(build_container_start_order "$batch_containers")"
+  for container_index in $container_order; do
+    for folder_index in ${CONTAINER_FOLDER_INDEXES[$container_index]}; do
+      if list_has_word "$batch_folders" "$folder_index" && [[ "${FOLDER_STATES[$folder_index]}" != "complete" ]]; then
+        folder_order="$(list_append_unique "$folder_order" "$folder_index")"
+      fi
+    done
+  done
+
+  for folder_index in $batch_folders; do
+    if [[ "${FOLDER_STATES[$folder_index]}" != "complete" ]]; then
+      folder_order="$(list_append_unique "$folder_order" "$folder_index")"
+    fi
+  done
+
+  printf '%s' "$folder_order"
+}
+
 temporarily_disable_restart_policies() {
+  local target_indexes="$1"
   local index spec
-  for index in "${!CONTAINER_IDS[@]}"; do
-    if [[ "${CONTAINER_RESTART_NAMES[$index]}" == "no" ]]; then
+  for index in $target_indexes; do
+    if [[ "${CONTAINER_RESTART_NAMES[$index]}" == "no" || "${CONTAINER_POLICY_DISABLED[$index]}" == "1" ]]; then
       continue
     fi
     spec="$(restart_policy_spec "${CONTAINER_RESTART_NAMES[$index]}" "${CONTAINER_RESTART_MAXS[$index]}")"
@@ -640,71 +981,72 @@ temporarily_disable_restart_policies() {
   write_status_file
 }
 
-stop_running_containers() {
-  local running_ids=() id remaining inspect
+stop_container_batch() {
+  local target_indexes="$1"
+  local start_order stop_order index
   if ! docker_daemon_is_running; then
     log "Docker daemon is not running. No containers need to be stopped."
     return 0
   fi
 
-  record_running_containers
-  if (( ${#CONTAINER_IDS[@]} == 0 )); then
-    log "No running containers were found."
+  if [[ -z "$target_indexes" ]]; then
     return 0
   fi
 
-  temporarily_disable_restart_policies
-  set_status "stopping_containers" "stopping_containers" "Stopping running Docker containers before migration."
+  temporarily_disable_restart_policies "$target_indexes"
+  set_status "stopping_containers" "stopping_containers" "Stopping only the containers used by the current migration batch."
   NEEDS_CONTAINER_RECOVERY=1
 
-  mapfile -t running_ids < <(docker ps -q 2>/dev/null || true)
-  if (( ${#running_ids[@]} > 0 )); then
-    docker stop "${running_ids[@]}" >/dev/null 2>&1 || true
-  fi
+  start_order="$(build_container_start_order "$target_indexes")"
+  stop_order="$(reverse_index_list "$start_order")"
 
-  while true; do
-    mapfile -t remaining < <(docker ps -q 2>/dev/null || true)
-    if (( ${#remaining[@]} == 0 )); then
-      break
+  for index in $stop_order; do
+    if [[ "${CONTAINER_CURRENTLY_RUNNING[$index]}" != "1" ]]; then
+      continue
     fi
-    LAST_RUNNING_CONTAINER_NAMES=""
-    for id in "${remaining[@]}"; do
-      inspect="$(container_inspect_line "$id")"
-      IFS='|' read -r _id name _policy _max_retry <<< "$inspect"
-      LAST_RUNNING_CONTAINER_NAMES+="${name#/}, "
+
+    log "Stopping container ${CONTAINER_NAMES[$index]}"
+    docker stop "${CONTAINER_IDS[$index]}" >/dev/null 2>&1 || true
+
+    while container_is_running_by_id "${CONTAINER_IDS[$index]}"; do
+      MESSAGE="Waiting for ${CONTAINER_NAMES[$index]} to stop."
+      write_status_file
+      sleep 2
     done
-    MESSAGE="Waiting for Docker containers to stop."
+
+    CONTAINER_CURRENTLY_RUNNING[index]="0"
+    CONTAINER_START_STATES[index]="stopped"
+    CONTAINER_LAST_ERRORS[index]=""
     write_status_file
-    sleep 5
   done
 
-  local index
-  for index in "${!CONTAINER_IDS[@]}"; do
-    CONTAINER_START_STATES[index]="stopped"
-  done
-  write_status_file
+  ensure_batch_containers_stopped "$target_indexes"
 }
 
-ensure_no_running_containers() {
-  local remaining=() id inspect names=""
+ensure_batch_containers_stopped() {
+  local target_indexes="$1"
+  local index names=""
   if ! docker_daemon_is_running; then
     return 0
   fi
-  mapfile -t remaining < <(docker ps -q 2>/dev/null || true)
-  if (( ${#remaining[@]} == 0 )); then
-    return 0
-  fi
-  for id in "${remaining[@]}"; do
-    inspect="$(container_inspect_line "$id")"
-    IFS='|' read -r _id name _policy _max_retry <<< "$inspect"
-    names+="${name#/}, "
+
+  for index in $target_indexes; do
+    if container_is_running_by_id "${CONTAINER_IDS[$index]}"; then
+      names+="${CONTAINER_NAMES[$index]}, "
+    fi
   done
+
+  [[ -z "$names" ]] && return 0
   die "A Docker container restarted during migration (${names%, }). Stop watchdogs and automatic relaunch tools before trying again."
 }
 
 restore_restart_policies() {
+  local target_indexes="${1:-}"
   local index spec
-  for index in "${!CONTAINER_IDS[@]}"; do
+  if [[ -z "$target_indexes" ]]; then
+    target_indexes="$(printf '%s\n' "${!CONTAINER_IDS[@]}")"
+  fi
+  for index in $target_indexes; do
     if [[ "${CONTAINER_POLICY_DISABLED[$index]}" != "1" ]]; then
       continue
     fi
@@ -719,19 +1061,30 @@ restore_restart_policies() {
 }
 
 start_selected_containers() {
-  local retry_indexes=() index
-  if (( ${#CONTAINER_IDS[@]} == 0 )); then
-    restore_restart_policies
+  local target_indexes="${1:-}"
+  local retry_indexes=() index start_order
+  if [[ -z "$target_indexes" ]]; then
+    target_indexes=""
+    for index in "${!CONTAINER_IDS[@]}"; do
+      if [[ "${CONTAINER_WAS_RUNNING[$index]}" == "1" && "${CONTAINER_CURRENTLY_RUNNING[$index]}" != "1" ]]; then
+        target_indexes="$(list_append_unique "$target_indexes" "$index")"
+      fi
+    done
+  fi
+  if [[ -z "$target_indexes" ]]; then
+    restore_restart_policies "$target_indexes"
     return 0
   fi
 
-  set_status "restarting_containers" "restarting_containers" "Starting previously running Docker containers."
+  set_status "restarting_containers" "restarting_containers" "Starting containers for the current migration batch."
+  start_order="$(build_container_start_order "$target_indexes")"
 
-  for index in "${!CONTAINER_IDS[@]}"; do
-    if [[ "${CONTAINER_WAS_RUNNING[$index]}" != "1" ]]; then
+  for index in $start_order; do
+    if [[ "${CONTAINER_WAS_RUNNING[$index]}" != "1" || "${CONTAINER_CURRENTLY_RUNNING[$index]}" == "1" ]]; then
       continue
     fi
     if docker start "${CONTAINER_IDS[$index]}" >/dev/null 2>&1; then
+      CONTAINER_CURRENTLY_RUNNING[index]="1"
       CONTAINER_START_STATES[index]="started"
       CONTAINER_LAST_ERRORS[index]=""
     else
@@ -747,6 +1100,7 @@ start_selected_containers() {
     sleep "$RESTART_RETRY_DELAY"
     for index in "${retry_indexes[@]}"; do
       if docker start "${CONTAINER_IDS[$index]}" >/dev/null 2>&1; then
+        CONTAINER_CURRENTLY_RUNNING[index]="1"
         CONTAINER_START_STATES[index]="started_on_retry"
         CONTAINER_LAST_ERRORS[index]=""
       else
@@ -757,8 +1111,14 @@ start_selected_containers() {
     done
   fi
 
-  restore_restart_policies
+  restore_restart_policies "$target_indexes"
   NEEDS_CONTAINER_RECOVERY=0
+  for index in "${!CONTAINER_IDS[@]}"; do
+    if [[ "${CONTAINER_WAS_RUNNING[$index]}" == "1" && "${CONTAINER_CURRENTLY_RUNNING[$index]}" != "1" ]]; then
+      NEEDS_CONTAINER_RECOVERY=1
+      break
+    fi
+  done
 }
 
 rollback_failed_folder() {
@@ -777,6 +1137,7 @@ rollback_failed_folder() {
 
 migrate_one_directory() {
   local folder_index="$1"
+  local protected_container_indexes="${2:-}"
   local entry_path="${FOLDER_SOURCE_PATHS[$folder_index]}"
   local name="${FOLDER_NAMES[$folder_index]}"
   local child_ds="${FOLDER_TARGET_DATASETS[$folder_index]}"
@@ -790,7 +1151,7 @@ migrate_one_directory() {
   temp_path=""
 
   folder_set "$folder_index" "preparing" 2 "Preparing folder for migration."
-  ensure_no_running_containers || return 1
+  ensure_batch_containers_stopped "$protected_container_indexes" || return 1
 
   prepare_sockets_for_migration "$entry_path" || { die "Active socket files are still present under '$entry_path'. Make sure every container and watchdog is stopped before migrating."; return 1; }
   assert_no_nested_mounts "$entry_path" || return 1
@@ -821,7 +1182,7 @@ migrate_one_directory() {
 
   folder_set "$folder_index" "copying" 5 "Copying data into the new dataset."
   rsync_copy_with_progress "$temp_path" "$new_path" "$folder_index" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
-  ensure_no_running_containers || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
+  ensure_batch_containers_stopped "$protected_container_indexes" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
   sync
 
   folder_set "$folder_index" "verifying" 86 "Running rsync checksum verification."
@@ -840,7 +1201,7 @@ migrate_one_directory() {
 }
 
 build_folder_plan() {
-  local parent_path child name target_ds mounted_dataset size_bytes
+  local parent_path child name target_ds mounted_dataset size_bytes folder_index
   ACTIVE_MOUNTPOINT="$(zfs get -H -o value mountpoint "$ACTIVE_DATASET" 2>/dev/null | head -n 1 || true)"
   [[ -n "$ACTIVE_MOUNTPOINT" && "$ACTIVE_MOUNTPOINT" != "legacy" && "$ACTIVE_MOUNTPOINT" != "none" ]] || die "Dataset $ACTIVE_DATASET does not have a readable mounted filesystem path."
   [[ -d "$ACTIVE_MOUNTPOINT" ]] || die "Mountpoint $ACTIVE_MOUNTPOINT does not exist or is not a directory."
@@ -862,6 +1223,7 @@ build_folder_plan() {
     size_bytes="$(get_directory_used_bytes "$child" 2>/dev/null || true)"
     [[ "$size_bytes" =~ ^[0-9]+$ ]] || size_bytes=0
 
+    folder_index="${#FOLDER_NAMES[@]}"
     FOLDER_NAMES+=("$name")
     FOLDER_SOURCE_PATHS+=("$child")
     FOLDER_TARGET_DATASETS+=("$target_ds")
@@ -869,6 +1231,8 @@ build_folder_plan() {
     FOLDER_STATES+=("queued")
     FOLDER_PROGRESS+=("0")
     FOLDER_MESSAGES+=("Queued for migration.")
+    FOLDER_CONTAINER_INDEXES+=("")
+    FOLDER_INDEX_BY_NAME["$name"]="$folder_index"
   done < <(find "$ACTIVE_MOUNTPOINT" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
 
   TOTAL_FOLDERS="${#FOLDER_NAMES[@]}"
@@ -879,6 +1243,7 @@ build_folder_plan() {
   fi
 }
 
+# shellcheck disable=SC2329
 cleanup() {
   local exit_code="$?"
   if (( EXIT_CODE == 0 )) && (( exit_code != 0 )); then
@@ -960,19 +1325,45 @@ fi
 set_status "preparing" "planning" "Scanning the selected dataset for eligible top-level folders."
 build_folder_plan || exit 1
 
-stop_running_containers || exit 1
+record_running_containers
 set_status "migrating" "migrating" "Starting folder-by-folder migration."
 
-for CURRENT_FOLDER_INDEX in "${!FOLDER_NAMES[@]}"; do
-  CURRENT_FOLDER="${FOLDER_NAMES[$CURRENT_FOLDER_INDEX]}"
-  CURRENT_FOLDER_PERCENT="${FOLDER_PROGRESS[$CURRENT_FOLDER_INDEX]:-0}"
-  if ! migrate_one_directory "$CURRENT_FOLDER_INDEX"; then
-    exit 1
+while CURRENT_FOLDER_INDEX="$(next_pending_folder_index)"; do
+  select_batch_for_folder "$CURRENT_FOLDER_INDEX"
+  if [[ -n "$CURRENT_BATCH_CONTAINERS" ]]; then
+    stop_container_batch "$CURRENT_BATCH_CONTAINERS" || exit 1
+  fi
+
+  for CURRENT_FOLDER_INDEX in $(build_folder_batch_order "$CURRENT_BATCH_FOLDERS" "$CURRENT_BATCH_CONTAINERS"); do
+    CURRENT_FOLDER="${FOLDER_NAMES[$CURRENT_FOLDER_INDEX]}"
+    CURRENT_FOLDER_PERCENT="${FOLDER_PROGRESS[$CURRENT_FOLDER_INDEX]:-0}"
+    if ! migrate_one_directory "$CURRENT_FOLDER_INDEX" "$CURRENT_BATCH_CONTAINERS"; then
+      exit 1
+    fi
+  done
+
+  if [[ -n "$CURRENT_BATCH_CONTAINERS" ]]; then
+    set_status "restarting_containers" "restarting_containers" "Starting containers back up after the current migration batch."
+    start_selected_containers "$CURRENT_BATCH_CONTAINERS" || true
   fi
 done
 
-set_status "restarting_containers" "restarting_containers" "Migration complete. Starting previously running containers again."
-start_selected_containers || true
+if (( NEEDS_CONTAINER_RECOVERY == 1 )); then
+  set_status "restarting_containers" "restarting_containers" "Starting any remaining containers back up."
+  start_selected_containers || true
+fi
+
+if [[ -n "${CURRENT_BATCH_CONTAINERS:-}" ]]; then
+  CURRENT_BATCH_CONTAINERS=""
+fi
+if [[ -n "${CURRENT_BATCH_FOLDERS:-}" ]]; then
+  CURRENT_BATCH_FOLDERS=""
+fi
+
+if (( COMPLETED_FOLDERS < TOTAL_FOLDERS )); then
+  die "Dataset migration stopped before all planned folders completed."
+  exit 1
+fi
 
 STATE="complete"
 CURRENT_STEP="complete"

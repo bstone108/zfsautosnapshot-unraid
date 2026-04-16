@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.04 (Testing Branch Only)
+
+- Reworked the `Dataset Migrator` container handling so it no longer drops every running container at once. It now stops only the containers tied to the current migration batch, migrates all related top-level folders those containers share inside the selected dataset, and then starts those containers back up before moving on.
+- Added dependency-aware batch ordering to the `Dataset Migrator` so shared service groups are handled in one pass when possible, reducing unnecessary stop/start churn while still keeping dependent containers down only for the folder groups they actually need.
+
 ### 2026.04.16.03 (Testing Branch Only)
 
 - Reworked the `Special Features` and `Repair Tools` sections so each tool now shows as a button on the left with its description beside it, making the tool pages easier to scan and leaving more room for additional entries later.
