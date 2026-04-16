@@ -10,6 +10,9 @@ RUNTIME_DIR="/var/run/zfs-autosnapshot-ops"
 SEND_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/send-workers"
 DELETE_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/delete-worker"
 JOB_LOCKS_DIR="${RUNTIME_DIR}/job-locks"
+ACTIVE_SEND_DATASETS_DIR="${RUNTIME_DIR}/active-send-datasets"
+AUTOSNAPSHOT_RUNTIME_DIR="/var/run/zfs-autosnapshot"
+AUTOSNAPSHOT_ACTIVE_FILE="${AUTOSNAPSHOT_RUNTIME_DIR}/zfs_autosnapshot.active"
 LOG_FILE="/var/log/zfs_autosnapshot_send.log"
 
 DEFAULT_SEND_SNAPSHOT_PREFIX="zfs-send-"
@@ -60,7 +63,7 @@ ensure_runtime_layout() {
   ops_ensure_dir "$OPS_ROOT" || return 1
   ops_ensure_dir "$OPS_JOBS_DIR" || return 1
   ops_ensure_dir "$OPS_STATUS_DIR" || return 1
-  mkdir -p "$RUNTIME_DIR" "$SEND_WORKER_RUNTIME_DIR" "$DELETE_WORKER_RUNTIME_DIR" "$JOB_LOCKS_DIR" "$(dirname "$LOG_FILE")" >/dev/null 2>&1 || true
+  mkdir -p "$RUNTIME_DIR" "$SEND_WORKER_RUNTIME_DIR" "$DELETE_WORKER_RUNTIME_DIR" "$JOB_LOCKS_DIR" "$ACTIVE_SEND_DATASETS_DIR" "$(dirname "$LOG_FILE")" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -377,6 +380,37 @@ send_worker_slot_available() {
 
 delete_worker_running() {
   [[ -d "$DELETE_WORKER_RUNTIME_DIR/active.lockdir" ]]
+}
+
+autosnapshot_run_active() {
+  local pid=""
+
+  [[ -f "$AUTOSNAPSHOT_ACTIVE_FILE" ]] || return 1
+  pid="$(sed -n 's/^PID=//p' "$AUTOSNAPSHOT_ACTIVE_FILE" 2>/dev/null | head -n 1)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  rm -f "$AUTOSNAPSHOT_ACTIVE_FILE" >/dev/null 2>&1 || true
+  return 1
+}
+
+snapshot_userrefs_count() {
+  local snapshot="$1"
+  local value
+
+  value="$(zfs get -H -p -o value userrefs "$snapshot" 2>/dev/null || true)"
+  [[ "$value" =~ ^[0-9]+$ ]] || value=0
+  printf '%s' "$value"
+}
+
+snapshot_has_clones() {
+  local snapshot="$1"
+  local clones
+
+  clones="$(zfs get -H -o value clones "$snapshot" 2>/dev/null || true)"
+  clones="$(trim "$clones")"
+  [[ -n "$clones" && "$clones" != "-" ]]
 }
 
 get_pool_freeing() {
@@ -750,6 +784,28 @@ scheduled_job_protected_basenames() {
   done < <(list_job_files)
 }
 
+all_scheduled_job_protected_basenames() {
+  local result_name="$1"
+  # shellcheck disable=SC2178
+  local -n result_ref="$result_name"
+  local schedule_job_id basename
+  local -A protected=()
+
+  result_ref=()
+
+  for schedule_job_id in "${SCHEDULE_JOB_IDS[@]}"; do
+    protected=()
+    scheduled_job_protected_basenames "$schedule_job_id" protected
+    for basename in "${!protected[@]}"; do
+      result_ref["$basename"]=1
+    done
+
+    basename=""
+    latest_checkpoint_basename_for_schedule "$schedule_job_id" basename
+    [[ -n "$basename" ]] && result_ref["$basename"]=1
+  done
+}
+
 find_oldest_deletable_checkpoint_for_schedule() {
   local schedule_job_id="$1"
   local constraints_name="$2"
@@ -808,6 +864,47 @@ find_oldest_deletable_checkpoint_for_schedule() {
   printf -v "$result_basename_var" '%s' "$oldest_base"
   printf -v "$result_epoch_var" '%s' "$oldest_epoch"
   [[ -n "$oldest_base" ]]
+}
+
+find_oldest_deletable_destination_snapshot_for_schedule() {
+  local schedule_job_id="$1"
+  local constraints_name="$2"
+  local result_snap_var="$3"
+  local result_epoch_var="$4"
+  local dest_root snap_name snap_epoch snap_dataset snap_base newest_base="" oldest_snap="" oldest_epoch=0
+  local userrefs
+  local -A protected=()
+
+  printf -v "$result_snap_var" ''
+  printf -v "$result_epoch_var" '0'
+
+  dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
+  [[ -n "$dest_root" ]] || return 1
+  dataset_exists "$dest_root" || return 1
+
+  all_scheduled_job_protected_basenames protected
+
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+    snap_dataset="${snap_name%@*}"
+    snap_base="${snap_name##*@}"
+
+    candidate_affects_any_constraint "$snap_dataset" "$constraints_name" || continue
+    [[ -z "${protected[$snap_base]:-}" ]] || continue
+
+    userrefs="$(snapshot_userrefs_count "$snap_name")"
+    (( userrefs == 0 )) || continue
+    snapshot_has_clones "$snap_name" && continue
+
+    if [[ -z "$oldest_snap" ]] || (( snap_epoch < oldest_epoch )); then
+      oldest_snap="$snap_name"
+      oldest_epoch="$snap_epoch"
+    fi
+  done < <(zfs list -H -p -r -t snapshot -o name,creation "$dest_root" 2>/dev/null || true)
+
+  printf -v "$result_snap_var" '%s' "$oldest_snap"
+  printf -v "$result_epoch_var" '%s' "$oldest_epoch"
+  [[ -n "$oldest_snap" ]]
 }
 
 checkpoint_exists_for_member() {
@@ -889,11 +986,18 @@ delete_checkpoint_basename_across_tree() {
   done
 }
 
+delete_destination_snapshot() {
+  local snapshot="$1"
+  [[ -n "$snapshot" ]] || return 1
+  log "Deleting destination snapshot: $snapshot"
+  zfs destroy "$snapshot"
+}
+
 ensure_destination_space_for_schedule_job() {
   local schedule_job_id="$1"
   local dest_dataset="${SCHEDULE_DEST_ROOT[$schedule_job_id]}"
   local threshold="${SCHEDULE_THRESHOLD_BYTES[$schedule_job_id]}"
-  local capacity_dataset effective after_effective candidate_basename
+  local capacity_dataset effective after_effective candidate_snapshot
   # shellcheck disable=SC2034
   local active_constraints=()
   local low_constraints_display
@@ -908,24 +1012,24 @@ ensure_destination_space_for_schedule_job() {
     low_constraints_display="$(format_constraint_list active_constraints)"
     log "Destination ${dest_dataset} is below its free-space target: effective_avail=${effective} min_required=${threshold} active_constraints=${low_constraints_display}"
 
-    candidate_basename=""
-    local schedule_id best_id="" best_epoch=0 this_basename this_epoch
+    candidate_snapshot=""
+    local schedule_id best_id="" best_epoch=0 this_snapshot this_epoch
     for schedule_id in "${SCHEDULE_JOB_IDS[@]}"; do
-      this_basename=""
+      this_snapshot=""
       this_epoch=0
-      if find_oldest_deletable_checkpoint_for_schedule "$schedule_id" active_constraints this_basename this_epoch; then
+      if find_oldest_deletable_destination_snapshot_for_schedule "$schedule_id" active_constraints this_snapshot this_epoch; then
         if [[ -z "$best_id" ]] || (( this_epoch < best_epoch )); then
           best_id="$schedule_id"
           best_epoch="$this_epoch"
-          candidate_basename="$this_basename"
+          candidate_snapshot="$this_snapshot"
         fi
       fi
     done
 
-    [[ -n "$best_id" && -n "$candidate_basename" ]] || return 1
+    [[ -n "$best_id" && -n "$candidate_snapshot" ]] || return 1
 
-    log "Destination ${dest_dataset} low on space -> deleting oldest eligible send checkpoint ${candidate_basename} from schedule ${best_id}"
-    delete_checkpoint_basename_across_tree "${SCHEDULE_DEST_ROOT[$best_id]}" "$candidate_basename" "$(job_prefix_for_schedule "$best_id")" "destination"
+    log "Destination ${dest_dataset} low on space -> deleting oldest eligible destination snapshot ${candidate_snapshot} (selected from schedule ${best_id})"
+    delete_destination_snapshot "$candidate_snapshot"
 
     after_effective="$(get_dataset_effective_avail "$capacity_dataset" NO_CONSTRAINT_RECLAIM || true)"
     [[ "$after_effective" =~ ^[0-9]+$ ]] || return 1

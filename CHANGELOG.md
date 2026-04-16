@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.15.8 (Testing Branch Only)
+
+- Changed scheduled `ZFS Send` destination cleanup so its free-space target can now delete the oldest eligible destination snapshots of any type inside the configured send targets, while still protecting the newest successful send checkpoint and any checkpoint basenames that queued or running sends still need.
+- Added runner coordination between the two shell engines so `ZFS Send` now waits for an in-progress autosnapshot run to finish before starting, and the regular autosnapshot cleanup phases now skip datasets that are actively being sent while still allowing the normal snapshot-creation phase to continue.
+
 ### 2026.04.15.7 (Testing Branch Only)
 
 - Added a new `Dataset Migrator` under `Special Features` that can convert top-level folders inside a selected dataset into child datasets with live folder-by-folder progress, free-space wait messaging, paranoid verification, rollback if a folder copy fails, and automatic stop/restart handling for Docker containers that were running before the migration started.

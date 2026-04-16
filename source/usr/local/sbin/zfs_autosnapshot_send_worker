@@ -7,12 +7,14 @@ source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
 WORKER_LOCK_DIR="${SEND_WORKER_RUNTIME_DIR}/worker-$$.lockdir"
 CURRENT_JOB_ID=""
 CURRENT_JOB_PATH=""
+CURRENT_ACTIVE_DATASETS_FILE=""
 
 cleanup() {
   local exit_code="$?"
   if [[ -n "$CURRENT_JOB_ID" ]]; then
     release_job_claim "$CURRENT_JOB_ID"
   fi
+  clear_active_send_datasets
   rm -rf "$WORKER_LOCK_DIR" >/dev/null 2>&1 || true
   exit "$exit_code"
 }
@@ -50,6 +52,58 @@ fail_current_job() {
   now_epoch="$(date +%s)"
   mark_job_failed_or_retry job "$message" "$now_epoch"
   persist_job || true
+}
+
+clear_active_send_datasets() {
+  if [[ -n "$CURRENT_ACTIVE_DATASETS_FILE" ]]; then
+    rm -f "$CURRENT_ACTIVE_DATASETS_FILE" >/dev/null 2>&1 || true
+    CURRENT_ACTIVE_DATASETS_FILE=""
+  fi
+}
+
+register_active_send_datasets_for_current_job() {
+  local mode source_root include_children dataset file tmp source_dataset
+
+  clear_active_send_datasets
+  mkdir -p "$ACTIVE_SEND_DATASETS_DIR" >/dev/null 2>&1 || true
+  file="${ACTIVE_SEND_DATASETS_DIR}/worker-$$-$(printf '%s' "$CURRENT_JOB_ID" | tr -c 'A-Za-z0-9._-' '_').datasets"
+  tmp="${file}.tmp"
+  : > "$tmp"
+
+  mode="$(job_get job JOB_MODE)"
+  case "$mode" in
+    scheduled)
+      source_root="$(job_get job SOURCE_ROOT)"
+      include_children="$(job_get job INCLUDE_CHILDREN 0)"
+      while IFS= read -r source_dataset; do
+        [[ -n "$source_dataset" ]] || continue
+        printf '%s\n' "$source_dataset" >> "$tmp"
+      done < <(list_tree_datasets "$source_root" "$include_children")
+      ;;
+    manual_snapshot)
+      dataset="$(job_get job DATASET)"
+      [[ -n "$dataset" ]] && printf '%s\n' "$dataset" >> "$tmp"
+      ;;
+  esac
+
+  chmod 0600 "$tmp" >/dev/null 2>&1 || true
+  mv -f "$tmp" "$file"
+  CURRENT_ACTIVE_DATASETS_FILE="$file"
+}
+
+wait_for_autosnapshot_to_finish() {
+  local mode message
+
+  mode="$(job_get job JOB_MODE)"
+  message="Waiting for the regular autosnapshot run to finish before starting this send job."
+  if [[ "$mode" == "manual_snapshot" ]]; then
+    message="Waiting for the regular autosnapshot run to finish before starting this manual send."
+  fi
+
+  while autosnapshot_run_active; do
+    set_job_progress "preparing" "10" "$message"
+    sleep 5
+  done
 }
 
 prepare_scheduled_job_snapshot() {
@@ -180,14 +234,17 @@ process_send_job() {
   mode="$(job_get job JOB_MODE)"
 
   set_job_progress "preparing" "15" "Preparing send job."
+  wait_for_autosnapshot_to_finish
 
   case "$mode" in
     scheduled)
       jobs_are_same_pool_overlap "$(job_get job SOURCE_ROOT)" "$(job_get job DESTINATION_ROOT)" && return 1
+      register_active_send_datasets_for_current_job
       prepare_scheduled_job_snapshot || return 1
       ;;
     manual_snapshot)
       jobs_are_same_pool_overlap "$(job_get job DATASET)" "$(job_get job DESTINATION_ROOT)" && return 1
+      register_active_send_datasets_for_current_job
       prepare_manual_snapshot_job || return 1
       ;;
     *)
@@ -270,6 +327,7 @@ main() {
       fail_current_job "Send job failed during phase '$(job_get job PHASE)'. Review the send log and retry if needed."
     fi
 
+    clear_active_send_datasets
     release_job_claim "$CURRENT_JOB_ID"
     CURRENT_JOB_ID=""
     CURRENT_JOB_PATH=""
