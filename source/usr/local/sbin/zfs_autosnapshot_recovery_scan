@@ -7,6 +7,7 @@ DATASET=""
 STATUS_FILE=""
 RESULTS_FILE=""
 LOG_FILE=""
+STOP_FILE=""
 STATE="queued"
 STARTED_EPOCH="$(date +%s)"
 MOUNTPOINT=""
@@ -17,6 +18,7 @@ LAST_PATH=""
 LAST_ERROR=""
 PID="$$"
 COMPLETED=0
+CURRENT_DD_PID=""
 
 trim() {
   local s="$1"
@@ -69,6 +71,13 @@ log_path_for_dataset() {
   printf '%s/%s.log' "$SCANS_DIR" "$key"
 }
 
+stop_path_for_dataset() {
+  local dataset="$1"
+  local key
+  key="$(dataset_key "$dataset")"
+  printf '%s/%s.stop' "$SCANS_DIR" "$key"
+}
+
 dataset_key() {
   local dataset="$1"
   if command -v sha1sum >/dev/null 2>&1; then
@@ -104,11 +113,12 @@ write_status() {
   "unreadableCount": $UNREADABLE_COUNT,
   "lastPath": "$(json_escape "$LAST_PATH")",
   "lastError": "$(json_escape "$LAST_ERROR")",
+  "stopRequested": $([[ -f "$STOP_FILE" ]] && echo true || echo false),
   "resultsFile": "$(json_escape "$RESULTS_FILE")",
   "logFile": "$(json_escape "$LOG_FILE")"
 }
 JSON
-  chmod 0664 "$STATUS_FILE" >/dev/null 2>&1 || true
+  chmod 0640 "$STATUS_FILE" >/dev/null 2>&1 || true
   apply_owner "$STATUS_FILE"
 }
 
@@ -122,6 +132,12 @@ fail_with() {
 
 cleanup() {
   local exit_code="$?"
+  if [[ -n "${CURRENT_DD_PID:-}" ]]; then
+    kill "$CURRENT_DD_PID" >/dev/null 2>&1 || true
+    wait "$CURRENT_DD_PID" >/dev/null 2>&1 || true
+    CURRENT_DD_PID=""
+  fi
+  rm -f "$STOP_FILE" >/dev/null 2>&1 || true
   if (( COMPLETED == 1 )); then
     exit 0
   fi
@@ -163,9 +179,14 @@ ensure_dir "$SCANS_DIR"
 STATUS_FILE="$(status_path_for_dataset "$DATASET")"
 RESULTS_FILE="$(results_path_for_dataset "$DATASET")"
 LOG_FILE="$(log_path_for_dataset "$DATASET")"
+STOP_FILE="$(stop_path_for_dataset "$DATASET")"
+: > "$LOG_FILE"
+chmod 0640 "$LOG_FILE" >/dev/null 2>&1 || true
+apply_owner "$LOG_FILE"
 : > "$RESULTS_FILE"
-chmod 0664 "$RESULTS_FILE" >/dev/null 2>&1 || true
+chmod 0640 "$RESULTS_FILE" >/dev/null 2>&1 || true
 apply_owner "$RESULTS_FILE"
+rm -f "$STOP_FILE" >/dev/null 2>&1 || true
 
 trap cleanup EXIT INT TERM
 
@@ -181,13 +202,21 @@ write_status "$STATE"
 echo "$(date +'%Y-%m-%d %H:%M:%S %Z') Starting recovery readability scan for $DATASET at $MOUNTPOINT"
 
 while IFS= read -r -d '' file_path; do
+  if [[ -f "$STOP_FILE" ]]; then
+    echo "$(date +'%Y-%m-%d %H:%M:%S %Z') Stop requested for $DATASET; ending recovery readability scan."
+    break
+  fi
+
   LAST_PATH="$file_path"
   SCANNED_FILES=$((SCANNED_FILES + 1))
 
-  if ! dd if="$file_path" of=/dev/null bs=1M status=none 2>> "$LOG_FILE"; then
+  dd if="$file_path" of=/dev/null bs=1M status=none 2>> "$LOG_FILE" &
+  CURRENT_DD_PID="$!"
+  if ! wait "$CURRENT_DD_PID"; then
     UNREADABLE_COUNT=$((UNREADABLE_COUNT + 1))
     printf '%s\n' "$file_path" >> "$RESULTS_FILE"
   fi
+  CURRENT_DD_PID=""
 
   if (( SCANNED_FILES == 1 || SCANNED_FILES % 25 == 0 )); then
     write_status "$STATE"

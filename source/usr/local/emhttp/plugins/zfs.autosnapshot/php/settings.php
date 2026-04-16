@@ -141,7 +141,7 @@ function trimValue($value)
 
 function isValidDatasetName($dataset)
 {
-    return preg_match('/^[A-Za-z0-9._\/:-]+$/', (string) $dataset) === 1;
+    return zfsas_is_valid_dataset_name($dataset);
 }
 
 function datasetPoolName($dataset)
@@ -859,20 +859,28 @@ if ($isPostRequest) {
         $errors[] = 'Schedule mode is invalid.';
     }
 
-    $submitted['SCHEDULE_EVERY_MINUTES'] = intInRange($submitted['SCHEDULE_EVERY_MINUTES'], 1, 59, 'Every N minutes', $errors) ?? $submitted['SCHEDULE_EVERY_MINUTES'];
-    $submitted['SCHEDULE_EVERY_HOURS'] = intInRange($submitted['SCHEDULE_EVERY_HOURS'], 1, 24, 'Every N hours', $errors) ?? $submitted['SCHEDULE_EVERY_HOURS'];
-    $submitted['SCHEDULE_DAILY_HOUR'] = intInRange($submitted['SCHEDULE_DAILY_HOUR'], 0, 23, 'Daily hour', $errors) ?? $submitted['SCHEDULE_DAILY_HOUR'];
-    $submitted['SCHEDULE_DAILY_MINUTE'] = intInRange($submitted['SCHEDULE_DAILY_MINUTE'], 0, 59, 'Daily minute', $errors) ?? $submitted['SCHEDULE_DAILY_MINUTE'];
-
-    $normalizedWeekday = normalizeWeekday($submitted['SCHEDULE_WEEKLY_DAY']);
-    if ($normalizedWeekday === null) {
-        $errors[] = 'Weekly day must be a day number (0-6) or weekday name.';
-    } else {
-        $submitted['SCHEDULE_WEEKLY_DAY'] = $normalizedWeekday;
+    switch ($submitted['SCHEDULE_MODE']) {
+        case 'minutes':
+            $submitted['SCHEDULE_EVERY_MINUTES'] = intInRange($submitted['SCHEDULE_EVERY_MINUTES'], 1, 59, 'Every N minutes', $errors) ?? $submitted['SCHEDULE_EVERY_MINUTES'];
+            break;
+        case 'hourly':
+            $submitted['SCHEDULE_EVERY_HOURS'] = intInRange($submitted['SCHEDULE_EVERY_HOURS'], 1, 24, 'Every N hours', $errors) ?? $submitted['SCHEDULE_EVERY_HOURS'];
+            break;
+        case 'daily':
+            $submitted['SCHEDULE_DAILY_HOUR'] = intInRange($submitted['SCHEDULE_DAILY_HOUR'], 0, 23, 'Daily hour', $errors) ?? $submitted['SCHEDULE_DAILY_HOUR'];
+            $submitted['SCHEDULE_DAILY_MINUTE'] = intInRange($submitted['SCHEDULE_DAILY_MINUTE'], 0, 59, 'Daily minute', $errors) ?? $submitted['SCHEDULE_DAILY_MINUTE'];
+            break;
+        case 'weekly':
+            $normalizedWeekday = normalizeWeekday($submitted['SCHEDULE_WEEKLY_DAY']);
+            if ($normalizedWeekday === null) {
+                $errors[] = 'Weekly day must be a day number (0-6) or weekday name.';
+            } else {
+                $submitted['SCHEDULE_WEEKLY_DAY'] = $normalizedWeekday;
+            }
+            $submitted['SCHEDULE_WEEKLY_HOUR'] = intInRange($submitted['SCHEDULE_WEEKLY_HOUR'], 0, 23, 'Weekly hour', $errors) ?? $submitted['SCHEDULE_WEEKLY_HOUR'];
+            $submitted['SCHEDULE_WEEKLY_MINUTE'] = intInRange($submitted['SCHEDULE_WEEKLY_MINUTE'], 0, 59, 'Weekly minute', $errors) ?? $submitted['SCHEDULE_WEEKLY_MINUTE'];
+            break;
     }
-
-    $submitted['SCHEDULE_WEEKLY_HOUR'] = intInRange($submitted['SCHEDULE_WEEKLY_HOUR'], 0, 23, 'Weekly hour', $errors) ?? $submitted['SCHEDULE_WEEKLY_HOUR'];
-    $submitted['SCHEDULE_WEEKLY_MINUTE'] = intInRange($submitted['SCHEDULE_WEEKLY_MINUTE'], 0, 59, 'Weekly minute', $errors) ?? $submitted['SCHEDULE_WEEKLY_MINUTE'];
 
     $cron = buildCronFromSettings($submitted, $errors);
     $submitted['CRON_SCHEDULE'] = $cron;
@@ -892,7 +900,7 @@ if ($isPostRequest) {
 
             $syncOutput = [];
             $syncExit = 0;
-            @exec(escapeshellcmd($syncScript) . ' 2>&1', $syncOutput, $syncExit);
+            @exec(escapeshellarg($syncScript) . ' 2>&1', $syncOutput, $syncExit);
 
             if ($syncExit !== 0) {
                 $errors[] = 'Settings saved, but failed to apply scheduler: ' . implode(' | ', $syncOutput);

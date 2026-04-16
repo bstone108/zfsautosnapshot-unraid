@@ -81,6 +81,9 @@ foreach ($snapshotRows as $row) {
 $selectedSnapshots = [];
 if (isset($_POST['snapshots'])) {
     $rawSnapshots = is_array($_POST['snapshots']) ? $_POST['snapshots'] : [$_POST['snapshots']];
+    if (count($rawSnapshots) > 500) {
+        zfsas_sm_json_error('Too many snapshots selected in one request (max 500).', 400);
+    }
     foreach ($rawSnapshots as $value) {
         $snapshot = zfsas_sm_trim($value);
         if ($snapshot === '' || isset($selectedSnapshots[$snapshot])) {
@@ -100,7 +103,7 @@ if ($isImmediate && (zfsas_sm_dataset_busy($dataset) || zfsas_sm_queue_pending_c
 }
 
 $operations = [];
-$requestedAt = date('c');
+$requestedAt = gmdate('Y-m-d\TH:i:s\Z');
 $requestedEpoch = time();
 
 if ($action === 'take_snapshot') {

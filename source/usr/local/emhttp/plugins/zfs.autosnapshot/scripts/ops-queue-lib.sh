@@ -74,6 +74,7 @@ ensure_runtime_layout() {
   ops_ensure_dir "$OPS_JOBS_DIR" || return 1
   ops_ensure_dir "$OPS_STATUS_DIR" || return 1
   mkdir -p "$RUNTIME_DIR" "$SEND_WORKER_RUNTIME_DIR" "$DELETE_WORKER_RUNTIME_DIR" "$PREP_LOCKS_DIR" "$JOB_LOCKS_DIR" "$ACTIVE_SEND_DATASETS_DIR" "$(dirname "$LOG_FILE")" >/dev/null 2>&1 || true
+  find "$OPS_JOBS_DIR" -maxdepth 1 -type f -name '*.tmp.*' -exec rm -f {} \; >/dev/null 2>&1 || true
   return 0
 }
 
@@ -202,6 +203,21 @@ jobs_are_same_pool_overlap() {
   [[ "$source" == "$dest" || "$source" == "$dest/"* || "$dest" == "$source/"* ]]
 }
 
+is_valid_dataset_name() {
+  [[ "$1" =~ ^[A-Za-z0-9._/:+\-]+$ ]]
+}
+
+is_valid_snapshot_basename() {
+  [[ "$1" =~ ^[A-Za-z0-9._:+\-]+$ ]]
+}
+
+is_valid_snapshot_name() {
+  local snapshot="$1"
+  [[ "$snapshot" == *@* ]] || return 1
+  is_valid_dataset_name "${snapshot%@*}" || return 1
+  is_valid_snapshot_basename "${snapshot#*@}"
+}
+
 parse_send_jobs_config() {
   local raw_jobs pair job_id source dest freq thresh children threshold_bytes
   local -A seen=()
@@ -294,16 +310,18 @@ job_write() {
   local -n job_ref="$assoc_name"
   local key
 
-  tmp="${path}.tmp.$$"
-  : > "$tmp" || return 1
+  tmp="$(mktemp "${path}.tmp.XXXXXX")" || return 1
 
   while IFS= read -r key; do
     [[ "$key" == __* ]] && continue
     printf '%s="%s"\n' "$key" "$(kv_escape "${job_ref[$key]}")" >> "$tmp"
   done < <(printf '%s\n' "${!job_ref[@]}" | sort)
 
-  mv "$tmp" "$path" || return 1
-  chmod 0664 "$path" >/dev/null 2>&1 || true
+  mv "$tmp" "$path" || {
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 1
+  }
+  chmod 0640 "$path" >/dev/null 2>&1 || true
   ops_apply_owner "$path"
   return 0
 }
@@ -544,21 +562,52 @@ get_pool_effective_avail() {
 emit_dataset_capacity_constraints() {
   local dataset="$1"
   local pool="${dataset%%/*}"
-  local pool_effective quota_avail refquota_avail
+  local pool_effective current quota_headroom refquota_headroom
 
   pool_effective="$(get_pool_effective_avail "$pool")"
   [[ "$pool_effective" =~ ^[0-9]+$ ]] && printf 'pool:%s\t%s\n' "$pool" "$pool_effective"
 
-  while [[ -n "$dataset" ]]; do
-    quota_avail="$(zfs get -H -p -o value available "$dataset" 2>/dev/null || true)"
-    [[ "$quota_avail" =~ ^[0-9]+$ ]] && printf 'quota:%s\t%s\n' "$dataset" "$quota_avail"
+  current="$dataset"
+  while :; do
+    quota_headroom="$(get_dataset_quota_headroom "$current" || true)"
+    [[ "$quota_headroom" =~ ^[0-9]+$ ]] && printf 'quota:%s\t%s\n' "$current" "$quota_headroom"
 
-    refquota_avail="$(zfs get -H -p -o value available "$dataset" 2>/dev/null || true)"
-    [[ "$refquota_avail" =~ ^[0-9]+$ ]] && printf 'refquota:%s\t%s\n' "$dataset" "$refquota_avail"
-
-    [[ "$dataset" == */* ]] || break
-    dataset="${dataset%/*}"
+    [[ "$current" == "$pool" ]] && break
+    current="${current%/*}"
   done
+
+  refquota_headroom="$(get_dataset_refquota_headroom "$dataset" || true)"
+  [[ "$refquota_headroom" =~ ^[0-9]+$ ]] && printf 'refquota:%s\t%s\n' "$dataset" "$refquota_headroom"
+}
+
+get_dataset_quota_headroom() {
+  local dataset="$1"
+  local quota_limit quota_used
+
+  quota_limit="$(zfs get -H -p -o value quota "$dataset" 2>/dev/null || true)"
+  quota_used="$(zfs get -H -p -o value usedbydataset "$dataset" 2>/dev/null || true)"
+  [[ "$quota_limit" =~ ^[1-9][0-9]*$ && "$quota_used" =~ ^[0-9]+$ ]] || return 1
+
+  if (( quota_limit <= quota_used )); then
+    echo 0
+  else
+    echo $(( quota_limit - quota_used ))
+  fi
+}
+
+get_dataset_refquota_headroom() {
+  local dataset="$1"
+  local refquota_limit refquota_used
+
+  refquota_limit="$(zfs get -H -p -o value refquota "$dataset" 2>/dev/null || true)"
+  refquota_used="$(zfs get -H -p -o value referenced "$dataset" 2>/dev/null || true)"
+  [[ "$refquota_limit" =~ ^[1-9][0-9]*$ && "$refquota_used" =~ ^[0-9]+$ ]] || return 1
+
+  if (( refquota_limit <= refquota_used )); then
+    echo 0
+  else
+    echo $(( refquota_limit - refquota_used ))
+  fi
 }
 
 get_dataset_active_constraints() {
@@ -691,9 +740,37 @@ format_constraint_list() {
 
 run_pipeline_with_status() {
   local description="$1"
-  local command="$2"
+  local base_snapshot="$2"
+  local snapshot="$3"
+  local destination="$4"
+
+  is_valid_snapshot_name "$snapshot" || {
+    log "Refusing pipeline for invalid snapshot name: $snapshot"
+    return 1
+  }
+  is_valid_dataset_name "$destination" || {
+    log "Refusing pipeline for invalid destination dataset: $destination"
+    return 1
+  }
+  if [[ -n "$base_snapshot" ]]; then
+    is_valid_snapshot_name "$base_snapshot" || {
+      log "Refusing pipeline for invalid base snapshot: $base_snapshot"
+      return 1
+    }
+  fi
+
   log "$description"
-  bash -o pipefail -c "$command"
+  if [[ -n "$base_snapshot" ]]; then
+    if ! zfs send -I "$base_snapshot" "$snapshot" | zfs receive -uF "$destination"; then
+      return 1
+    fi
+  else
+    if ! zfs send "$snapshot" | zfs receive -uF "$destination"; then
+      return 1
+    fi
+  fi
+
+  return 0
 }
 
 snapshot_exists() {
@@ -1257,7 +1334,7 @@ schedule_window_exists() {
     [[ "$(job_get job JOB_TYPE)" == "send" ]] || continue
     [[ "$(job_get job JOB_MODE)" == "scheduled" ]] || continue
     [[ "$(job_get job SCHEDULE_JOB_ID)" == "$schedule_job_id" ]] || continue
-    [[ "$(job_get job WINDOW_KEY)" == "$window_key" ]] || return 0
+    [[ "$(job_get job WINDOW_KEY)" == "$window_key" ]] && return 0
   done < <(list_job_files)
 
   return 1
@@ -1267,7 +1344,6 @@ enqueue_scheduled_send_jobs_due() {
   local now_epoch="$1"
   local job_id frequency interval last_success window_key requested_at requested_epoch job_file
   local -A job=()
-  local queued_count=0
 
   for job_id in "${SCHEDULE_JOB_IDS[@]}"; do
     frequency="${SCHEDULE_FREQUENCY[$job_id]}"
@@ -1317,10 +1393,9 @@ enqueue_scheduled_send_jobs_due() {
 
     job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "send-${job_id}-${window_key}")"
     job_write "$job_file" job || continue
-    queued_count=$((queued_count + 1))
   done
 
-  return "$queued_count"
+  return 0
 }
 
 prune_old_jobs() {
@@ -1352,7 +1427,8 @@ prune_old_jobs() {
     return 0
   fi
 
-  for file in "${complete_files[@]:keep_completed}"; do
+  count=$(( ${#complete_files[@]} - keep_completed ))
+  for file in "${complete_files[@]:0:count}"; do
     rm -f "$file" >/dev/null 2>&1 || true
   done
 }

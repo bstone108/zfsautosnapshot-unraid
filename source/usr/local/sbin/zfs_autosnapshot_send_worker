@@ -395,12 +395,25 @@ queue_child_send_jobs() {
 send_member_snapshot() {
   local member_index="$1"
   local member_count="$2"
-  local source_dataset destination snapshot basename latest_common cmd description progress
+  local source_dataset destination snapshot basename latest_common description progress
 
   source_dataset="$(job_get job MEMBER_"${member_index}"_SOURCE)"
   destination="$(job_get job MEMBER_"${member_index}"_DESTINATION)"
   snapshot="$(job_get job MEMBER_"${member_index}"_SNAPSHOT)"
   basename="${snapshot##*@}"
+
+  is_valid_dataset_name "$source_dataset" || {
+    fail_current_job "Source dataset '${source_dataset}' is invalid."
+    return 1
+  }
+  is_valid_dataset_name "$destination" || {
+    fail_current_job "Destination dataset '${destination}' is invalid."
+    return 1
+  }
+  is_valid_snapshot_name "$snapshot" || {
+    fail_current_job "Snapshot '${snapshot}' is invalid."
+    return 1
+  }
 
   ensure_destination_parent_exists "$destination" || return 1
 
@@ -416,25 +429,31 @@ send_member_snapshot() {
     latest_common=""
     find_latest_common_basename_for_member "$source_dataset" "$destination" "$(job_get job SNAPSHOT_PREFIX)" latest_common
     if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
+      is_valid_snapshot_basename "$latest_common" || {
+        fail_current_job "Base snapshot '${latest_common}' is invalid."
+        return 1
+      }
       description="Incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
-      cmd="zfs send -I $(printf '%q' "${source_dataset}@${latest_common}") $(printf '%q' "$snapshot") | zfs receive -uF $(printf '%q' "$destination")"
+      run_pipeline_with_status "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" || return 1
     else
       description="Full send ${snapshot} -> ${destination}"
-      cmd="zfs send $(printf '%q' "$snapshot") | zfs receive -uF $(printf '%q' "$destination")"
+      run_pipeline_with_status "$description" "" "$snapshot" "$destination" || return 1
     fi
   else
     latest_common=""
     find_latest_common_snapshot_for_target "$source_dataset" "$destination" "$basename" latest_common
     if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
+      is_valid_snapshot_basename "$latest_common" || {
+        fail_current_job "Base snapshot '${latest_common}' is invalid."
+        return 1
+      }
       description="Manual incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
-      cmd="zfs send -I $(printf '%q' "${source_dataset}@${latest_common}") $(printf '%q' "$snapshot") | zfs receive -uF $(printf '%q' "$destination")"
+      run_pipeline_with_status "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" || return 1
     else
       description="Manual full send ${snapshot} -> ${destination}"
-      cmd="zfs send $(printf '%q' "$snapshot") | zfs receive -uF $(printf '%q' "$destination")"
+      run_pipeline_with_status "$description" "" "$snapshot" "$destination" || return 1
     fi
   fi
-
-  run_pipeline_with_status "$description" "$cmd"
 
   set_job_progress "verifying" "$((progress + 15))" "Verifying ${destination}@${basename}."
   snapshot_exists "${destination}@${basename}"
@@ -701,8 +720,8 @@ main() {
   fi
   parse_send_jobs_config
 
-  mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
   trap cleanup EXIT INT TERM
+  mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
 
   exec >> "$LOG_FILE" 2>&1
   log "Send worker $$ starting"

@@ -1,5 +1,6 @@
 <?php
 
+require_once __DIR__ . '/response-helpers.php';
 require_once __DIR__ . '/send-queue-helpers.php';
 
 function zfsas_sm_trim($value)
@@ -14,12 +15,12 @@ function zfsas_sm_h($value)
 
 function zfsas_sm_is_valid_dataset_name($dataset)
 {
-    return preg_match('/^[A-Za-z0-9._\/:+-]+$/', (string) $dataset) === 1;
+    return zfsas_is_valid_dataset_name($dataset);
 }
 
 function zfsas_sm_is_valid_snapshot_name($snapshotName)
 {
-    return preg_match('/^[A-Za-z0-9._:+-]+$/', (string) $snapshotName) === 1;
+    return preg_match('/^[A-Za-z0-9._:+\-]+$/', (string) $snapshotName) === 1;
 }
 
 function zfsas_sm_dataset_key($dataset)
@@ -183,9 +184,19 @@ function zfsas_sm_write_json_file($path, $payload)
         return false;
     }
 
-    @chmod($path, 0664);
+    @chmod($path, 0640);
     zfsas_sm_apply_owner($path);
     return true;
+}
+
+function zfsas_sm_format_utc($epoch)
+{
+    $epoch = (int) $epoch;
+    if ($epoch <= 0) {
+        return '';
+    }
+
+    return gmdate('Y-m-d H:i:s', $epoch) . ' UTC';
 }
 
 function zfsas_sm_queue_operation_files($dataset)
@@ -335,7 +346,7 @@ function zfsas_sm_dataset_summary_rows(&$error = null)
             'lastError' => $lastError,
             'lastMessage' => $lastMessage,
             'lastSnapshotEpoch' => $lastSnapshotEpoch,
-            'lastSnapshotText' => ($lastSnapshotEpoch > 0) ? date('Y-m-d H:i:s', $lastSnapshotEpoch) : '',
+            'lastSnapshotText' => zfsas_sm_format_utc($lastSnapshotEpoch),
             'sendActivity' => $activeSend,
         ];
     }
@@ -418,7 +429,7 @@ function zfsas_sm_dataset_snapshots($dataset, &$error = null)
             'snapshot' => $fullName,
             'snapshotName' => $snapshotName,
             'createdEpoch' => $createdEpoch,
-            'createdText' => date('Y-m-d H:i:s', $createdEpoch),
+            'createdText' => zfsas_sm_format_utc($createdEpoch),
             'usedBytes' => $used,
             'usedText' => zfsas_sm_human_bytes($used),
             'writtenBytes' => $written,

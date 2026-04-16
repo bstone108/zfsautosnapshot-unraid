@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/response-helpers.php';
+
 function zfsas_send_trim($value)
 {
     return trim((string) $value);
@@ -12,7 +14,7 @@ function zfsas_send_h($value)
 
 function zfsas_send_is_valid_dataset_name($dataset)
 {
-    return preg_match('/^[A-Za-z0-9._\/:+-]+$/', (string) $dataset) === 1;
+    return zfsas_is_valid_dataset_name($dataset);
 }
 
 function zfsas_send_dataset_pool_name($dataset)
@@ -416,7 +418,7 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
             continue;
         }
 
-        if ($jobId === '') {
+        if ($jobId === '' || preg_match('/^[a-f0-9]{12}$/', $jobId) !== 1) {
             $jobId = zfsas_send_job_id($source, $destination);
         }
 
@@ -569,7 +571,7 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
             @chmod($configFile, 0644);
             $syncOutput = [];
             $syncExit = 0;
-            @exec(escapeshellcmd($syncScript) . ' 2>&1', $syncOutput, $syncExit);
+            @exec(escapeshellarg($syncScript) . ' 2>&1', $syncOutput, $syncExit);
 
             if ($syncExit !== 0) {
                 $errors[] = 'Settings saved, but failed to apply scheduler: ' . implode(' | ', $syncOutput);

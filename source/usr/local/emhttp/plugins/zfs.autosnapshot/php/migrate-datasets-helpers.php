@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/response-helpers.php';
+
 function zfsas_migrate_trim($value)
 {
     return trim((string) $value);
@@ -190,12 +192,12 @@ function zfsas_migrate_exec_lines($command, &$exitCode = null)
 
 function zfsas_migrate_is_valid_dataset_name($dataset)
 {
-    return preg_match('/^[A-Za-z0-9._\/:+-]+$/', (string) $dataset) === 1;
+    return zfsas_is_valid_dataset_name($dataset);
 }
 
 function zfsas_migrate_is_valid_child_name($name)
 {
-    return preg_match('/^[A-Za-z0-9._:+-]+$/', (string) $name) === 1;
+    return preg_match('/^[A-Za-z0-9._:+\-]+$/', (string) $name) === 1;
 }
 
 function zfsas_migrate_dataset_mountpoint($dataset, &$error = null)

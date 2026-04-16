@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.09 (Testing Branch Only)
+
+- Fixed several `ZFS Send` queue bugs that could stop scheduled replication from enqueuing at the right time or could prune the wrong job history, and tightened the worker pipeline handling so queued send work now runs with safer validation and lock cleanup.
+- Hardened the new feature pages and workers with shared dataset-name validation, safer shell quoting, tighter CSRF/file-permission handling, atomic cron/log writes, and better guardrails around snapshot actions, recovery scans, and irreversible rollback paths.
+
 ### 2026.04.16.08 (Testing Branch Only)
 
 - Reworked scheduled `ZFS Send` prep so it now runs as its own pool-scoped stage, queues retention and low-space snapshot deletions first, waits for that pool's delete queue to drain, and only then fans the actual send work back out into parallel transfer jobs.

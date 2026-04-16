@@ -131,7 +131,7 @@ function zfsas_ops_write_job_file($path, $payload)
         return false;
     }
 
-    @chmod($path, 0664);
+    @chmod($path, 0640);
     zfsas_ops_apply_owner($path);
     return true;
 }
@@ -309,7 +309,7 @@ function zfsas_ops_schedule_state_write($payload)
         return false;
     }
 
-    @chmod($path, 0664);
+    @chmod($path, 0640);
     zfsas_ops_apply_owner($path);
     return true;
 }
@@ -678,7 +678,7 @@ function zfsas_ops_enqueue_manual_send($dataset, $snapshot, $snapshotName, $dest
     $requestedEpoch = time();
     $requestedAt = gmdate('Y-m-d\TH:i:s\Z', $requestedEpoch);
     $jobId = zfsas_ops_manual_send_job_id($snapshot, $destination) . '-' . $requestedEpoch;
-    $path = zfsas_ops_jobs_dir() . '/' . sprintf('%010d-%s.job', $requestedEpoch, $jobId);
+    $path = zfsas_ops_job_path($jobId, $requestedEpoch);
     $payload = [
         'JOB_ID' => $jobId,
         'JOB_TYPE' => 'send',
@@ -730,9 +730,9 @@ function zfsas_ops_enqueue_snapshot_delete($dataset, $snapshotRow, $forceCheckpo
         return false;
     }
 
-    $jobId = 'delete-' . substr(sha1(strtolower($snapshot)), 0, 16) . '-' . time();
     $requestedEpoch = time();
-    $path = zfsas_ops_jobs_dir() . '/' . sprintf('%010d-%s.job', $requestedEpoch, $jobId);
+    $jobId = 'delete-' . substr(sha1(strtolower($snapshot)), 0, 16) . '-' . $requestedEpoch;
+    $path = zfsas_ops_job_path($jobId, $requestedEpoch);
     $payload = [
         'JOB_ID' => $jobId,
         'JOB_TYPE' => 'snapshot_delete',

@@ -185,8 +185,8 @@ main() {
   load_send_config
   parse_send_jobs_config
 
-  mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
   trap cleanup EXIT INT TERM
+  mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
 
   exec >> "$LOG_FILE" 2>&1
   log "Delete worker $$ starting"

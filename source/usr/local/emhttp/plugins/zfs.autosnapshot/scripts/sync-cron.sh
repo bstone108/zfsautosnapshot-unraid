@@ -266,6 +266,12 @@ if [[ -n "$CRON_SCHEDULE_EFFECTIVE" ]]; then
 	fi
 fi
 
+CRON_FILE_TMP="$(mktemp "${CRON_FILE}.tmp.XXXXXX")"
+cleanup_cron_tmp() {
+	rm -f "$CRON_FILE_TMP" >/dev/null 2>&1 || true
+}
+trap cleanup_cron_tmp EXIT
+
 {
 	echo "# Managed by ${PLUGIN_NAME}; edit ${CONFIG_FILE}"
 	# Unraid uses BusyBox crond format in /etc/cron.d: no username column.
@@ -273,9 +279,11 @@ fi
 		echo "${CRON_SCHEDULE_EFFECTIVE} ${RUN_CMD} >> /var/log/zfs_autosnapshot.log 2>&1"
 	fi
 	echo "* * * * * ${QUEUE_KICKER_CMD} >> /var/log/zfs_autosnapshot_send.log 2>&1"
-} >"$CRON_FILE"
+} >"$CRON_FILE_TMP"
 
-chmod 0644 "$CRON_FILE"
+chmod 0644 "$CRON_FILE_TMP"
+mv "$CRON_FILE_TMP" "$CRON_FILE"
+trap - EXIT
 refresh_cron_runtime
 
 if [[ -n "$CRON_SCHEDULE_EFFECTIVE" ]]; then

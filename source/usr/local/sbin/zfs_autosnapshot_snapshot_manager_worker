@@ -54,7 +54,7 @@ write_status() {
   "updated_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 }
 EOF
-  chmod 0664 "$STATUS_FILE" >/dev/null 2>&1 || true
+  chmod 0640 "$STATUS_FILE" >/dev/null 2>&1 || true
   chown nobody "$STATUS_FILE" >/dev/null 2>&1 || true
   chgrp users "$STATUS_FILE" >/dev/null 2>&1 || true
 }
@@ -136,11 +136,11 @@ load_op_file() {
 }
 
 is_valid_dataset() {
-  [[ "$1" =~ ^[A-Za-z0-9._/:+-]+$ ]]
+  [[ "$1" =~ ^[A-Za-z0-9._/:+\-]+$ ]]
 }
 
 is_valid_snapshot_name() {
-  [[ "$1" =~ ^[A-Za-z0-9._:+-]+$ ]]
+  [[ "$1" =~ ^[A-Za-z0-9._:+\-]+$ ]]
 }
 
 snapshot_exists() {
@@ -207,6 +207,7 @@ release_snapshot_holds() {
   local tag
   while IFS=$'\t' read -r _ tag _; do
     [[ -n "$tag" ]] || continue
+    [[ "$tag" == "$HOLD_TAG" ]] || continue
     zfs release "$tag" "$snapshot"
   done < <(zfs holds -H "$snapshot" 2>/dev/null || true)
 
@@ -259,6 +260,7 @@ process_rollback() {
     LAST_ERROR="Snapshot '$SNAPSHOT_NAME' no longer exists."
     return 1
   }
+  log "EXECUTING IRREVERSIBLE rollback -r for dataset ${DATASET} to snapshot ${SNAPSHOT_NAME}"
   zfs rollback -r "$SNAPSHOT"
   LAST_MESSAGE="Rolled back $DATASET to '$SNAPSHOT_NAME'."
 }
@@ -267,7 +269,6 @@ process_send() {
   local latest_common=""
   local source_dataset="$DATASET"
   local target_basename="$SNAPSHOT_NAME"
-  local cmd
 
   snapshot_exists "$SNAPSHOT" || {
     LAST_ERROR="Snapshot '$SNAPSHOT_NAME' no longer exists."
@@ -300,17 +301,38 @@ process_send() {
 
   if [[ -n "$latest_common" ]]; then
     log "Snapshot Manager send incremental: ${source_dataset}@${latest_common} -> ${SNAPSHOT} -> ${DESTINATION}"
-    cmd="zfs send -I $(printf '%q' "${source_dataset}@${latest_common}") $(printf '%q' "$SNAPSHOT") | zfs receive -uF $(printf '%q' "$DESTINATION")"
+    is_valid_snapshot_name "$latest_common" || {
+      LAST_ERROR="Base snapshot '$latest_common' is invalid."
+      return 1
+    }
+    if ! zfs send -I "${source_dataset}@${latest_common}" "$SNAPSHOT" | zfs receive -uF "$DESTINATION"; then
+      LAST_ERROR="Snapshot send to '$DESTINATION' failed."
+      return 1
+    fi
   else
     log "Snapshot Manager send full: ${SNAPSHOT} -> ${DESTINATION}"
-    cmd="zfs send $(printf '%q' "$SNAPSHOT") | zfs receive -uF $(printf '%q' "$DESTINATION")"
+    if ! zfs send "$SNAPSHOT" | zfs receive -uF "$DESTINATION"; then
+      LAST_ERROR="Snapshot send to '$DESTINATION' failed."
+      return 1
+    fi
   fi
-
-  bash -o pipefail -c "$cmd"
   LAST_MESSAGE="Sent snapshot '$SNAPSHOT_NAME' to $DESTINATION."
 }
 
 process_current_operation() {
+  is_valid_dataset "$DATASET" || {
+    LAST_ERROR="Dataset '$DATASET' is invalid."
+    return 1
+  }
+  if [[ -n "$SNAPSHOT_NAME" ]] && ! is_valid_snapshot_name "$SNAPSHOT_NAME"; then
+    LAST_ERROR="Snapshot name '$SNAPSHOT_NAME' is invalid."
+    return 1
+  fi
+  if [[ -n "$DESTINATION" ]] && ! is_valid_dataset "$DESTINATION"; then
+    LAST_ERROR="Destination dataset '$DESTINATION' is invalid."
+    return 1
+  fi
+
   case "$ACTION" in
     take_snapshot) process_take_snapshot ;;
     delete) process_delete ;;
@@ -364,11 +386,12 @@ mkdir -p "$QUEUE_DIR"
 exec >> "$LOG_FILE" 2>&1
 log "Snapshot Manager worker starting for dataset: $DATASET"
 
+trap cleanup EXIT INT TERM
+
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   log "Dataset $DATASET already has an active snapshot-manager worker. Exiting."
   exit 0
 fi
-trap cleanup EXIT INT TERM
 
 while :; do
   ACTIVE_OP_FILE="$(find "$QUEUE_DIR" -maxdepth 1 -type f -name '*.op' | sort | head -n 1)"

@@ -169,7 +169,7 @@ write_containers_file() {
       "$(sanitize_tsv "${CONTAINER_LAST_ERRORS[$index]}")" \
       >> "$CONTAINERS_FILE"
   done
-  chmod 0664 "$CONTAINERS_FILE" >/dev/null 2>&1 || true
+  chmod 0640 "$CONTAINERS_FILE" >/dev/null 2>&1 || true
   apply_owner "$CONTAINERS_FILE"
 }
 
@@ -187,7 +187,7 @@ write_folders_file() {
       "$(sanitize_tsv "${FOLDER_MESSAGES[$index]}")" \
       >> "$FOLDERS_FILE"
   done
-  chmod 0664 "$FOLDERS_FILE" >/dev/null 2>&1 || true
+  chmod 0640 "$FOLDERS_FILE" >/dev/null 2>&1 || true
   apply_owner "$FOLDERS_FILE"
 }
 
@@ -234,7 +234,7 @@ ENDED_EPOCH="$(kv_escape "$ENDED_EPOCH")"
 LAST_ERROR="$(kv_escape "$LAST_ERROR")"
 LOG_FILE="$(kv_escape "$LOG_FILE")"
 EOF
-  chmod 0664 "$STATUS_FILE" >/dev/null 2>&1 || true
+  chmod 0640 "$STATUS_FILE" >/dev/null 2>&1 || true
   apply_owner "$STATUS_FILE"
   write_folders_file
   write_containers_file
@@ -1223,7 +1223,7 @@ build_folder_plan() {
     name="$(basename "$child")"
     [[ "$name" == *".__migration_tmp__."* ]] && continue
     [[ "$name" == "." || "$name" == ".." ]] && continue
-    [[ "$name" =~ ^[A-Za-z0-9._:+-]+$ ]] || continue
+    [[ "$name" =~ ^[A-Za-z0-9._:+\-]+$ ]] || continue
 
     target_ds="${ACTIVE_DATASET}/${name}"
     dataset_exists "$target_ds" && continue
@@ -1295,14 +1295,14 @@ while (( $# > 0 )); do
 done
 
 [[ -n "$DATASET" ]] || die "Dataset is required."
-[[ "$DATASET" =~ ^[A-Za-z0-9._/:+-]+$ ]] || die "Dataset name is invalid."
+[[ "$DATASET" =~ ^[A-Za-z0-9._/:+\-]+$ ]] || die "Dataset name is invalid."
 ACTIVE_DATASET="$DATASET"
 
 ensure_dir "$PLUGIN_ROOT"
 ensure_dir "$LOGS_DIR"
 ensure_dir "$(dirname "$LOCK_FILE")"
 : > "$LOG_FILE"
-chmod 0664 "$LOG_FILE" >/dev/null 2>&1 || true
+chmod 0640 "$LOG_FILE" >/dev/null 2>&1 || true
 apply_owner "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -1312,7 +1312,7 @@ if ! flock -n 9; then
   write_status_file
   exit 1
 fi
-chmod 0664 "$LOCK_FILE" >/dev/null 2>&1 || true
+chmod 0640 "$LOCK_FILE" >/dev/null 2>&1 || true
 apply_owner "$LOCK_FILE"
 
 trap cleanup EXIT INT TERM

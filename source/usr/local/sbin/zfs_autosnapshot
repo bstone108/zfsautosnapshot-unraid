@@ -1338,11 +1338,7 @@ prune_log_to_last_runs() {
 		return 0
 	fi
 
-	if : >"$file" 2>/dev/null; then
-		cat "$tmp" >"$file" 2>/dev/null || true
-	fi
-
-	rm -f "$tmp"
+	mv "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
 }
 
 write_run_summary() {

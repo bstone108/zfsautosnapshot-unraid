@@ -12,6 +12,11 @@ if (!defined('ZFSAS_JSON_END')) {
     define('ZFSAS_JSON_END', 'ZFSAS_JSON_END');
 }
 
+function zfsas_is_valid_dataset_name($dataset)
+{
+    return preg_match('/^[A-Za-z0-9._\/:+\-]+$/', (string) $dataset) === 1;
+}
+
 function zfsas_get_csrf_token()
 {
     static $cachedToken = null;
@@ -195,7 +200,8 @@ function zfsas_normalize_return_url($url, $fallback = '/Settings/ZFSAutoSnapshot
         return (string) $fallback;
     }
 
-    if (preg_match('/[\r\n]/', $candidate) === 1) {
+    $crlfMatch = preg_match('/[\r\n]/', $candidate);
+    if ($crlfMatch === false || $crlfMatch === 1) {
         return (string) $fallback;
     }
 

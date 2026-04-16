@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/response-helpers.php';
+
 function zfsas_recovery_trim($value)
 {
     return trim((string) $value);
@@ -7,7 +9,7 @@ function zfsas_recovery_trim($value)
 
 function zfsas_recovery_is_valid_dataset_name($dataset)
 {
-    return preg_match('/^[A-Za-z0-9._\/:+-]+$/', (string) $dataset) === 1;
+    return zfsas_is_valid_dataset_name($dataset);
 }
 
 function zfsas_recovery_h($value)
@@ -89,7 +91,7 @@ function zfsas_recovery_write_json_file($path, $payload)
         return false;
     }
 
-    @chmod($path, 0664);
+    @chmod($path, 0640);
     zfsas_recovery_apply_owner($path);
     return true;
 }

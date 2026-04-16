@@ -5,6 +5,7 @@ $summaryLogFile = '/var/log/zfs_autosnapshot.last.log';
 function isSafeLogPath($path)
 {
     clearstatcache(true, $path);
+    $allowedRoot = '/var/log';
 
     if (!is_string($path) || $path === '') {
         return false;
@@ -15,6 +16,16 @@ function isSafeLogPath($path)
     }
 
     if (file_exists($path) && !is_file($path)) {
+        return false;
+    }
+
+    $dirReal = realpath(dirname($path));
+    if ($dirReal === false || ($dirReal !== $allowedRoot && strpos($dirReal, $allowedRoot . '/') !== 0)) {
+        return false;
+    }
+
+    $real = realpath($path);
+    if ($real !== false && $real !== $allowedRoot && strpos($real, $allowedRoot . '/') !== 0) {
         return false;
     }
 
