@@ -413,7 +413,7 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
     $newThresholdRaw = zfsas_send_trim($post['new_job_threshold'] ?? '');
     $newChildrenRaw = zfsas_send_trim($post['new_job_children'] ?? '0');
 
-    if ($newSource !== '' || $newDestination !== '' || $newFrequencyRaw !== '' || $newThresholdRaw !== '' || $newChildrenRaw !== '') {
+    if ($newSource !== '' || $newDestination !== '') {
         $newFrequency = zfsas_send_normalize_frequency($newFrequencyRaw);
         $newThreshold = zfsas_send_normalize_threshold($newThresholdRaw);
         $newChildren = zfsas_send_normalize_children_flag($newChildrenRaw);

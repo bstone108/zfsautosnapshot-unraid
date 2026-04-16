@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.15.3 (Testing Branch Only)
+
+- Fixed the `ZFS Send` scheduler save validation so the empty “Add Job” row no longer gets treated as a real new job just because its frequency, children, and threshold controls have default values.
+
 ### 2026.04.15.2 (Testing Branch Only)
 
 - Injected Unraid's CSRF token into the standalone `ZFS Send`, `Snapshot Manager`, and `Recovery Tools` pages so their existing button and AJAX code can send valid CSRF-protected requests instead of failing before PHP runs.
