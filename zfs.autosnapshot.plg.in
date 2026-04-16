@@ -2,8 +2,9 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Fixed a `ZFS Send` worker bug that could overwrite the real send failure with the generic `snapshot_created` error message and make bad queue items look like they were looping in the wrong phase.
-- Added a `Cancel` control to active `ZFS Send` queue items so stuck queued, waiting, or running send jobs can be stopped and left behind as a canceled queue row until you confirm-clear them.
+- Changed recursive `ZFS Send` fan-out so the actual child send items now queue only the transfer work, and each child send queues its own zero-change cleanup at the end instead of creating a separate cleanup queue row that just clogs the send queue.
+- Fixed scheduled `ZFS Send` timing so completed schedule windows are now remembered outside the short-lived queue rows, and automatic jobs only queue once per real local schedule window instead of being re-added every time the kicker wakes up after the old success rows auto-expire.
+- Aligned scheduled `ZFS Send` windows to local wall-clock boundaries, so `6h`, `12h`, and `1d` jobs now line up with the expected local hour and midnight boundaries instead of drifting off raw UTC math.
 
   </CHANGES>
 

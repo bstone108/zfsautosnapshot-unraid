@@ -6,6 +6,7 @@ SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
 OPS_ROOT="${CONFIG_DIR}/ops_queue"
 OPS_JOBS_DIR="${OPS_ROOT}/jobs"
 OPS_STATUS_DIR="${OPS_ROOT}/status"
+SEND_SCHEDULE_STATE_FILE="${OPS_STATUS_DIR}/send_schedule_state.state"
 RUNTIME_DIR="/var/run/zfs-autosnapshot-ops"
 SEND_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/send-workers"
 DELETE_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/delete-worker"
@@ -41,6 +42,7 @@ declare -A SCHEDULE_THRESHOLD_RAW=()
 declare -A SCHEDULE_THRESHOLD_BYTES=()
 declare -A SCHEDULE_INCLUDE_CHILDREN=()
 declare -A SCHEDULE_PREFIX=()
+declare -A SCHEDULE_LAST_COMPLETED_WINDOW=()
 QUEUE_DELETE_LAST_ADDED=0
 QUEUE_DELETE_LAST_ESTIMATED_RECLAIM=0
 
@@ -183,16 +185,53 @@ frequency_seconds() {
   esac
 }
 
+date_at_epoch() {
+  local epoch="$1"
+  local format="$2"
+  [[ "$format" == +* ]] && format="${format#+}"
+  date +"$format" -d "@$epoch" 2>/dev/null || date -r "$epoch" +"$format"
+}
+
+timezone_offset_seconds() {
+  local epoch="$1"
+  local raw sign hours minutes
+  raw="$(date_at_epoch "$epoch" +%z)"
+  [[ "$raw" =~ ^([+-])([0-9]{2})([0-9]{2})$ ]] || {
+    echo 0
+    return 0
+  }
+  sign="${BASH_REMATCH[1]}"
+  hours="${BASH_REMATCH[2]}"
+  minutes="${BASH_REMATCH[3]}"
+  if [[ "$sign" == "-" ]]; then
+    echo $(( -1 * ((10#$hours * 3600) + (10#$minutes * 60)) ))
+  else
+    echo $(( (10#$hours * 3600) + (10#$minutes * 60) ))
+  fi
+}
+
 frequency_window_key() {
   local frequency="$1"
   local now_epoch="$2"
-  local seconds
+  local seconds offset local_epoch
+
+  case "$frequency" in
+    6h|12h|1d|7d) ;;
+    *)
+      echo "$now_epoch"
+      return 0
+      ;;
+  esac
+
   seconds="$(frequency_seconds "$frequency")"
   (( seconds > 0 )) || {
     echo "$now_epoch"
     return 0
   }
-  echo $(( now_epoch - (now_epoch % seconds) ))
+
+  offset="$(timezone_offset_seconds "$now_epoch")"
+  local_epoch=$(( now_epoch + offset ))
+  echo $(( (local_epoch - (local_epoch % seconds)) - offset ))
 }
 
 jobs_are_same_pool_overlap() {
@@ -383,6 +422,55 @@ job_completes_schedule_window() {
     ""|single_send|finalize) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+load_schedule_state() {
+  local line job_id window_key
+
+  SCHEDULE_LAST_COMPLETED_WINDOW=()
+  [[ -f "$SEND_SCHEDULE_STATE_FILE" ]] || return 0
+
+  while IFS='|' read -r job_id window_key || [[ -n "$job_id" ]]; do
+    job_id="$(trim "$job_id")"
+    window_key="$(trim "$window_key")"
+    [[ -n "$job_id" ]] || continue
+    [[ "$window_key" =~ ^[0-9]+$ ]] || continue
+    SCHEDULE_LAST_COMPLETED_WINDOW["$job_id"]="$window_key"
+  done < "$SEND_SCHEDULE_STATE_FILE"
+}
+
+write_schedule_state() {
+  local tmp job_id
+  ops_ensure_dir "$OPS_STATUS_DIR" || return 1
+  tmp="$(mktemp "${SEND_SCHEDULE_STATE_FILE}.tmp.XXXXXX")" || return 1
+
+  while IFS= read -r job_id; do
+    printf '%s|%s\n' "$job_id" "${SCHEDULE_LAST_COMPLETED_WINDOW[$job_id]}" >> "$tmp"
+  done < <(printf '%s\n' "${!SCHEDULE_LAST_COMPLETED_WINDOW[@]}" | sort)
+
+  mv "$tmp" "$SEND_SCHEDULE_STATE_FILE" || {
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 1
+  }
+  chmod 0640 "$SEND_SCHEDULE_STATE_FILE" >/dev/null 2>&1 || true
+  ops_apply_owner "$SEND_SCHEDULE_STATE_FILE"
+}
+
+last_completed_schedule_window_key() {
+  local schedule_job_id="$1"
+  printf '%s' "${SCHEDULE_LAST_COMPLETED_WINDOW[$schedule_job_id]:-0}"
+}
+
+record_completed_schedule_window() {
+  local schedule_job_id="$1"
+  local window_key="$2"
+
+  [[ -n "$schedule_job_id" ]] || return 1
+  [[ "$window_key" =~ ^[0-9]+$ ]] || return 1
+
+  load_schedule_state
+  SCHEDULE_LAST_COMPLETED_WINDOW["$schedule_job_id"]="$window_key"
+  write_schedule_state
 }
 
 set_job_success_purge_after() {
@@ -1280,29 +1368,6 @@ ensure_destination_space_for_schedule_job() {
   done
 }
 
-last_completed_schedule_job_epoch() {
-  local schedule_job_id="$1"
-  local latest=0
-  local file
-  local -A job=()
-  local requested state
-
-  while IFS= read -r file; do
-    job_load "$file" job || continue
-    [[ "$(job_get job JOB_TYPE)" == "send" ]] || continue
-    [[ "$(job_get job JOB_MODE)" == "scheduled" ]] || continue
-    [[ "$(job_get job SCHEDULE_JOB_ID)" == "$schedule_job_id" ]] || continue
-    state="$(job_get job STATE)"
-    [[ "$state" == "complete" ]] || continue
-    job_completes_schedule_window job || continue
-    requested="$(job_get job REQUESTED_EPOCH 0)"
-    [[ "$requested" =~ ^[0-9]+$ ]] || requested=0
-    (( requested > latest )) && latest="$requested"
-  done < <(list_job_files)
-
-  printf '%s' "$latest"
-}
-
 schedule_job_blocked() {
   local schedule_job_id="$1"
   local file
@@ -1342,22 +1407,25 @@ schedule_window_exists() {
 
 enqueue_scheduled_send_jobs_due() {
   local now_epoch="$1"
-  local job_id frequency interval last_success window_key requested_at requested_epoch job_file
+  local job_id frequency current_window last_completed_window requested_at requested_epoch job_file
   local -A job=()
+
+  load_schedule_state
 
   for job_id in "${SCHEDULE_JOB_IDS[@]}"; do
     frequency="${SCHEDULE_FREQUENCY[$job_id]}"
-    interval="$(frequency_seconds "$frequency")"
-    (( interval > 0 )) || continue
-    last_success="$(last_completed_schedule_job_epoch "$job_id")"
-    if (( last_success > 0 && now_epoch - last_success < interval )); then
+    current_window="$(frequency_window_key "$frequency" "$now_epoch")"
+    [[ "$current_window" =~ ^[0-9]+$ ]] || continue
+
+    last_completed_window="$(last_completed_schedule_window_key "$job_id")"
+    [[ "$last_completed_window" =~ ^[0-9]+$ ]] || last_completed_window=0
+    if (( last_completed_window >= current_window )); then
       continue
     fi
 
     schedule_job_blocked "$job_id" && continue
 
-    window_key="$(frequency_window_key "$frequency" "$now_epoch")"
-    schedule_window_exists "$job_id" "$window_key" && continue
+    schedule_window_exists "$job_id" "$current_window" && continue
 
     requested_epoch="$now_epoch"
     requested_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ' -r "$requested_epoch" 2>/dev/null || date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -1372,7 +1440,7 @@ enqueue_scheduled_send_jobs_due() {
     job[REQUESTED_EPOCH]="$requested_epoch"
     job[REQUESTED_AT]="$requested_at"
     job[QUEUE_SORT]="$requested_epoch"
-    job[WINDOW_KEY]="$window_key"
+    job[WINDOW_KEY]="$current_window"
     job[SCHEDULE_JOB_ID]="$job_id"
     job[SOURCE_ROOT]="${SCHEDULE_SOURCE_ROOT[$job_id]}"
     job[DESTINATION_ROOT]="${SCHEDULE_DEST_ROOT[$job_id]}"
@@ -1391,7 +1459,7 @@ enqueue_scheduled_send_jobs_due() {
     job[MEMBER_COUNT]="0"
     job[COMPLETES_SCHEDULE_WINDOW]="1"
 
-    job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "send-${job_id}-${window_key}")"
+    job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "send-${job_id}-${current_window}")"
     job_write "$job_file" job || continue
   done
 

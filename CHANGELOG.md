@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.12 (Testing Branch Only)
+
+- Changed recursive `ZFS Send` fan-out so the actual child send items now queue only the transfer work, and each child send queues its own zero-change cleanup at the end instead of creating a separate cleanup queue row that just clogs the send queue.
+- Fixed scheduled `ZFS Send` timing so completed schedule windows are now remembered outside the short-lived queue rows, and automatic jobs only queue once per real local schedule window instead of being re-added every time the kicker wakes up after the old success rows auto-expire.
+- Aligned scheduled `ZFS Send` windows to local wall-clock boundaries, so `6h`, `12h`, and `1d` jobs now line up with the expected local hour and midnight boundaries instead of drifting off raw UTC math.
+
 ### 2026.04.16.11 (Testing Branch Only)
 
 - Fixed a `ZFS Send` worker bug that could overwrite the real send failure with the generic `snapshot_created` error message and make bad queue items look like they were looping in the wrong phase.
