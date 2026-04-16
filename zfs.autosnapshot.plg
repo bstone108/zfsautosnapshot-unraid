@@ -1,7 +1,9 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.15.7" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.15.8" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.15.7 (2026-04-16)
+### 2026.04.15.8 (2026-04-16)
+- Changed scheduled `ZFS Send` destination cleanup so its free-space target can now delete the oldest eligible destination snapshots of any type inside the configured send targets, while still protecting the newest successful send checkpoint and any checkpoint basenames that queued or running sends still need.
+- Added runner coordination between the two shell engines so `ZFS Send` now waits for an in-progress autosnapshot run to finish before starting, and the regular autosnapshot cleanup phases now skip datasets that are actively being sent while still allowing the normal snapshot-creation phase to continue.
 - Added a new `Dataset Migrator` under `Special Features` that can convert top-level folders inside a selected dataset into child datasets with live folder-by-folder progress, free-space wait messaging, paranoid verification, rollback if a folder copy fails, and automatic stop/restart handling for Docker containers that were running before the migration started.
 - Fixed the main autosnapshot dataset picker so `ZFS Send` reservations now lock only the actual destination datasets in use, plus child datasets under a recursive send target, instead of falsely locking the whole destination pool or unrelated siblings.
 - Widened the main settings container and let the embedded `Snapshot Manager` frame use the full width of its card so the right side is less likely to get clipped on wide dataset/action layouts.
@@ -14,9 +16,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.15.7-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.15.7-noarch-1.txz</URL>
-    <MD5>fcae9a0dd2888569166b73e8e1bb0668</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.15.8-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.15.8-noarch-1.txz</URL>
+    <MD5>1af2c8904426fc6d3bde15834e6a9e0c</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -24,10 +26,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.04.15.7-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.04.15.8-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="fcae9a0dd2888569166b73e8e1bb0668"
+PKG_MD5="1af2c8904426fc6d3bde15834e6a9e0c"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
