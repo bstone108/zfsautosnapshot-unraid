@@ -1,7 +1,9 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.16.03" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.16.04" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.16.03 (2026-04-16)
+### 2026.04.16.04 (2026-04-16)
+- Reworked the `Dataset Migrator` container handling so it no longer drops every running container at once. It now stops only the containers tied to the current migration batch, migrates all related top-level folders those containers share inside the selected dataset, and then starts those containers back up before moving on.
+- Added dependency-aware batch ordering to the `Dataset Migrator` so shared service groups are handled in one pass when possible, reducing unnecessary stop/start churn while still keeping dependent containers down only for the folder groups they actually need.
 - Reworked the `Special Features` and `Repair Tools` sections so each tool now shows as a button on the left with its description beside it, making the tool pages easier to scan and leaving more room for additional entries later.
 - Fixed the `Dataset Migrator` start path so it no longer reruns the full folder-size preview before launching the worker, and so it now waits for the worker to report real startup status instead of claiming success before anything has actually begun.
 - Reduced unnecessary `Dataset Migrator` refresh work by skipping the expensive preview rescan while the currently selected dataset is already the one being migrated in the background.
@@ -23,9 +25,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.16.03-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.16.03-noarch-1.txz</URL>
-    <MD5>6809637b917756d9569ef2522fe0104a</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.16.04-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.16.04-noarch-1.txz</URL>
+    <MD5>49e98c3d981db11e60b88a2e9d325435</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -33,10 +35,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.04.16.03-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.04.16.04-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="6809637b917756d9569ef2522fe0104a"
+PKG_MD5="49e98c3d981db11e60b88a2e9d325435"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
