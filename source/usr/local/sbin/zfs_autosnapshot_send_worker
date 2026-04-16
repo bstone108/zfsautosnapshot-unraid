@@ -445,19 +445,30 @@ send_member_snapshot() {
 }
 
 cleanup_previous_scheduled_checkpoint() {
-  local previous_basename source_root dest_root prefix current_basename
-  previous_basename="$(job_get job PREVIOUS_SNAPSHOT_NAME)"
+  local source_root prefix current_basename snap_name snap_epoch snap_base
+  local -A old_basenames=()
+
   current_basename="$(job_get job SOURCE_SNAPSHOT_NAME)"
-  [[ -n "$previous_basename" ]] || return 0
-  [[ "$previous_basename" != "$current_basename" ]] || return 0
+  [[ -n "$current_basename" ]] || return 0
 
   source_root="$(job_get job SOURCE_ROOT)"
-  dest_root="$(job_get job DESTINATION_ROOT)"
   prefix="$(job_get job SNAPSHOT_PREFIX)"
+  [[ -n "$source_root" && -n "$prefix" ]] || return 0
+  dataset_exists "$source_root" || return 0
 
-  set_job_progress "cleanup" "95" "Removing previous send checkpoint ${previous_basename}."
-  dataset_exists "$source_root" && delete_checkpoint_basename_across_tree "$source_root" "$previous_basename" "$prefix" "source"
-  dataset_exists "$dest_root" && delete_checkpoint_basename_across_tree "$dest_root" "$previous_basename" "$prefix" "destination"
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+    snap_base="${snap_name##*@}"
+    [[ "$snap_base" == "$current_basename" ]] && continue
+    old_basenames["$snap_base"]=1
+  done < <(job_list_basenames_for_root "$source_root" "$prefix")
+
+  ((${#old_basenames[@]} > 0)) || return 0
+
+  set_job_progress "cleanup" "95" "Removing older source send checkpoints now that ${current_basename} is verified on the destination."
+  for snap_base in "${!old_basenames[@]}"; do
+    delete_checkpoint_basename_across_tree "$source_root" "$snap_base" "$prefix" "source"
+  done
 }
 
 run_child_jobs_have_failed() {
