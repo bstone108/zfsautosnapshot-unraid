@@ -51,10 +51,7 @@ $weekdayNames = [
     '6' => 'Saturday',
 ];
 
-$sendDefaults = [
-    'SEND_SNAPSHOT_PREFIX' => 'zfs-send-',
-    'SEND_JOBS' => '',
-];
+$sendDefaults = zfsas_send_defaults();
 
 function h($value)
 {
@@ -749,6 +746,9 @@ $defaultSettingsReturnUrl = pluginSettingsPageUrl($settingsPagePath, ['saved' =>
 $config = parseConfigFile($configFile, $defaults);
 $errors = [];
 $notices = [];
+$datasetParseWarnings = [];
+$configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $datasetParseWarnings);
+$availableDatasets = [];
 $sendConfig = zfsas_send_parse_config_file($sendConfigFile, $sendDefaults);
 $sendParseErrors = [];
 $sendParseWarnings = [];
@@ -764,11 +764,7 @@ if (!$isAjaxSaveRequest && (($_GET['saved'] ?? '') === '1')) {
     $notices[] = 'Settings saved and schedule applied.';
 }
 
-$datasetParseWarnings = [];
-$configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $datasetParseWarnings);
-
 $datasetDiscoveryError = null;
-$availableDatasets = [];
 $datasetRows = [];
 $datasetPools = [];
 
