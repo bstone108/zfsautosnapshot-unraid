@@ -16,6 +16,7 @@ PERCENT_SAFETY_MARGIN=10
 CURRENT_FOLDER_INDEX=-1
 ACTIVE_DATASET=""
 ACTIVE_MOUNTPOINT=""
+ACTIVE_MOUNTPOINT_REAL=""
 STATE="preparing"
 MESSAGE="Preparing dataset migration."
 CURRENT_STEP="preparing"
@@ -667,6 +668,16 @@ normalize_container_ref() {
   printf '%s' "$ref"
 }
 
+canonicalize_host_path() {
+  local path="$1"
+  path="$(trim "$path")"
+  [[ -n "$path" ]] || {
+    printf ''
+    return 0
+  }
+  readlink -f -- "$path" 2>/dev/null || printf '%s' "$path"
+}
+
 parse_container_dependency_refs() {
   local network_mode="$1"
   local volumes_from="$2"
@@ -702,13 +713,13 @@ folder_indexes_for_mount_source() {
   local source="$1"
   local rest folder_name list="" folder_index
 
-  source="$(trim "$source")"
+  source="$(canonicalize_host_path "$source")"
   [[ -n "$source" ]] || {
     printf ''
     return 0
   }
 
-  if [[ "$source" == "$ACTIVE_MOUNTPOINT" ]]; then
+  if [[ "$source" == "$ACTIVE_MOUNTPOINT_REAL" ]]; then
     for folder_index in "${!FOLDER_NAMES[@]}"; do
       list="$(list_append_unique "$list" "$folder_index")"
     done
@@ -717,8 +728,8 @@ folder_indexes_for_mount_source() {
   fi
 
   case "$source" in
-    "$ACTIVE_MOUNTPOINT"/*)
-      rest="${source#"$ACTIVE_MOUNTPOINT"/}"
+    "$ACTIVE_MOUNTPOINT_REAL"/*)
+      rest="${source#"$ACTIVE_MOUNTPOINT_REAL"/}"
       folder_name="${rest%%/*}"
       if [[ -n "${FOLDER_INDEX_BY_NAME[$folder_name]+x}" ]]; then
         list="$(list_append_unique "$list" "${FOLDER_INDEX_BY_NAME[$folder_name]}")"
@@ -1205,6 +1216,8 @@ build_folder_plan() {
   ACTIVE_MOUNTPOINT="$(zfs get -H -o value mountpoint "$ACTIVE_DATASET" 2>/dev/null | head -n 1 || true)"
   [[ -n "$ACTIVE_MOUNTPOINT" && "$ACTIVE_MOUNTPOINT" != "legacy" && "$ACTIVE_MOUNTPOINT" != "none" ]] || die "Dataset $ACTIVE_DATASET does not have a readable mounted filesystem path."
   [[ -d "$ACTIVE_MOUNTPOINT" ]] || die "Mountpoint $ACTIVE_MOUNTPOINT does not exist or is not a directory."
+  ACTIVE_MOUNTPOINT_REAL="$(canonicalize_host_path "$ACTIVE_MOUNTPOINT")"
+  [[ -n "$ACTIVE_MOUNTPOINT_REAL" && -d "$ACTIVE_MOUNTPOINT_REAL" ]] || die "Could not resolve a usable canonical mountpoint path for $ACTIVE_DATASET."
 
   while IFS= read -r -d '' child; do
     name="$(basename "$child")"

@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.05 (Testing Branch Only)
+
+- Hardened the `Dataset Migrator` folder-to-container mapping so it now canonicalizes Docker mount source paths and keeps migration batching strictly confined to the selected dataset root, preventing containers with other host paths from pulling unrelated locations into the migration plan.
+
 ### 2026.04.16.04 (Testing Branch Only)
 
 - Reworked the `Dataset Migrator` container handling so it no longer drops every running container at once. It now stops only the containers tied to the current migration batch, migrates all related top-level folders those containers share inside the selected dataset, and then starts those containers back up before moving on.
