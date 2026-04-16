@@ -1125,7 +1125,7 @@ if ($isPostRequest) {
       var thresholdEl = byId('new_job_threshold');
       var source = sourceEl ? sourceEl.value.trim() : '';
       var destination = destinationEl ? destinationEl.value.trim() : '';
-      var frequency = frequencyEl ? frequencyEl.value : '1h';
+      var frequency = frequencyEl ? frequencyEl.value : '6h';
       var children = childrenEl ? childrenEl.value : '0';
       var threshold = thresholdEl ? thresholdEl.value.trim() : '100G';
 

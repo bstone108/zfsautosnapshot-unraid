@@ -39,9 +39,6 @@ function zfsas_send_normalize_threshold($value)
 function zfsas_send_frequency_options()
 {
     return [
-        '15m' => 'Every 15 minutes',
-        '30m' => 'Every 30 minutes',
-        '1h' => 'Every hour',
         '6h' => 'Every 6 hours',
         '12h' => 'Every 12 hours',
         '1d' => 'Every day',
@@ -49,9 +46,24 @@ function zfsas_send_frequency_options()
     ];
 }
 
-function zfsas_send_normalize_frequency($value)
+function zfsas_send_legacy_frequency_upgrades()
+{
+    return [
+        '15m' => '6h',
+        '30m' => '6h',
+        '1h' => '6h',
+    ];
+}
+
+function zfsas_send_normalize_frequency($value, $allowLegacyUpgrade = false)
 {
     $value = strtolower(trim((string) $value));
+    if ($allowLegacyUpgrade) {
+        $legacy = zfsas_send_legacy_frequency_upgrades();
+        if (array_key_exists($value, $legacy)) {
+            return $legacy[$value];
+        }
+    }
     $options = zfsas_send_frequency_options();
     return array_key_exists($value, $options) ? $value : null;
 }
@@ -268,7 +280,7 @@ function zfsas_send_parse_jobs($jobsRaw, &$errors = [], &$warnings = [])
         $jobId = zfsas_send_trim($jobIdRaw);
         $source = zfsas_send_trim($sourceRaw);
         $destination = zfsas_send_trim($destinationRaw);
-        $frequency = zfsas_send_normalize_frequency($frequencyRaw);
+        $frequency = zfsas_send_normalize_frequency($frequencyRaw, true);
         $threshold = zfsas_send_normalize_threshold($thresholdRaw);
         $children = zfsas_send_normalize_children_flag($childrenRaw);
 
@@ -297,6 +309,10 @@ function zfsas_send_parse_jobs($jobsRaw, &$errors = [], &$warnings = [])
         if ($frequency === null) {
             $warnings[] = "Ignoring ZFS send job '{$entry}' because the frequency is invalid.";
             continue;
+        }
+
+        if ($frequency !== strtolower($frequencyRaw)) {
+            $warnings[] = "Upgrading legacy ZFS send frequency '{$frequencyRaw}' to '" . zfsas_send_frequency_label($frequency) . "' for '{$source}' -> '{$destination}'.";
         }
 
         if ($threshold === null) {
@@ -502,7 +518,7 @@ function zfsas_send_render_config($config)
     $lines[] = '';
     $lines[] = '# Semicolon-separated jobs encoded as:';
     $lines[] = '#   jobid|source|destination|frequency|threshold|children';
-    $lines[] = '# frequency values: 15m, 30m, 1h, 6h, 12h, 1d, 7d';
+    $lines[] = '# frequency values: 6h, 12h, 1d, 7d';
     $lines[] = 'SEND_JOBS=' . zfsas_send_quote_config_string($config['SEND_JOBS']);
     $lines[] = '';
 

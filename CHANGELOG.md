@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.06 (Testing Branch Only)
+
+- Removed `ZFS Send` schedule options shorter than `6` hours so the scheduler now only offers `6h`, `12h`, `1d`, and `7d`, which better matches how long real replication runs can take.
+- Added compatibility handling so older saved `ZFS Send` jobs that were set to `15m`, `30m`, or `1h` are automatically upgraded to `6h` instead of being dropped outright.
+
 ### 2026.04.16.05 (Testing Branch Only)
 
 - Hardened the `Dataset Migrator` folder-to-container mapping so it now canonicalizes Docker mount source paths and keeps migration batching strictly confined to the selected dataset root, preventing containers with other host paths from pulling unrelated locations into the migration plan.

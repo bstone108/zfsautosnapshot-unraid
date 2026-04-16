@@ -160,11 +160,16 @@ threshold_to_bytes() {
   echo $(( number * multiplier ))
 }
 
+normalize_send_frequency() {
+  case "$1" in
+    15m|30m|1h) echo "6h" ;;
+    6h|12h|1d|7d) echo "$1" ;;
+    *) echo "" ;;
+  esac
+}
+
 frequency_seconds() {
   case "$1" in
-    15m) echo 900 ;;
-    30m) echo 1800 ;;
-    1h) echo 3600 ;;
     6h) echo 21600 ;;
     12h) echo 43200 ;;
     1d) echo 86400 ;;
@@ -215,7 +220,7 @@ parse_send_jobs_config() {
     job_id="$(trim "$job_id")"
     source="$(trim "$source")"
     dest="$(trim "$dest")"
-    freq="$(trim "$freq")"
+    freq="$(normalize_send_frequency "$(trim "$freq")")"
     thresh="$(trim "$thresh")"
     children="$(trim "${children:-0}")"
     [[ -n "$children" ]] || children="0"
@@ -227,10 +232,7 @@ parse_send_jobs_config() {
     [[ "$dest" == */* ]] || continue
     [[ "$source" != "$dest" ]] || continue
     [[ -z "${seen[$job_id]:-}" ]] || continue
-    case "$freq" in
-      15m|30m|1h|6h|12h|1d|7d) ;;
-      *) continue ;;
-    esac
+    [[ -n "$freq" ]] || continue
     threshold_bytes="$(threshold_to_bytes "$thresh" 2>/dev/null || true)"
     [[ "$threshold_bytes" =~ ^[0-9]+$ ]] || continue
     [[ "$children" == "1" ]] || children="0"
