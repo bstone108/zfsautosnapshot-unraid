@@ -1,7 +1,9 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.16.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.16.02" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.16.01 (2026-04-16)
+### 2026.04.16.02 (2026-04-16)
+- Fixed the `Dataset Migrator` start path so it no longer reruns the full folder-size preview before launching the worker, and so it now waits for the worker to report real startup status instead of claiming success before anything has actually begun.
+- Reduced unnecessary `Dataset Migrator` refresh work by skipping the expensive preview rescan while the currently selected dataset is already the one being migrated in the background.
 - Fixed the main settings page load path after the recent `ZFS Send` work by restoring the correct initialization order for dataset parsing and send reservation calculations, and by switching the page to the shared `ZFS Send` defaults so the main plugin page can boot cleanly again.
 - Added `ZFS Send` retention settings so the send tool can queue destination snapshot deletions using the same keep-all, then daily, then weekly style policy before a scheduled send and again as a zero-change cleanup pass afterward, while always preserving the newest successful send checkpoint needed for the next incremental replication.
 - Added a live pending-delete count next to the `ZFS Send` queue header so you can see when retention and other background snapshot deletions have been queued for later processing.
@@ -20,9 +22,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.16.01-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.16.01-noarch-1.txz</URL>
-    <MD5>0bf182bf807a5b5549fd9fd9c4cbd88e</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.16.02-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.16.02-noarch-1.txz</URL>
+    <MD5>663ef73cd6fe7d97edba86733ad580eb</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -30,10 +32,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.04.16.01-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.04.16.02-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="0bf182bf807a5b5549fd9fd9c4cbd88e"
+PKG_MD5="663ef73cd6fe7d97edba86733ad580eb"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
