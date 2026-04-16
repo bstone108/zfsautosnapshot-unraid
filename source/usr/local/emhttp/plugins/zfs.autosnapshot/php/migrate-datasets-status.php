@@ -14,8 +14,9 @@ $datasetError = null;
 $previewError = null;
 
 $datasets = zfsas_migrate_list_datasets($datasetError);
+$status = zfsas_migrate_current_status();
 $preview = null;
-if ($selectedDataset !== '') {
+if ($selectedDataset !== '' && zfsas_migrate_trim($status['DATASET'] ?? '') !== $selectedDataset) {
     $preview = zfsas_migrate_preview_dataset($selectedDataset, $previewError);
 }
 
@@ -26,7 +27,7 @@ zfsas_emit_marked_json([
     'previewError' => $previewError,
     'datasets' => $datasets,
     'preview' => $preview,
-    'status' => zfsas_migrate_current_status(),
+    'status' => $status,
     'docker' => zfsas_migrate_docker_preflight(),
     'logTail' => zfsas_migrate_status_log_tail(40),
 ]);

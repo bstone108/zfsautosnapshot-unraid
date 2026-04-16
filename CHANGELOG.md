@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.02 (Testing Branch Only)
+
+- Fixed the `Dataset Migrator` start path so it no longer reruns the full folder-size preview before launching the worker, and so it now waits for the worker to report real startup status instead of claiming success before anything has actually begun.
+- Reduced unnecessary `Dataset Migrator` refresh work by skipping the expensive preview rescan while the currently selected dataset is already the one being migrated in the background.
+
 ### 2026.04.16.01 (Testing Branch Only)
 
 - Fixed the main settings page load path after the recent `ZFS Send` work by restoring the correct initialization order for dataset parsing and send reservation calculations, and by switching the page to the shared `ZFS Send` defaults so the main plugin page can boot cleanly again.

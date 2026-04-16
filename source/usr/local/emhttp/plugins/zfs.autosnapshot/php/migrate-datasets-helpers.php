@@ -276,7 +276,7 @@ function zfsas_migrate_directory_size_bytes($path)
     return (int) trim((string) $lines[0]);
 }
 
-function zfsas_migrate_preview_dataset($dataset, &$error = null)
+function zfsas_migrate_preview_dataset($dataset, &$error = null, $includeSizes = true)
 {
     $error = null;
     $mountpoint = zfsas_migrate_dataset_mountpoint($dataset, $mountError);
@@ -343,7 +343,7 @@ function zfsas_migrate_preview_dataset($dataset, &$error = null)
         $name = $entry->getFilename();
         $path = $entry->getPathname();
         $targetDataset = $dataset . '/' . $name;
-        $sizeBytes = zfsas_migrate_directory_size_bytes($path);
+        $sizeBytes = $includeSizes ? zfsas_migrate_directory_size_bytes($path) : null;
         $state = 'eligible';
         $message = 'Will be migrated into its own child dataset.';
         $eligible = true;
@@ -380,7 +380,9 @@ function zfsas_migrate_preview_dataset($dataset, &$error = null)
 
         if ($eligible) {
             $eligibleCount += 1;
-            $eligibleBytes += (int) $sizeBytes;
+            if ($includeSizes && $sizeBytes !== null) {
+                $eligibleBytes += (int) $sizeBytes;
+            }
         }
 
         $rows[] = [
@@ -405,6 +407,83 @@ function zfsas_migrate_preview_dataset($dataset, &$error = null)
         'eligibleCount' => $eligibleCount,
         'eligibleBytes' => $eligibleBytes,
     ];
+}
+
+function zfsas_migrate_reset_runtime_files()
+{
+    $paths = [
+        zfsas_migrate_status_file(),
+        zfsas_migrate_folders_file(),
+        zfsas_migrate_containers_file(),
+        zfsas_migrate_log_file(),
+    ];
+
+    foreach ($paths as $path) {
+        if (is_file($path)) {
+            @unlink($path);
+        }
+    }
+}
+
+function zfsas_migrate_startup_error_message()
+{
+    $status = zfsas_migrate_read_status();
+    $message = zfsas_migrate_trim($status['LAST_ERROR'] ?? $status['MESSAGE'] ?? '');
+    if ($message !== '') {
+        return $message;
+    }
+
+    $logLines = zfsas_migrate_status_log_tail(10);
+    if (!empty($logLines)) {
+        return zfsas_migrate_trim((string) end($logLines));
+    }
+
+    return '';
+}
+
+function zfsas_migrate_wait_for_start($dataset, $pid, &$error = null)
+{
+    $error = null;
+    $deadline = microtime(true) + 3.0;
+    $dataset = zfsas_migrate_trim($dataset);
+    $pid = (int) $pid;
+
+    while (microtime(true) < $deadline) {
+        clearstatcache();
+        $status = zfsas_migrate_current_status();
+        $statusDataset = zfsas_migrate_trim($status['DATASET'] ?? '');
+        $statusState = zfsas_migrate_trim($status['STATE'] ?? '');
+
+        if ($statusDataset === $dataset && $statusState !== '') {
+            return true;
+        }
+
+        if ($pid > 0 && zfsas_migrate_is_pid_running($pid)) {
+            usleep(200000);
+            continue;
+        }
+
+        $error = zfsas_migrate_startup_error_message();
+        if ($error === '') {
+            $error = 'Dataset migrator exited before it reported startup status.';
+        }
+        return false;
+    }
+
+    $status = zfsas_migrate_current_status();
+    if (zfsas_migrate_trim($status['DATASET'] ?? '') === $dataset && zfsas_migrate_trim($status['STATE'] ?? '') !== '') {
+        return true;
+    }
+
+    if ($pid > 0 && zfsas_migrate_is_pid_running($pid)) {
+        return true;
+    }
+
+    $error = zfsas_migrate_startup_error_message();
+    if ($error === '') {
+        $error = 'Dataset migrator did not report startup status in time.';
+    }
+    return false;
 }
 
 function zfsas_migrate_docker_preflight()
@@ -521,7 +600,7 @@ function zfsas_migrate_start($dataset, &$error = null)
         return false;
     }
 
-    $preview = zfsas_migrate_preview_dataset($dataset, $previewError);
+    $preview = zfsas_migrate_preview_dataset($dataset, $previewError, false);
     if ($previewError !== null) {
         $error = $previewError;
         return false;
@@ -538,6 +617,8 @@ function zfsas_migrate_start($dataset, &$error = null)
         return false;
     }
 
+    zfsas_migrate_reset_runtime_files();
+
     $command = 'nohup ' . escapeshellarg($worker)
         . ' --dataset ' . escapeshellarg($dataset)
         . ' > /dev/null 2>&1 < /dev/null & echo $!';
@@ -550,5 +631,10 @@ function zfsas_migrate_start($dataset, &$error = null)
         return false;
     }
 
-    return true;
+    $pid = 0;
+    if (!empty($output)) {
+        $pid = (int) zfsas_migrate_trim((string) end($output));
+    }
+
+    return zfsas_migrate_wait_for_start($dataset, $pid, $error);
 }
