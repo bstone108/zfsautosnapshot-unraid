@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.15.4 (Testing Branch Only)
+
+- Fixed the packaged file modes for the new queue-processing binaries so the `ZFS Send` queue kicker and workers install as executable files, and added an install-time permission repair step to restore execute bits on upgraded systems.
+
 ### 2026.04.15.3 (Testing Branch Only)
 
 - Fixed the `ZFS Send` scheduler save validation so the empty “Add Job” row no longer gets treated as a real new job just because its frequency, children, and threshold controls have default values.

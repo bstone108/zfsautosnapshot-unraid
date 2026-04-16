@@ -62,6 +62,14 @@ ensure_file() {
   apply_owner "$file_path"
 }
 
+ensure_executable() {
+  local file_path="$1"
+
+  [[ -e "$file_path" ]] || return 0
+
+  chmod 0755 "$file_path" >/dev/null 2>&1 || true
+}
+
 ensure_dir "$BOOT_PLUGIN_DIR"
 ensure_dir "$SNAPSHOT_MANAGER_ROOT"
 ensure_dir "$SNAPSHOT_MANAGER_QUEUE_DIR"
@@ -85,5 +93,13 @@ if [[ ! -f "$TARGET_SEND_CFG" && -f "$DEFAULT_SEND_CFG" ]]; then
 fi
 
 ensure_file "$TARGET_SEND_CFG"
+
+ensure_executable "/usr/local/sbin/zfs_autosnapshot"
+ensure_executable "/usr/local/sbin/zfs_autosnapshot_send"
+ensure_executable "/usr/local/sbin/zfs_autosnapshot_queue_kicker"
+ensure_executable "/usr/local/sbin/zfs_autosnapshot_send_worker"
+ensure_executable "/usr/local/sbin/zfs_autosnapshot_delete_worker"
+ensure_executable "/usr/local/sbin/zfs_autosnapshot_snapshot_manager_worker"
+ensure_executable "/usr/local/sbin/zfs_autosnapshot_recovery_scan"
 
 echo "Normalized plugin config ownership and permissions under $BOOT_PLUGIN_DIR"
