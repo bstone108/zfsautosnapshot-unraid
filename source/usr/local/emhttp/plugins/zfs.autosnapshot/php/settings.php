@@ -941,7 +941,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 <style>
 .zfsas-wrap {
   margin: 16px;
-  max-width: 1100px;
+  max-width: 1440px;
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   color: var(--text-color, #1f2933);
 }
@@ -1033,6 +1033,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
 .zfsas-embedded-shell {
   max-width: none;
+  overflow: visible;
 }
 
 .zfsas-embedded-shell .zfsas-help {
@@ -1042,8 +1043,23 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 .zfsas-embedded-frame-wrap {
   border: 1px solid var(--border-color, #d9e1ea);
   border-radius: 10px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   background: var(--background-color, #fff);
+}
+
+#zfsas_panel_snapshot_manager .zfsas-embedded-shell {
+  padding-bottom: 0;
+}
+
+#zfsas_panel_snapshot_manager .zfsas-embedded-frame-wrap {
+  margin-left: -16px;
+  margin-right: -16px;
+  margin-bottom: -16px;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  border-radius: 0 0 10px 10px;
 }
 
 .zfsas-embedded-frame {

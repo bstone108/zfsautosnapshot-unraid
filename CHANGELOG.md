@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.15.5 (Testing Branch Only)
+
+- Widened the main settings container and let the embedded `Snapshot Manager` frame use the full width of its card so the right side is less likely to get clipped on wide dataset/action layouts.
+
 ### 2026.04.15.4 (Testing Branch Only)
 
 - Fixed the packaged file modes for the new queue-processing binaries so the `ZFS Send` queue kicker and workers install as executable files, and added an install-time permission repair step to restore execute bits on upgraded systems.
