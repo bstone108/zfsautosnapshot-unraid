@@ -13,6 +13,8 @@ require_once __DIR__ . '/response-helpers.php';
 require_once __DIR__ . '/send-helpers.php';
 require_once __DIR__ . '/send-queue-helpers.php';
 
+$csrfToken = zfsas_get_csrf_token();
+
 $defaults = zfsas_send_defaults();
 
 $isPostRequest = (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST');
@@ -68,6 +70,9 @@ if ($isPostRequest) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <?php if ($csrfToken !== '') : ?>
+  <meta name="csrf_token" content="<?php echo zfsas_send_h($csrfToken); ?>">
+  <?php endif; ?>
   <title>ZFS Send Settings</title>
   <style>
     body {
@@ -331,6 +336,9 @@ if ($isPostRequest) {
 
   <form method="post" action="<?php echo zfsas_send_h($saveApiUrl); ?>" data-ajax-action="<?php echo zfsas_send_h($saveApiUrl); ?>" id="zfsas_send_form">
     <input type="hidden" name="return_to" value="<?php echo zfsas_send_h($defaultReturnUrl); ?>">
+    <?php if ($csrfToken !== '') : ?>
+    <input type="hidden" name="csrf_token" value="<?php echo zfsas_send_h($csrfToken); ?>">
+    <?php endif; ?>
 
     <div class="zfsas-send-card">
       <h3 style="margin-top:0;">Replication Jobs</h3>

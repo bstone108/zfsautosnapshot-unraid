@@ -2,7 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Reissued the latest testing build under a new date-based version because some Unraid updater paths appear to sort `2026.04.14.10` as if it were older than `2026.04.14.9`, even though the manifest itself was correct.
+- Injected Unraid's CSRF token into the standalone `ZFS Send`, `Snapshot Manager`, and `Recovery Tools` pages so their existing button and AJAX code can send valid CSRF-protected requests instead of failing before PHP runs.
 - Carries forward the `ZFS Send` dedicated save-handler fix, the startup helper fix for the `ZFS Send` queue/status loader, the embedded `Snapshot Manager`, the repaired `Recovery Tools` dataset selector, and the queued `ZFS Send` / `Recovery Tools` feature set from the earlier testing builds.
   </CHANGES>
 

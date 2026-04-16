@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.15.2 (Testing Branch Only)
+
+- Injected Unraid's CSRF token into the standalone `ZFS Send`, `Snapshot Manager`, and `Recovery Tools` pages so their existing button and AJAX code can send valid CSRF-protected requests instead of failing before PHP runs.
+
 ### 2026.04.15.1 (Testing Branch Only)
 
 - Reissued the latest testing build under a new date-based version because some Unraid updater paths appear to sort `2026.04.14.10` as if it were older than `2026.04.14.9`, even though the manifest itself was correct.

@@ -3,12 +3,17 @@ $pluginName = 'zfs.autosnapshot';
 $statusUrl = "/plugins/{$pluginName}/php/recovery-status.php";
 $actionUrl = "/plugins/{$pluginName}/php/recovery-action.php";
 $mainSettingsUrl = '/Settings/ZFSAutoSnapshot?section=repair-tools';
+require_once __DIR__ . '/response-helpers.php';
+$csrfToken = zfsas_get_csrf_token();
 ?>
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <?php if ($csrfToken !== '') : ?>
+  <meta name="csrf_token" content="<?php echo htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8'); ?>">
+  <?php endif; ?>
   <title>Recovery Tools</title>
   <style>
     body {

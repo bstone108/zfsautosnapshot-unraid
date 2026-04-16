@@ -12,6 +12,59 @@ if (!defined('ZFSAS_JSON_END')) {
     define('ZFSAS_JSON_END', 'ZFSAS_JSON_END');
 }
 
+function zfsas_get_csrf_token()
+{
+    static $cachedToken = null;
+
+    if ($cachedToken !== null) {
+        return $cachedToken;
+    }
+
+    $cachedToken = '';
+
+    if (session_status() === PHP_SESSION_NONE) {
+        @session_start();
+    }
+
+    if (session_status() === PHP_SESSION_ACTIVE && isset($_SESSION['csrf_token'])) {
+        $candidate = trim((string) $_SESSION['csrf_token']);
+        if ($candidate !== '') {
+            $cachedToken = $candidate;
+            return $cachedToken;
+        }
+    }
+
+    if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && isset($GLOBALS['var']['csrf_token'])) {
+        $candidate = trim((string) $GLOBALS['var']['csrf_token']);
+        if ($candidate !== '') {
+            $cachedToken = $candidate;
+            return $cachedToken;
+        }
+    }
+
+    if (isset($GLOBALS['csrf_token'])) {
+        $candidate = trim((string) $GLOBALS['csrf_token']);
+        if ($candidate !== '') {
+            $cachedToken = $candidate;
+            return $cachedToken;
+        }
+    }
+
+    $varIniPath = '/var/local/emhttp/var.ini';
+    if (is_file($varIniPath) && is_readable($varIniPath)) {
+        $parsed = @parse_ini_file($varIniPath, false, INI_SCANNER_RAW);
+        if (is_array($parsed) && isset($parsed['csrf_token'])) {
+            $candidate = trim((string) $parsed['csrf_token']);
+            if ($candidate !== '') {
+                $cachedToken = $candidate;
+                return $cachedToken;
+            }
+        }
+    }
+
+    return $cachedToken;
+}
+
 function zfsas_emit_marked_json($payload, $statusCode = 200)
 {
     $GLOBALS['zfsas_json_response_sent'] = true;

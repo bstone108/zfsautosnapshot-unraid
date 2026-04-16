@@ -5,12 +5,17 @@ $snapshotManagerDatasetUrl = "/plugins/{$pluginName}/php/snapshot-manager-datase
 $snapshotManagerActionUrl = "/plugins/{$pluginName}/php/snapshot-manager-action.php";
 $mainSettingsUrl = '/Settings/ZFSAutoSnapshot?section=snapshot-manager';
 $embedded = isset($_GET['embedded']) && $_GET['embedded'] !== '0';
+require_once __DIR__ . '/response-helpers.php';
+$csrfToken = zfsas_get_csrf_token();
 ?>
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <?php if ($csrfToken !== '') : ?>
+  <meta name="csrf_token" content="<?php echo htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8'); ?>">
+  <?php endif; ?>
   <title>Snapshot Manager</title>
   <style>
     body {
