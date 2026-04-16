@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.15.9 (Testing Branch Only)
+
+- Added `ZFS Send` retention settings so the send tool can queue destination snapshot deletions using the same keep-all, then daily, then weekly style policy before a scheduled send and again as a zero-change cleanup pass afterward, while always preserving the newest successful send checkpoint needed for the next incremental replication.
+- Added a live pending-delete count next to the `ZFS Send` queue header so you can see when retention and other background snapshot deletions have been queued for later processing.
+- Changed regular autosnapshot cleanup coordination so if any `ZFS Send` job is active, the autosnapshot run now skips all cleanup phases for that pass and only creates new snapshots, avoiding cross-dataset cleanup decisions while send work is still in progress.
+
 ### 2026.04.15.8 (Testing Branch Only)
 
 - Changed scheduled `ZFS Send` destination cleanup so its free-space target can now delete the oldest eligible destination snapshots of any type inside the configured send targets, while still protecting the newest successful send checkpoint and any checkpoint basenames that queued or running sends still need.

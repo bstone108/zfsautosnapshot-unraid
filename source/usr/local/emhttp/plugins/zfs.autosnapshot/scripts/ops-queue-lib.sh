@@ -17,12 +17,18 @@ LOG_FILE="/var/log/zfs_autosnapshot_send.log"
 
 DEFAULT_SEND_SNAPSHOT_PREFIX="zfs-send-"
 DEFAULT_SEND_MAX_PARALLEL="1"
+DEFAULT_SEND_KEEP_ALL_FOR_DAYS="14"
+DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS="30"
+DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS="183"
 DEFAULT_RETRY_DELAYS=(60 300 900)
 POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS:-3}"
 POST_DELETE_RECHECK_INTERVAL_SECONDS="${POST_DELETE_RECHECK_INTERVAL_SECONDS:-1}"
 
 SEND_SNAPSHOT_PREFIX="$DEFAULT_SEND_SNAPSHOT_PREFIX"
 SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
+SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
+SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
+SEND_KEEP_WEEKLY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS"
 SEND_JOBS=""
 
 SCHEDULE_JOB_IDS=()
@@ -101,6 +107,9 @@ load_send_config() {
 
   SEND_SNAPSHOT_PREFIX="$DEFAULT_SEND_SNAPSHOT_PREFIX"
   SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
+  SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
+  SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
+  SEND_KEEP_WEEKLY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS"
   SEND_JOBS=""
 
   [[ -f "$SEND_CONFIG_FILE" ]] || return 0
@@ -114,7 +123,7 @@ load_send_config() {
       raw="${BASH_REMATCH[2]}"
       value="$(parse_config_value "$raw")"
       case "$key" in
-        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_JOBS)
+        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_JOBS)
           printf -v "$key" '%s' "$value"
           ;;
       esac
@@ -411,6 +420,27 @@ snapshot_has_clones() {
   clones="$(zfs get -H -o value clones "$snapshot" 2>/dev/null || true)"
   clones="$(trim "$clones")"
   [[ -n "$clones" && "$clones" != "-" ]]
+}
+
+snapshot_written_bytes() {
+  local snapshot="$1"
+  local value
+
+  value="$(zfs get -H -p -o value written "$snapshot" 2>/dev/null || true)"
+  [[ "$value" =~ ^[0-9]+$ ]] || value=0
+  printf '%s' "$value"
+}
+
+send_retention_keep_all_seconds() {
+  printf '%s' $(( SEND_KEEP_ALL_FOR_DAYS * 86400 ))
+}
+
+send_retention_keep_daily_until_seconds() {
+  printf '%s' $(( SEND_KEEP_DAILY_UNTIL_DAYS * 86400 ))
+}
+
+send_retention_keep_weekly_until_seconds() {
+  printf '%s' $(( SEND_KEEP_WEEKLY_UNTIL_DAYS * 86400 ))
 }
 
 get_pool_freeing() {
@@ -1347,6 +1377,111 @@ find_job_by_id() {
   return 1
 }
 
+snapshot_delete_job_exists_for_snapshot() {
+  local snapshot="$1"
+  local file state
+  local -A job=()
+
+  while IFS= read -r file; do
+    job_load "$file" job || continue
+    [[ "$(job_get job JOB_TYPE)" == "snapshot_delete" ]] || continue
+    [[ "$(job_get job SNAPSHOT)" == "$snapshot" ]] || continue
+    state="$(job_get job STATE)"
+    [[ "$state" == "complete" || "$state" == "skipped" ]] && continue
+    return 0
+  done < <(list_job_files)
+
+  return 1
+}
+
+snapshot_delete_checkpoint_job_exists() {
+  local schedule_job_id="$1"
+  local basename="$2"
+  local file state
+  local -A job=()
+
+  while IFS= read -r file; do
+    job_load "$file" job || continue
+    [[ "$(job_get job JOB_TYPE)" == "snapshot_delete" ]] || continue
+    [[ "$(job_get job DELETE_SCOPE)" == "checkpoint" ]] || continue
+    [[ "$(job_get job SEND_SCHEDULE_JOB_ID)" == "$schedule_job_id" ]] || continue
+    [[ "$(job_get job SNAPSHOT_NAME)" == "$basename" ]] || continue
+    state="$(job_get job STATE)"
+    [[ "$state" == "complete" || "$state" == "skipped" ]] && continue
+    return 0
+  done < <(list_job_files)
+
+  return 1
+}
+
+queue_snapshot_delete_job() {
+  local dataset="$1"
+  local snapshot="$2"
+  local queue_sort_epoch="$3"
+  local message="$4"
+  local send_schedule_job_id="${5:-}"
+  local delete_scope="${6:-snapshot}"
+  local snapshot_name snapshot_epoch job_id requested_epoch path
+  local guid="" createtxg=""
+  local -A props=()
+  local -A job=()
+
+  if ! snapshot_exists "$snapshot"; then
+    return 1
+  fi
+
+  snapshot_name="${snapshot##*@}"
+  requested_epoch="$(date +%s)"
+
+  if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
+    snapshot_delete_checkpoint_job_exists "$send_schedule_job_id" "$snapshot_name" && return 0
+  else
+    snapshot_delete_job_exists_for_snapshot "$snapshot" && return 0
+  fi
+
+  zfs_get_snapshot_props "$snapshot" props || return 1
+  snapshot_epoch="${props[creation]:-0}"
+  guid="${props[guid]:-}"
+  createtxg="${props[createtxg]:-}"
+  [[ "$snapshot_epoch" =~ ^[0-9]+$ ]] || snapshot_epoch=0
+  [[ "$queue_sort_epoch" =~ ^[0-9]+$ ]] || queue_sort_epoch="$snapshot_epoch"
+
+  if command -v sha1sum >/dev/null 2>&1; then
+    job_id="delete-$(printf '%s' "$snapshot" | sha1sum | awk '{print substr($1,1,16)}')-${requested_epoch}"
+  else
+    job_id="delete-$(printf '%s' "$snapshot" | shasum | awk '{print substr($1,1,16)}')-${requested_epoch}"
+  fi
+  path="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "$job_id")"
+
+  job[JOB_ID]="$job_id"
+  job[JOB_TYPE]="snapshot_delete"
+  job[STATE]="queued"
+  job[PHASE]="queued"
+  job[REQUESTED_EPOCH]="$requested_epoch"
+  job[REQUESTED_AT]="$(date -u +'%Y-%m-%dT%H:%M:%SZ' -r "$requested_epoch" 2>/dev/null || date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  job[QUEUE_SORT]=$(( queue_sort_epoch * 1000 + (RANDOM % 1000) ))
+  job[DATASET]="$dataset"
+  job[SNAPSHOT]="$snapshot"
+  job[SNAPSHOT_NAME]="$snapshot_name"
+  job[SNAPSHOT_EPOCH]="$snapshot_epoch"
+  job[SNAPSHOT_GUID]="$guid"
+  job[SNAPSHOT_CREATETXG]="$createtxg"
+  job[SEND_PROTECTED]="0"
+  job[DELETE_SCOPE]="$delete_scope"
+  job[LAST_ERROR]=""
+  job[LAST_MESSAGE]="$message"
+  job[WORKER_PID]=""
+  job[RETRY_AT]="0"
+
+  if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
+    job[SEND_PROTECTED]="1"
+    # shellcheck disable=SC2034
+    job[SEND_SCHEDULE_JOB_ID]="$send_schedule_job_id"
+  fi
+
+  job_write "$path" job
+}
+
 snapshot_delete_conflicts_with_send_jobs() {
   local snapshot="$1"
   local basename="${snapshot##*@}"
@@ -1392,4 +1527,154 @@ latest_checkpoint_basename_for_schedule() {
   fi
 
   printf -v "$result_var" '%s' "$newest_base"
+}
+
+list_existing_destination_datasets_for_schedule() {
+  local schedule_job_id="$1"
+  local dest_root include_children
+
+  dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
+  include_children="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]:-0}"
+  [[ -n "$dest_root" ]] || return 0
+  dataset_exists "$dest_root" || return 0
+
+  if [[ "$include_children" == "1" ]]; then
+    zfs list -H -o name -t filesystem,volume -r "$dest_root" 2>/dev/null || true
+  else
+    printf '%s\n' "$dest_root"
+  fi
+}
+
+queue_destination_retention_for_dataset() {
+  local dataset="$1"
+  local schedule_job_id="$2"
+  local newest_send_basename="$3"
+  local mode="${4:-retention}"
+  local snap_name snap_epoch snap_base snap_age written_bytes userrefs snapshot_schedule_job_id
+  local newest_snapshot=""
+  local zero_change_anchor=""
+  local keep_all_seconds keep_daily_seconds keep_weekly_seconds
+  local week_key day_key
+  local kept_day=$'\n'
+  local kept_week=$'\n'
+  local -A protected=()
+  local -A queued_checkpoint_basenames=()
+
+  dataset_exists "$dataset" || return 0
+
+  keep_all_seconds="$(send_retention_keep_all_seconds)"
+  keep_daily_seconds="$(send_retention_keep_daily_until_seconds)"
+  keep_weekly_seconds="$(send_retention_keep_weekly_until_seconds)"
+  all_scheduled_job_protected_basenames protected
+  [[ -n "$newest_send_basename" ]] && protected["$newest_send_basename"]=1
+
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+    snap_base="${snap_name##*@}"
+
+    if [[ -z "$newest_snapshot" ]]; then
+      newest_snapshot="$snap_name"
+      if [[ "$mode" == "zero_change" ]]; then
+        written_bytes="$(snapshot_written_bytes "$snap_name")"
+        if (( written_bytes == 0 )); then
+          zero_change_anchor="$snap_name"
+        fi
+      fi
+      continue
+    fi
+
+    userrefs="$(snapshot_userrefs_count "$snap_name")"
+    (( userrefs == 0 )) || continue
+    snapshot_has_clones "$snap_name" && continue
+    [[ -z "${protected[$snap_base]:-}" ]] || continue
+
+    if [[ "$mode" == "zero_change" ]]; then
+      written_bytes="$(snapshot_written_bytes "$snap_name")"
+      if (( written_bytes == 0 )); then
+        if [[ -n "$zero_change_anchor" ]]; then
+          snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
+          if [[ -n "$snapshot_schedule_job_id" ]]; then
+            [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
+            queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by post-send zero-change cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+            queued_checkpoint_basenames["$snap_base"]=1
+          else
+            queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by post-send zero-change cleanup." || true
+          fi
+          continue
+        fi
+        zero_change_anchor="$snap_name"
+      else
+        zero_change_anchor=""
+      fi
+      continue
+    fi
+
+    snap_age=$(( $(date +%s) - snap_epoch ))
+    if (( snap_age > keep_weekly_seconds )); then
+      snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
+      if [[ -n "$snapshot_schedule_job_id" ]]; then
+        [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
+        queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+        queued_checkpoint_basenames["$snap_base"]=1
+      else
+        queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send retention cleanup." || true
+      fi
+      continue
+    fi
+
+    if (( snap_age > keep_daily_seconds )); then
+      week_key="$(date -d @"$snap_epoch" +%Y-%W)"
+      if [[ "$kept_week" != *$'\n'"$week_key"$'\n'* ]]; then
+        kept_week+="$week_key"$'\n'
+      else
+        snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
+        if [[ -n "$snapshot_schedule_job_id" ]]; then
+          [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
+          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send weekly retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+          queued_checkpoint_basenames["$snap_base"]=1
+        else
+          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send weekly retention cleanup." || true
+        fi
+      fi
+      continue
+    fi
+
+    if (( snap_age > keep_all_seconds )); then
+      day_key="$(date -d @"$snap_epoch" +%Y-%m-%d)"
+      if [[ "$kept_day" != *$'\n'"$day_key"$'\n'* ]]; then
+        kept_day+="$day_key"$'\n'
+      else
+        snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
+        if [[ -n "$snapshot_schedule_job_id" ]]; then
+          [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
+          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send daily retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+          queued_checkpoint_basenames["$snap_base"]=1
+        else
+          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send daily retention cleanup." || true
+        fi
+      fi
+    fi
+  done < <(zfs list -H -p -t snapshot -o name,creation -S creation -d 1 "$dataset" 2>/dev/null || true)
+}
+
+queue_schedule_retention_cleanup() {
+  local schedule_job_id="$1"
+  local dataset newest_send_basename=""
+
+  latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
+  while IFS= read -r dataset; do
+    [[ -n "$dataset" ]] || continue
+    queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention"
+  done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+}
+
+queue_schedule_zero_change_cleanup() {
+  local schedule_job_id="$1"
+  local dataset newest_send_basename=""
+
+  latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
+  while IFS= read -r dataset; do
+    [[ -n "$dataset" ]] || continue
+    queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change"
+  done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
 }

@@ -29,6 +29,7 @@ $parseWarnings = [];
 $jobs = zfsas_send_parse_jobs($config['SEND_JOBS'] ?? '', $parseErrors, $parseWarnings);
 $formJobs = $jobs;
 $queueJobs = zfsas_ops_recent_send_jobs(120);
+$pendingDeleteCount = zfsas_ops_pending_delete_job_count();
 $datasetDiscoveryError = null;
 $availableDatasets = zfsas_send_list_zfs_datasets($datasetDiscoveryError);
 
@@ -191,6 +192,14 @@ if ($isPostRequest) {
       font-size: 13px;
     }
 
+    .zfsas-send-retention-grid {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      align-items: end;
+    }
+
     .zfsas-send-actions {
       display: flex;
       align-items: center;
@@ -286,12 +295,31 @@ if ($isPostRequest) {
       background: rgba(176, 0, 32, 0.12);
     }
 
+    .zfsas-send-queue-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .zfsas-send-pending-delete-status {
+      font-size: 12px;
+      color: var(--text-color, #4f5a66);
+      opacity: 0.82;
+      white-space: nowrap;
+    }
+
     @media (max-width: 980px) {
       .zfsas-send-add-row {
         grid-template-columns: 1fr;
       }
 
       .zfsas-send-inline-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .zfsas-send-retention-grid {
         grid-template-columns: 1fr;
       }
 
@@ -450,6 +478,38 @@ if ($isPostRequest) {
           <button type="button" class="btn" id="zfsas_add_send_job">Add Job</button>
         </div>
       </div>
+
+      <div class="zfsas-send-inline-grid" style="margin-top: 18px;">
+        <div class="zfsas-send-field">
+          <label>Retention Policy</label>
+          <div class="zfsas-send-help">
+            Scheduled sends queue destination snapshot deletions using the same keep-all / daily / weekly retention pattern as autosnapshot. The newest successful send checkpoint is always protected so the next incremental send still has a valid base.
+            This retention pass runs before the transfer, then a zero-change cleanup pass runs after the transfer to queue any duplicate no-change snapshots that slipped in with the replicated history.
+          </div>
+        </div>
+        <div class="zfsas-send-field">
+          <label>&nbsp;</label>
+          <div class="zfsas-send-help">Deletes are queued in the background instead of blocking the active send.</div>
+        </div>
+      </div>
+
+      <div class="zfsas-send-retention-grid">
+        <div class="zfsas-send-field">
+          <label for="send_keep_all_for_days">Keep all snapshots for</label>
+          <input id="send_keep_all_for_days" name="send_keep_all_for_days" class="zfsas-send-input" type="number" min="1" max="36500" value="<?php echo zfsas_send_h($config['SEND_KEEP_ALL_FOR_DAYS']); ?>">
+          <div class="zfsas-send-help">Newest snapshots inside the destination tree stay at full resolution for this many days.</div>
+        </div>
+        <div class="zfsas-send-field">
+          <label for="send_keep_daily_until_days">Keep daily snapshots until</label>
+          <input id="send_keep_daily_until_days" name="send_keep_daily_until_days" class="zfsas-send-input" type="number" min="2" max="36500" value="<?php echo zfsas_send_h($config['SEND_KEEP_DAILY_UNTIL_DAYS']); ?>">
+          <div class="zfsas-send-help">After the full-resolution window, the destination keeps one snapshot per day until this age.</div>
+        </div>
+        <div class="zfsas-send-field">
+          <label for="send_keep_weekly_until_days">Keep weekly snapshots until</label>
+          <input id="send_keep_weekly_until_days" name="send_keep_weekly_until_days" class="zfsas-send-input" type="number" min="3" max="36500" value="<?php echo zfsas_send_h($config['SEND_KEEP_WEEKLY_UNTIL_DAYS']); ?>">
+          <div class="zfsas-send-help">After the daily window, the destination keeps one snapshot per week until this age.</div>
+        </div>
+      </div>
     </div>
 
     <div class="zfsas-send-actions">
@@ -470,7 +530,10 @@ if ($isPostRequest) {
   </form>
 
   <div class="zfsas-send-card">
-    <h3 style="margin-top:0;">Send Queue</h3>
+    <div class="zfsas-send-queue-header">
+      <h3 style="margin-top:0; margin-bottom:0;">Send Queue</h3>
+      <div id="send_pending_delete_status" class="zfsas-send-pending-delete-status">Pending snapshot deletes: <?php echo (int) $pendingDeleteCount; ?></div>
+    </div>
     <div class="zfsas-send-help">
       Scheduled sends and one-off snapshot sends use the same persistent queue. Failed jobs can be retried from here, and active jobs show phase-based progress.
     </div>
@@ -548,6 +611,7 @@ if ($isPostRequest) {
   var queueActionApiUrl = <?php echo json_encode($queueActionApiUrl); ?>;
   var jobsBody = byId('zfsas_send_jobs_body');
   var queueRowsBody = byId('send_queue_rows');
+  var pendingDeleteStatusEl = byId('send_pending_delete_status');
   var queuePollTimer = null;
 
   function escapeHtml(text) {
@@ -749,17 +813,30 @@ if ($isPostRequest) {
     queueRowsBody.innerHTML = html;
   }
 
+  function renderPendingDeleteCount(count) {
+    if (!pendingDeleteStatusEl) {
+      return;
+    }
+    var total = parseInt(count, 10);
+    if (isNaN(total) || total < 0) {
+      total = 0;
+    }
+    pendingDeleteStatusEl.textContent = 'Pending snapshot deletes: ' + total;
+  }
+
   function loadQueueJobs() {
     requestJson(
       queueStatusApiUrl + '?_=' + Date.now(),
       function (payload) {
         renderQueueJobs(payload.jobs || []);
+        renderPendingDeleteCount(payload.pendingDeleteCount || 0);
       },
       function (error) {
         if (!queueRowsBody) {
           return;
         }
         queueRowsBody.innerHTML = '<tr><td colspan="7" class="zfsas-send-help">Queue refresh failed: ' + escapeHtml(error.message) + '</td></tr>';
+        renderPendingDeleteCount(0);
       }
     );
   }

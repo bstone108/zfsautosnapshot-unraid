@@ -32,4 +32,5 @@ foreach (zfsas_ops_recent_send_jobs(120) as $job) {
 zfsas_emit_marked_json([
     'ok' => true,
     'jobs' => $rows,
+    'pendingDeleteCount' => zfsas_ops_pending_delete_job_count(),
 ]);

@@ -107,11 +107,26 @@ function zfsas_send_normalize_parallel_limit($value)
     return (string) $value;
 }
 
+function zfsas_send_normalize_retention_days($value, $default)
+{
+    $value = (int) $value;
+    if ($value < 1) {
+        $value = (int) $default;
+    }
+    if ($value > 36500) {
+        $value = 36500;
+    }
+    return (string) $value;
+}
+
 function zfsas_send_defaults()
 {
     return [
         'SEND_SNAPSHOT_PREFIX' => 'zfs-send-',
         'SEND_MAX_PARALLEL' => '1',
+        'SEND_KEEP_ALL_FOR_DAYS' => '14',
+        'SEND_KEEP_DAILY_UNTIL_DAYS' => '30',
+        'SEND_KEEP_WEEKLY_UNTIL_DAYS' => '183',
         'SEND_JOBS' => '',
     ];
 }
@@ -479,6 +494,12 @@ function zfsas_send_render_config($config)
     $lines[] = '# Maximum number of queued ZFS send jobs allowed to transfer in parallel.';
     $lines[] = 'SEND_MAX_PARALLEL=' . zfsas_send_normalize_parallel_limit($config['SEND_MAX_PARALLEL']);
     $lines[] = '';
+    $lines[] = '# Scheduled-send retention windows for snapshots stored on the destination tree.';
+    $lines[] = '# The newest successful send checkpoint is always protected even if it falls outside these windows.';
+    $lines[] = 'SEND_KEEP_ALL_FOR_DAYS=' . zfsas_send_normalize_retention_days($config['SEND_KEEP_ALL_FOR_DAYS'], 14);
+    $lines[] = 'SEND_KEEP_DAILY_UNTIL_DAYS=' . zfsas_send_normalize_retention_days($config['SEND_KEEP_DAILY_UNTIL_DAYS'], 30);
+    $lines[] = 'SEND_KEEP_WEEKLY_UNTIL_DAYS=' . zfsas_send_normalize_retention_days($config['SEND_KEEP_WEEKLY_UNTIL_DAYS'], 183);
+    $lines[] = '';
     $lines[] = '# Semicolon-separated jobs encoded as:';
     $lines[] = '#   jobid|source|destination|frequency|threshold|children';
     $lines[] = '# frequency values: 15m, 30m, 1h, 6h, 12h, 1d, 7d';
@@ -498,6 +519,9 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
     $submitted = $config;
     $submitted['SEND_SNAPSHOT_PREFIX'] = zfsas_send_trim($post['send_snapshot_prefix'] ?? $submitted['SEND_SNAPSHOT_PREFIX']);
     $submitted['SEND_MAX_PARALLEL'] = zfsas_send_normalize_parallel_limit($post['send_max_parallel'] ?? $submitted['SEND_MAX_PARALLEL']);
+    $submitted['SEND_KEEP_ALL_FOR_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_all_for_days'] ?? $submitted['SEND_KEEP_ALL_FOR_DAYS'], 14);
+    $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_daily_until_days'] ?? $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'], 30);
+    $submitted['SEND_KEEP_WEEKLY_UNTIL_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_weekly_until_days'] ?? $submitted['SEND_KEEP_WEEKLY_UNTIL_DAYS'], 183);
     $submittedJobs = zfsas_send_collect_submitted_jobs($post, $errors);
 
     if ($submitted['SEND_SNAPSHOT_PREFIX'] === '') {
@@ -506,6 +530,12 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
         $errors[] = 'Send snapshot prefix cannot contain @.';
     } elseif (preg_match('/^[A-Za-z0-9._:-]+$/', $submitted['SEND_SNAPSHOT_PREFIX']) !== 1) {
         $errors[] = 'Send snapshot prefix can only contain letters, numbers, dot, underscore, colon, and dash.';
+    }
+
+    if ((int) $submitted['SEND_KEEP_ALL_FOR_DAYS'] >= (int) $submitted['SEND_KEEP_DAILY_UNTIL_DAYS']
+        || (int) $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'] >= (int) $submitted['SEND_KEEP_WEEKLY_UNTIL_DAYS']
+    ) {
+        $errors[] = 'Send retention order is invalid. Keep all days must be less than keep daily until, and keep daily until must be less than keep weekly until.';
     }
 
     if (empty($errors)) {

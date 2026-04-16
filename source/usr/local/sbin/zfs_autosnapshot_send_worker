@@ -239,6 +239,7 @@ process_send_job() {
   case "$mode" in
     scheduled)
       jobs_are_same_pool_overlap "$(job_get job SOURCE_ROOT)" "$(job_get job DESTINATION_ROOT)" && return 1
+      queue_schedule_retention_cleanup "$(job_get job SCHEDULE_JOB_ID)" || true
       register_active_send_datasets_for_current_job
       prepare_scheduled_job_snapshot || return 1
       ;;
@@ -263,6 +264,7 @@ process_send_job() {
   done
 
   if [[ "$mode" == "scheduled" ]]; then
+    queue_schedule_zero_change_cleanup "$(job_get job SCHEDULE_JOB_ID)" || true
     cleanup_previous_scheduled_checkpoint || return 1
   fi
 
@@ -275,6 +277,14 @@ main() {
   ensure_runtime_layout || exit 1
   load_send_config
   require_numeric_in_range "SEND_MAX_PARALLEL" "$SEND_MAX_PARALLEL" 1 8 || SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
+  require_numeric_in_range "SEND_KEEP_ALL_FOR_DAYS" "$SEND_KEEP_ALL_FOR_DAYS" 1 36500 || SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
+  require_numeric_in_range "SEND_KEEP_DAILY_UNTIL_DAYS" "$SEND_KEEP_DAILY_UNTIL_DAYS" 2 36500 || SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
+  require_numeric_in_range "SEND_KEEP_WEEKLY_UNTIL_DAYS" "$SEND_KEEP_WEEKLY_UNTIL_DAYS" 3 36500 || SEND_KEEP_WEEKLY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS"
+  if (( SEND_KEEP_ALL_FOR_DAYS >= SEND_KEEP_DAILY_UNTIL_DAYS || SEND_KEEP_DAILY_UNTIL_DAYS >= SEND_KEEP_WEEKLY_UNTIL_DAYS )); then
+    SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
+    SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
+    SEND_KEEP_WEEKLY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS"
+  fi
   parse_send_jobs_config
 
   mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0

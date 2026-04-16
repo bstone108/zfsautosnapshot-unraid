@@ -346,6 +346,11 @@ send_operation_active_for_dataset() {
 	return 1
 }
 
+any_send_operation_active() {
+	[[ -d "$SEND_ACTIVITY_DIR" ]] || return 1
+	find "$SEND_ACTIVITY_DIR" -maxdepth 1 -type f -name '*.datasets' 2>/dev/null | grep -q .
+}
+
 register_active_child() {
 	local pid="$1"
 	local snap="$2"
@@ -1244,9 +1249,6 @@ find_oldest_reclaimable_snapshot_for_constraints() {
 
 	for pair in "${pairs[@]}"; do
 		candidate_ds="${pair%:*}"
-		if send_operation_active_for_dataset "$candidate_ds"; then
-			continue
-		fi
 		if ! candidate_affects_any_constraint "$candidate_ds" "$constraints_var_name"; then
 			continue
 		fi
@@ -1463,8 +1465,8 @@ time_clean_dataset() {
 	local ds="$1"
 	log "Time-based cleanup for dataset: $ds"
 
-	if send_operation_active_for_dataset "$ds"; then
-		log "  Skipping cleanup for $ds because a ZFS send is currently using this dataset. Snapshot creation will still be allowed later in this run."
+	if any_send_operation_active; then
+		log "  Skipping cleanup for $ds because a ZFS send is active. Snapshot creation will still be allowed later in this run."
 		return 0
 	fi
 
@@ -1698,6 +1700,12 @@ if [[ -f "$LEASE_STATE_FILE" ]]; then
 fi
 
 declare -a pool_names=()
+cleanup_deferred_for_send=0
+
+if any_send_operation_active; then
+	cleanup_deferred_for_send=1
+	log "A ZFS send operation is active, so this autosnapshot pass will skip all cleanup phases and only create new snapshots."
+fi
 
 # Phase A: time-based cleanup + collect unique pools for reporting
 for pair in "${pairs[@]}"; do
@@ -1706,7 +1714,9 @@ for pair in "${pairs[@]}"; do
 	pool="${ds%%/*}"
 	remember_pool_name "$pool"
 
-	time_clean_dataset "$ds"
+	if (( cleanup_deferred_for_send == 0 )); then
+		time_clean_dataset "$ds"
+	fi
 done
 
 RUN_DATASET_COUNT="${#pairs[@]}"
@@ -1729,87 +1739,90 @@ LOW_SPACE_DATASET_ANY_SNAPS=()
 LOW_SPACE_DATASET_GENERATION=()
 LOW_SPACE_DATASET_REFRESH_GENERATION=()
 
-while :; do
-	abort_if_stop_requested
-	low_dataset=""
-	low_dataset_threshold=0
-	low_dataset_effective_avail=0
-	low_dataset_active_constraints_display=""
-	# shellcheck disable=SC2034  # passed by name into helper functions
-	declare -a low_dataset_active_constraints=()
-
-	for pair in "${pairs[@]}"; do
+if (( cleanup_deferred_for_send == 0 )); then
+	while :; do
 		abort_if_stop_requested
-		ds="${pair%:*}"
-		thresh="${pair##*:}"
-		pool="${ds%%/*}"
-		min_free="$(threshold_to_bytes "$thresh")"
-		declare -a active_constraints=()
-
-		if ! get_dataset_active_constraints "$ds" simulated_constraint_reclaimed_bytes effective_avail active_constraints; then
-			log "Dataset $ds check failed: unable to read available space. Skipping low-space cleanup for this dataset."
-			continue
-		fi
-
-		if ((effective_avail >= min_free)); then
-			continue
-		fi
-
-		if newline_set_contains "$blocked_low_datasets" "$ds"; then
-			continue
-		fi
-
-		low_dataset="$ds"
-		low_dataset_threshold="$min_free"
-		low_dataset_effective_avail="$effective_avail"
+		low_dataset=""
+		low_dataset_threshold=0
+		low_dataset_effective_avail=0
+		low_dataset_active_constraints_display=""
 		# shellcheck disable=SC2034  # passed by name into helper functions
-		low_dataset_active_constraints=("${active_constraints[@]}")
-		low_dataset_active_constraints_display="$(format_constraint_list low_dataset_active_constraints)"
-		break
-	done
+		declare -a low_dataset_active_constraints=()
 
-	[[ -n "$low_dataset" ]] || break
+		for pair in "${pairs[@]}"; do
+			abort_if_stop_requested
+			ds="${pair%:*}"
+			thresh="${pair##*:}"
+			pool="${ds%%/*}"
+			min_free="$(threshold_to_bytes "$thresh")"
+			declare -a active_constraints=()
 
-	log "Dataset $low_dataset is below its free-space target: effective_avail=${low_dataset_effective_avail} min_required=${low_dataset_threshold} active_constraints=${low_dataset_active_constraints_display}"
+			if ! get_dataset_active_constraints "$ds" simulated_constraint_reclaimed_bytes effective_avail active_constraints; then
+				log "Dataset $ds check failed: unable to read available space. Skipping low-space cleanup for this dataset."
+				continue
+			fi
 
-	oldest_snap=""
-	oldest_snap_dataset=""
-	oldest_snap_used=0
-	oldest_snap_actual_dataset=""
-	any_candidate_snapshots=0
-	find_oldest_reclaimable_snapshot_for_constraints \
-		low_dataset_active_constraints \
-		oldest_snap \
-		oldest_snap_dataset \
-		oldest_snap_used \
-		any_candidate_snapshots \
-		1
+			if ((effective_avail >= min_free)); then
+				continue
+			fi
 
-	if ((any_candidate_snapshots == 0)); then
-		log "Dataset $low_dataset is low on space, but no ${PREFIX} snapshots remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
-		remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
-		remember_newline_entry blocked_low_dataset_notes "$low_dataset: No ${PREFIX} snapshots remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
-		continue
-	fi
+			if newline_set_contains "$blocked_low_datasets" "$ds"; then
+				continue
+			fi
 
-	if [[ -z "$oldest_snap" ]]; then
-		log "Dataset $low_dataset is low on space, but no deletable ${PREFIX} snapshot chains remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
-		remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
-		remember_newline_entry blocked_low_dataset_notes "$low_dataset: No deletable ${PREFIX} snapshot chains remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
-		continue
-	fi
+			low_dataset="$ds"
+			low_dataset_threshold="$min_free"
+			low_dataset_effective_avail="$effective_avail"
+			# shellcheck disable=SC2034  # passed by name into helper functions
+			low_dataset_active_constraints=("${active_constraints[@]}")
+			low_dataset_active_constraints_display="$(format_constraint_list low_dataset_active_constraints)"
+			break
+		done
 
-	oldest_snap_actual_dataset="${oldest_snap%@*}"
-	log "Dataset $low_dataset low on space -> deleting oldest eligible snapshot: $oldest_snap (dataset=${oldest_snap_actual_dataset} used=${oldest_snap_used} active_constraints=${low_dataset_active_constraints_display})"
-	do_destroy "$oldest_snap" "space_pressure"
-	remember_newline_entry simulated_deleted_snaps "$oldest_snap" >/dev/null 2>&1 || true
-	mark_cleanup_candidates_dirty_for_snapshot "$oldest_snap"
+		[[ -n "$low_dataset" ]] || break
 
-	if ((DRY_RUN)); then
-		apply_simulated_reclaim_to_constraints "$oldest_snap_dataset" "$oldest_snap_used" simulated_constraint_reclaimed_bytes
-		after_effective_avail="$(get_dataset_effective_avail "$low_dataset" simulated_constraint_reclaimed_bytes)"
-		log "Dataset $low_dataset low on space -> [DRY_RUN] simulated effective free space after delete: ${after_effective_avail}"
-	else
+		log "Dataset $low_dataset is below its free-space target: effective_avail=${low_dataset_effective_avail} min_required=${low_dataset_threshold} active_constraints=${low_dataset_active_constraints_display}"
+
+		oldest_snap=""
+		oldest_snap_dataset=""
+		oldest_snap_used=0
+		oldest_snap_actual_dataset=""
+		any_candidate_snapshots=0
+		find_oldest_reclaimable_snapshot_for_constraints \
+			low_dataset_active_constraints \
+			oldest_snap \
+			oldest_snap_dataset \
+			oldest_snap_used \
+			any_candidate_snapshots \
+			1
+
+		if ((any_candidate_snapshots == 0)); then
+			log "Dataset $low_dataset is low on space, but no ${PREFIX} snapshots remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
+			remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
+			remember_newline_entry blocked_low_dataset_notes "$low_dataset: No ${PREFIX} snapshots remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
+			continue
+		fi
+
+		if [[ -z "$oldest_snap" ]]; then
+			log "Dataset $low_dataset is low on space, but no deletable ${PREFIX} snapshot chains remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
+			remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
+			remember_newline_entry blocked_low_dataset_notes "$low_dataset: No deletable ${PREFIX} snapshot chains remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
+			continue
+		fi
+
+		oldest_snap_actual_dataset="${oldest_snap%@*}"
+		log "Dataset $low_dataset low on space -> deleting oldest eligible snapshot: $oldest_snap (dataset=${oldest_snap_actual_dataset} used=${oldest_snap_used} active_constraints=${low_dataset_active_constraints_display})"
+		do_destroy "$oldest_snap" "space_pressure"
+		remember_newline_entry simulated_deleted_snaps "$oldest_snap" >/dev/null 2>&1 || true
+		mark_cleanup_candidates_dirty_for_snapshot "$oldest_snap"
+
+		if ((DRY_RUN)); then
+			apply_simulated_reclaim_to_constraints "$oldest_snap_dataset" "$oldest_snap_used" simulated_constraint_reclaimed_bytes
+			after_effective_avail="$(get_dataset_effective_avail "$low_dataset" simulated_constraint_reclaimed_bytes)"
+			log "Dataset $low_dataset low on space -> [DRY_RUN] simulated effective free space after delete: ${after_effective_avail}"
+			continue
+		fi
+
 		after_effective_avail="$(get_dataset_effective_avail "$low_dataset")"
 		if [[ -z "$after_effective_avail" ]]; then
 			log "Dataset $low_dataset low on space -> unable to re-check available space after deleting $oldest_snap; marking it unresolved for now."
@@ -1844,14 +1857,13 @@ while :; do
 		if ((after_effective_avail <= low_dataset_effective_avail)); then
 			log "Dataset $low_dataset low on space -> visible free space did not rise after deleting $oldest_snap (before=${low_dataset_effective_avail} after=${after_effective_avail} used=${oldest_snap_used}); continuing because other datasets may still benefit ${low_dataset}."
 		fi
-	fi
 
-	# A successful or simulated delete changes the current landscape, so re-check
-	# all low datasets from scratch instead of keeping prior blocked state.
-	blocked_low_datasets=$'\n'
-	blocked_low_dataset_notes=$'\n'
-done
-
+		# A successful or simulated delete changes the current landscape, so re-check
+		# all low datasets from scratch instead of keeping prior blocked state.
+		blocked_low_datasets=$'\n'
+		blocked_low_dataset_notes=$'\n'
+	done
+fi
 set_low_space_unresolved_state "$blocked_low_datasets" "$blocked_low_dataset_notes"
 
 # Phase C: create new snapshots

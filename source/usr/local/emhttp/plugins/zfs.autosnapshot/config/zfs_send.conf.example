@@ -13,6 +13,14 @@ SEND_SNAPSHOT_PREFIX="zfs-send-"
 # run one at a time globally so they do not pile onto the system.
 SEND_MAX_PARALLEL=1
 
+# SEND_KEEP_ALL_FOR_DAYS / SEND_KEEP_DAILY_UNTIL_DAYS / SEND_KEEP_WEEKLY_UNTIL_DAYS
+# Scheduled-send retention windows for snapshots stored on the destination tree.
+# The newest successful send checkpoint is always protected even if it falls
+# outside these windows so the next incremental send can still build from it.
+SEND_KEEP_ALL_FOR_DAYS=14
+SEND_KEEP_DAILY_UNTIL_DAYS=30
+SEND_KEEP_WEEKLY_UNTIL_DAYS=183
+
 # SEND_JOBS
 # Semicolon-separated entries encoded as:
 #   jobid|source|destination|frequency|threshold|children

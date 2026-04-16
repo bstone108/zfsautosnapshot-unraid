@@ -396,6 +396,19 @@ function zfsas_ops_delete_snapshot_map()
     return $map;
 }
 
+function zfsas_ops_pending_delete_job_count()
+{
+    $count = 0;
+    foreach (zfsas_ops_list_jobs(['snapshot_delete']) as $job) {
+        $state = (string) ($job['STATE'] ?? 'queued');
+        if (in_array($state, ['queued', 'running', 'retry_wait'], true)) {
+            $count++;
+        }
+    }
+
+    return $count;
+}
+
 function zfsas_ops_queue_pending_counts_by_dataset()
 {
     $counts = [];
