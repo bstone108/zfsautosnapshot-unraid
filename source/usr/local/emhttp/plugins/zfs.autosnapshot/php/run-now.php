@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/response-helpers.php';
+
 $scriptPath = '/usr/local/sbin/zfs_autosnapshot';
 $debugLogFile = '/var/log/zfs_autosnapshot.log';
 $runtimeDir = '/var/run/zfs-autosnapshot';
@@ -122,6 +124,14 @@ if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
         'ok' => false,
         'error' => 'Use POST for manual run requests.',
     ], 405);
+}
+
+$csrfError = null;
+if (!zfsas_validate_csrf_token($csrfError)) {
+    sendJson([
+        'ok' => false,
+        'error' => $csrfError,
+    ], 403);
 }
 
 if (!is_file($scriptPath) || !is_executable($scriptPath)) {

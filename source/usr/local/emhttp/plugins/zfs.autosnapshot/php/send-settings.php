@@ -42,27 +42,41 @@ foreach ($parseWarnings as $warning) {
 }
 
 if ($isPostRequest) {
-    $saveResult = zfsas_send_handle_save_request($_POST, $configDir, $configFile, $syncScript, $config, $defaultReturnUrl);
-    $config = $saveResult['config'];
-    $formJobs = $saveResult['formJobs'];
-    $errors = $saveResult['errors'];
-    $notices = array_merge($notices, $saveResult['notices']);
+    $csrfError = null;
+    if (!zfsas_validate_csrf_token($csrfError)) {
+        if ($isAjaxSaveRequest) {
+            zfsas_emit_marked_json([
+                'ok' => false,
+                'errors' => [$csrfError],
+                'notices' => [],
+                'jobCount' => count($formJobs),
+            ], 403);
+        }
 
-    if ($saveResult['saved'] && !$isAjaxSaveRequest) {
-        $separator = (strpos($saveResult['returnTarget'], '?') === false) ? '?' : '&';
-        zfsas_send_redirect_page(
-            $saveResult['returnTarget'] . $separator . 'saved=1',
-            'ZFS send settings saved. Returning to the send settings page...'
-        );
-    }
+        $errors[] = $csrfError;
+    } else {
+        $saveResult = zfsas_send_handle_save_request($_POST, $configDir, $configFile, $syncScript, $config, $defaultReturnUrl);
+        $config = $saveResult['config'];
+        $formJobs = $saveResult['formJobs'];
+        $errors = $saveResult['errors'];
+        $notices = array_merge($notices, $saveResult['notices']);
 
-    if ($isAjaxSaveRequest) {
-        zfsas_emit_marked_json([
-            'ok' => empty($errors),
-            'errors' => array_values($errors),
-            'notices' => array_values($notices),
-            'jobCount' => count($formJobs),
-        ], empty($errors) ? 200 : 400);
+        if ($saveResult['saved'] && !$isAjaxSaveRequest) {
+            $separator = (strpos($saveResult['returnTarget'], '?') === false) ? '?' : '&';
+            zfsas_send_redirect_page(
+                $saveResult['returnTarget'] . $separator . 'saved=1',
+                'ZFS send settings saved. Returning to the send settings page...'
+            );
+        }
+
+        if ($isAjaxSaveRequest) {
+            zfsas_emit_marked_json([
+                'ok' => empty($errors),
+                'errors' => array_values($errors),
+                'notices' => array_values($notices),
+                'jobCount' => count($formJobs),
+            ], empty($errors) ? 200 : 400);
+        }
     }
 }
 ?>

@@ -9,6 +9,14 @@ if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     ], 405);
 }
 
+$csrfError = null;
+if (!zfsas_validate_csrf_token($csrfError)) {
+    zfsas_emit_marked_json([
+        'ok' => false,
+        'error' => $csrfError,
+    ], 403);
+}
+
 $action = zfsas_migrate_trim($_POST['action'] ?? '');
 if ($action !== 'start') {
     zfsas_emit_marked_json([

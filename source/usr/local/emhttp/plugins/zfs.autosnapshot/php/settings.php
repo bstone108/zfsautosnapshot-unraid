@@ -22,6 +22,8 @@ $logPollIntervalMs = 2000;
 require_once __DIR__ . '/response-helpers.php';
 require_once __DIR__ . '/send-helpers.php';
 
+$csrfToken = zfsas_get_csrf_token();
+
 $defaults = [
     'DATASETS' => '',
     'PREFIX' => 'autosnapshot-',
@@ -792,6 +794,19 @@ if (!$isAjaxSaveRequest && !empty($sendParseWarnings)) {
 }
 
 if ($isPostRequest) {
+    $csrfError = null;
+    if (!zfsas_validate_csrf_token($csrfError)) {
+        if ($isAjaxSaveRequest) {
+            zfsas_emit_marked_json([
+                'ok' => false,
+                'errors' => [$csrfError],
+                'notices' => [],
+            ], 403);
+        }
+
+        $errors[] = $csrfError;
+    }
+
     $submitted = $config;
 
     $submitted['PREFIX'] = trimValue($_POST['prefix'] ?? $submitted['PREFIX']);
@@ -1667,6 +1682,9 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
   <form method="post" action="<?php echo h($saveApiUrl); ?>" data-ajax-action="<?php echo h($saveApiUrl); ?>" id="zfsas_settings_form">
     <input type="hidden" name="return_to" value="<?php echo h($defaultSettingsReturnUrl); ?>">
+    <?php if ($csrfToken !== '') : ?>
+    <input type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>">
+    <?php endif; ?>
     <div class="zfsas-section-nav" role="tablist" aria-label="Plugin sections">
       <button type="button" class="zfsas-section-tab is-active" id="zfsas_tab_main" data-section-target="main" role="tab" aria-selected="true" aria-controls="zfsas_panel_main">Main Page</button>
       <button type="button" class="zfsas-section-tab" id="zfsas_tab_features" data-section-target="special-features" role="tab" aria-selected="false" aria-controls="zfsas_panel_special_features">Special Features</button>

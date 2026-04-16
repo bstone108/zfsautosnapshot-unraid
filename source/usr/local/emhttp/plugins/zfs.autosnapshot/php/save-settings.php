@@ -93,6 +93,24 @@ if ($requestMethod !== 'POST') {
     zfsas_send_redirect_page($returnUrl, 'Returning to the settings page...');
 }
 
+$csrfError = null;
+if (!zfsas_validate_csrf_token($csrfError)) {
+    if ($expectsJson) {
+        zfsas_emit_marked_json([
+            'ok' => false,
+            'errors' => [$csrfError],
+            'notices' => [],
+        ], 403);
+    }
+
+    zfsas_send_standalone_error_page(
+        'ZFS Auto Snapshot Save Failed',
+        $csrfError,
+        $returnUrl,
+        403
+    );
+}
+
 if ($expectsJson && !defined('ZFSAS_FORCE_AJAX_SAVE')) {
     define('ZFSAS_FORCE_AJAX_SAVE', true);
 }

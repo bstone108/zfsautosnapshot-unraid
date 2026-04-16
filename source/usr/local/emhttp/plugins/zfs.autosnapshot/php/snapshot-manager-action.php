@@ -48,6 +48,11 @@ if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     zfsas_sm_json_error('Use POST for snapshot manager actions.', 405);
 }
 
+$csrfError = null;
+if (!zfsas_validate_csrf_token($csrfError)) {
+    zfsas_sm_json_error($csrfError, 403);
+}
+
 if (!zfsas_sm_ensure_storage_dirs()) {
     zfsas_sm_json_error('Snapshot manager storage directories are unavailable.', 500);
 }

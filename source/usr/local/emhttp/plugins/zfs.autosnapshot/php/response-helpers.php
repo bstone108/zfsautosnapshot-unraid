@@ -65,6 +65,54 @@ function zfsas_get_csrf_token()
     return $cachedToken;
 }
 
+function zfsas_get_submitted_csrf_token()
+{
+    $candidates = [
+        $_POST['csrf_token'] ?? null,
+        $_POST['csrf-token'] ?? null,
+        $_POST['_csrf'] ?? null,
+        $_SERVER['HTTP_X_CSRF_TOKEN'] ?? null,
+        $_SERVER['HTTP_CSRF_TOKEN'] ?? null,
+    ];
+
+    foreach ($candidates as $candidate) {
+        if (!is_string($candidate)) {
+            continue;
+        }
+
+        $candidate = trim($candidate);
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+
+    return '';
+}
+
+function zfsas_validate_csrf_token(&$error = null)
+{
+    $error = null;
+
+    $expectedToken = zfsas_get_csrf_token();
+    if ($expectedToken === '') {
+        $error = 'Security token is unavailable. Reload the page and try again.';
+        return false;
+    }
+
+    $submittedToken = zfsas_get_submitted_csrf_token();
+    if ($submittedToken === '') {
+        $error = 'Security token is missing. Reload the page and try again.';
+        return false;
+    }
+
+    if (!hash_equals($expectedToken, $submittedToken)) {
+        $error = 'Security token validation failed. Reload the page and try again.';
+        return false;
+    }
+
+    return true;
+}
+
 function zfsas_emit_marked_json($payload, $statusCode = 200)
 {
     $GLOBALS['zfsas_json_response_sent'] = true;
