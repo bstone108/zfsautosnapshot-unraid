@@ -10,6 +10,7 @@ $logStreamApiUrl = "/plugins/{$pluginName}/php/log-stream.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
 $saveApiUrl = "/plugins/{$pluginName}/php/save-settings.php";
 $sendSettingsUrl = "/plugins/{$pluginName}/php/send-settings.php";
+$migrateDatasetsUrl = "/plugins/{$pluginName}/php/migrate-datasets.php";
 $snapshotManagerPageUrl = "/plugins/{$pluginName}/php/snapshot-manager-page.php";
 $snapshotManagerEmbeddedUrl = $snapshotManagerPageUrl . '?embedded=1';
 $recoveryToolsUrl = "/plugins/{$pluginName}/php/recovery-tools.php";
@@ -1865,10 +1866,11 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       <div class="zfsas-card zfsas-placeholder-copy">
         <h3 class="zfsas-placeholder-title">Special Features</h3>
         <div class="zfsas-help">
-          Optional power-user features will live here. The first one is ZFS send replication, which now has its own dedicated page so it can keep separate config, logs, and safety rules from the main snapshot manager.
+          Optional power-user features live here. ZFS Send keeps its own config and queue page, and the dataset migrator has its own guided workflow because it needs container handling, verification progress, and rollback safety.
         </div>
         <div style="margin-top: 14px;">
           <button type="button" class="btn btn-primary" id="open_send_settings">Open ZFS Send</button>
+          <button type="button" class="btn" id="open_dataset_migrator">Open Dataset Migrator</button>
         </div>
       </div>
     </div>
@@ -1917,6 +1919,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
   var saveApiUrl = <?php echo json_encode($saveApiUrl); ?>;
   var sendSettingsUrl = <?php echo json_encode($sendSettingsUrl); ?>;
+  var migrateDatasetsUrl = <?php echo json_encode($migrateDatasetsUrl); ?>;
   var snapshotManagerEmbeddedUrl = <?php echo json_encode($snapshotManagerEmbeddedUrl); ?>;
   var recoveryToolsUrl = <?php echo json_encode($recoveryToolsUrl); ?>;
   var snapshotManagerListUrl = <?php echo json_encode($snapshotManagerListUrl); ?>;
@@ -3178,11 +3181,18 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
   var manualRunBtn = byId('manual_run');
   var openSendSettingsBtn = byId('open_send_settings');
+  var openDatasetMigratorBtn = byId('open_dataset_migrator');
   var openRecoveryToolsBtn = byId('open_recovery_tools');
   var manualRunBusy = false;
   if (openSendSettingsBtn) {
     openSendSettingsBtn.addEventListener('click', function () {
       window.location.href = sendSettingsUrl;
+    });
+  }
+
+  if (openDatasetMigratorBtn) {
+    openDatasetMigratorBtn.addEventListener('click', function () {
+      window.location.href = migrateDatasetsUrl;
     });
   }
 
