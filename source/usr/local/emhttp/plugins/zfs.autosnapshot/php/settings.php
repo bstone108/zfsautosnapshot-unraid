@@ -424,14 +424,14 @@ function buildDatasetPools($datasetRows)
     return $poolMap;
 }
 
-function buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationPools = [])
+function buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationDatasets = [])
 {
     $rows = [];
     $seen = [];
 
     foreach ($availableDatasets as $dataset) {
         $pool = datasetPoolName($dataset);
-        $locked = isset($sendDestinationPools[$pool]);
+        $locked = isset($sendDestinationDatasets[$dataset]);
         $rows[] = [
             'dataset' => $dataset,
             'pool' => $pool,
@@ -449,7 +449,7 @@ function buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestin
         }
 
         $pool = datasetPoolName($dataset);
-        $locked = isset($sendDestinationPools[$pool]);
+        $locked = isset($sendDestinationDatasets[$dataset]);
         $rows[] = [
             'dataset' => $dataset,
             'pool' => $pool,
@@ -463,7 +463,7 @@ function buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestin
     return sortDatasetRows($rows);
 }
 
-function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThresholds, $availableDatasets, $configuredDatasetMap, $sendDestinationPools = [])
+function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThresholds, $availableDatasets, $configuredDatasetMap, $sendDestinationDatasets = [])
 {
     $rows = [];
     $seen = [];
@@ -491,17 +491,17 @@ function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThreshol
         $rows[] = [
             'dataset' => $dataset,
             'pool' => datasetPoolName($dataset),
-            'selected' => (!isset($sendDestinationPools[datasetPoolName($dataset)]) && isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1'),
+            'selected' => (!isset($sendDestinationDatasets[$dataset]) && isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1'),
             'threshold' => strtoupper(str_replace(' ', '', $threshold)),
             'available' => isset($availableSet[$dataset]),
-            'locked' => isset($sendDestinationPools[datasetPoolName($dataset)]),
+            'locked' => isset($sendDestinationDatasets[$dataset]),
         ];
     }
 
     return sortDatasetRows($rows);
 }
 
-function buildDatasetsCsvFromPost($postedNames, $postedSelected, $postedThresholds, &$errors, $sendDestinationPools = [])
+function buildDatasetsCsvFromPost($postedNames, $postedSelected, $postedThresholds, &$errors, $sendDestinationDatasets = [])
 {
     $entries = [];
     $seen = [];
@@ -518,8 +518,7 @@ function buildDatasetsCsvFromPost($postedNames, $postedSelected, $postedThreshol
         }
         $seen[$dataset] = true;
 
-        $datasetPool = datasetPoolName($dataset);
-        $isLocked = isset($sendDestinationPools[$datasetPool]);
+        $isLocked = isset($sendDestinationDatasets[$dataset]);
         $isSelected = (!$isLocked && isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1');
         if (!$isSelected) {
             continue;
@@ -753,7 +752,8 @@ $sendConfig = zfsas_send_parse_config_file($sendConfigFile, $sendDefaults);
 $sendParseErrors = [];
 $sendParseWarnings = [];
 $sendJobs = zfsas_send_parse_jobs($sendConfig['SEND_JOBS'] ?? '', $sendParseErrors, $sendParseWarnings);
-$sendDestinationPools = zfsas_send_destination_pools_from_jobs($sendJobs);
+$sendDestinationCandidates = array_values(array_unique(array_merge($availableDatasets, array_keys($configuredDatasetMap))));
+$sendDestinationDatasets = zfsas_send_destination_datasets_from_jobs($sendJobs, $sendDestinationCandidates);
 $initialSection = trim((string) ($_GET['section'] ?? 'main'));
 if (!in_array($initialSection, ['main', 'special-features', 'repair-tools', 'snapshot-manager'], true)) {
     $initialSection = 'main';
@@ -772,11 +772,13 @@ $datasetRows = [];
 $datasetPools = [];
 
 if ($isAjaxSaveRequest) {
-    $datasetRows = buildDatasetRows([], $configuredDatasetMap, $sendDestinationPools);
+    $datasetRows = buildDatasetRows([], $configuredDatasetMap, $sendDestinationDatasets);
     $datasetPools = buildDatasetPools($datasetRows);
 } else {
     $availableDatasets = listZfsDatasets($datasetDiscoveryError);
-    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationPools);
+    $sendDestinationCandidates = array_values(array_unique(array_merge($availableDatasets, array_keys($configuredDatasetMap))));
+    $sendDestinationDatasets = zfsas_send_destination_datasets_from_jobs($sendJobs, $sendDestinationCandidates);
+    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationDatasets);
     $datasetPools = buildDatasetPools($datasetRows);
 }
 
@@ -814,13 +816,13 @@ if ($isPostRequest) {
     $postDatasetSelected = (isset($_POST['dataset_selected']) && is_array($_POST['dataset_selected'])) ? $_POST['dataset_selected'] : [];
     $postDatasetThresholds = (isset($_POST['dataset_threshold']) && is_array($_POST['dataset_threshold'])) ? $_POST['dataset_threshold'] : [];
 
-    $datasetRows = buildDatasetRowsFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $availableDatasets, $configuredDatasetMap, $sendDestinationPools);
+    $datasetRows = buildDatasetRowsFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $availableDatasets, $configuredDatasetMap, $sendDestinationDatasets);
     $datasetPools = buildDatasetPools($datasetRows);
 
     if (count($postDatasetNames) === 0) {
         $errors[] = 'Dataset selection data was not submitted. Refresh the page and try again.';
     } else {
-        $datasetCsv = buildDatasetsCsvFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $errors, $sendDestinationPools);
+        $datasetCsv = buildDatasetsCsvFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $errors, $sendDestinationDatasets);
         if ($datasetCsv !== null) {
             $submitted['DATASETS'] = $datasetCsv;
         }
@@ -886,7 +888,7 @@ if ($isPostRequest) {
                 if (!$isAjaxSaveRequest) {
                     $postSaveWarnings = [];
                     $configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $postSaveWarnings);
-                    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationPools);
+                    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationDatasets);
                     $datasetPools = buildDatasetPools($datasetRows);
 
                     $returnTarget = zfsas_normalize_return_url($_POST['return_to'] ?? '', $defaultSettingsReturnUrl);

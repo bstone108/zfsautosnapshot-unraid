@@ -582,3 +582,34 @@ function zfsas_send_destination_pools_from_jobs($jobs)
 
     return $pools;
 }
+
+function zfsas_send_destination_datasets_from_jobs($jobs, $candidateDatasets = [])
+{
+    $datasets = [];
+
+    foreach ($jobs as $job) {
+        $destination = zfsas_send_trim($job['destination'] ?? '');
+        if ($destination === '') {
+            continue;
+        }
+
+        $datasets[$destination] = true;
+
+        if (($job['children'] ?? '0') !== '1') {
+            continue;
+        }
+
+        foreach ($candidateDatasets as $candidateRaw) {
+            $candidate = zfsas_send_trim($candidateRaw);
+            if ($candidate === '' || $candidate === $destination) {
+                continue;
+            }
+
+            if (strpos($candidate . '/', $destination . '/') === 0) {
+                $datasets[$candidate] = true;
+            }
+        }
+    }
+
+    return $datasets;
+}

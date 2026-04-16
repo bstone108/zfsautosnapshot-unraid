@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.15.6 (Testing Branch Only)
+
+- Fixed the main autosnapshot dataset picker so `ZFS Send` reservations now lock only the actual destination datasets in use, plus child datasets under a recursive send target, instead of falsely locking the whole destination pool or unrelated siblings.
+
 ### 2026.04.15.5 (Testing Branch Only)
 
 - Widened the main settings container and let the embedded `Snapshot Manager` frame use the full width of its card so the right side is less likely to get clipped on wide dataset/action layouts.
