@@ -1400,7 +1400,7 @@ enqueue_scheduled_send_jobs_due() {
 
 prune_old_jobs() {
   local keep_completed=100
-  local now_epoch purge_after state
+  local now_epoch purge_after state file_mtime
   local file
   local -A job=()
   local complete_files=()
@@ -1417,6 +1417,13 @@ prune_old_jobs() {
         if [[ "$purge_after" =~ ^[0-9]+$ ]] && (( purge_after > 0 )) && (( purge_after <= now_epoch )); then
           rm -f "$file" >/dev/null 2>&1 || true
           continue
+        fi
+        if [[ ! "$purge_after" =~ ^[0-9]+$ || "$purge_after" == "0" ]]; then
+          file_mtime="$(stat -c %Y "$file" 2>/dev/null || echo 0)"
+          if [[ "$file_mtime" =~ ^[0-9]+$ ]] && (( file_mtime > 0 )) && (( now_epoch - file_mtime >= JOB_SUCCESS_TTL_SECONDS )); then
+            rm -f "$file" >/dev/null 2>&1 || true
+            continue
+          fi
         fi
         complete_files+=("$file")
         ;;

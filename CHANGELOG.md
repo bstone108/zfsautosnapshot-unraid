@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.10 (Testing Branch Only)
+
+- Fixed legacy completed or skipped queue items so old jobs created before the auto-expire change are now purged out of the send queue instead of lingering in the GUI forever when they are no longer runnable.
+
 ### 2026.04.16.09 (Testing Branch Only)
 
 - Fixed several `ZFS Send` queue bugs that could stop scheduled replication from enqueuing at the right time or could prune the wrong job history, and tightened the worker pipeline handling so queued send work now runs with safer validation and lock cleanup.

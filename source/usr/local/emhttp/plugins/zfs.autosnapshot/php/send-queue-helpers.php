@@ -199,6 +199,14 @@ function zfsas_ops_purge_expired_jobs()
         $purgeAfter = (int) ($job['PURGE_AFTER_EPOCH'] ?? 0);
         if ($purgeAfter > 0 && $purgeAfter <= $now) {
             @unlink($path);
+            continue;
+        }
+
+        if ($purgeAfter <= 0) {
+            $fileMtime = @filemtime($path);
+            if (is_int($fileMtime) && $fileMtime > 0 && ($now - $fileMtime) >= 5) {
+                @unlink($path);
+            }
         }
     }
 }
