@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.03 (Testing Branch Only)
+
+- Reworked the `Special Features` and `Repair Tools` sections so each tool now shows as a button on the left with its description beside it, making the tool pages easier to scan and leaving more room for additional entries later.
+
 ### 2026.04.16.02 (Testing Branch Only)
 
 - Fixed the `Dataset Migrator` start path so it no longer reruns the full folder-size preview before launching the worker, and so it now waits for the worker to report real startup status instead of claiming success before anything has actually begun.

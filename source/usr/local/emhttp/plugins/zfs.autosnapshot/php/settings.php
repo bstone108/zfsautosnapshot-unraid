@@ -1030,6 +1030,54 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   margin: 0 0 6px;
 }
 
+.zfsas-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.zfsas-tool-row {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  padding: 14px 0;
+  border-top: 1px solid var(--border-color, #e1e8ef);
+}
+
+.zfsas-tool-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.zfsas-tool-button-wrap {
+  display: flex;
+  align-items: flex-start;
+}
+
+.zfsas-tool-button-wrap .btn {
+  width: 100%;
+  justify-content: center;
+}
+
+.zfsas-tool-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.zfsas-tool-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.zfsas-tool-description {
+  margin: 0;
+}
+
 .zfsas-embedded-shell {
   max-width: none;
   overflow: visible;
@@ -1587,6 +1635,15 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   .zfsas-sm-table .zfsas-actions-cell {
     min-width: 160px;
   }
+
+  .zfsas-tool-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .zfsas-tool-button-wrap .btn {
+    width: auto;
+  }
 }
 </style>
 
@@ -1864,9 +1921,29 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
         <div class="zfsas-help">
           Optional power-user features live here. ZFS Send keeps its own config and queue page, and the dataset migrator has its own guided workflow because it needs container handling, verification progress, and rollback safety.
         </div>
-        <div style="margin-top: 14px;">
-          <button type="button" class="btn btn-primary" id="open_send_settings">Open ZFS Send</button>
-          <button type="button" class="btn" id="open_dataset_migrator">Open Dataset Migrator</button>
+        <div class="zfsas-tool-list">
+          <div class="zfsas-tool-row">
+            <div class="zfsas-tool-button-wrap">
+              <button type="button" class="btn btn-primary" id="open_send_settings">Open ZFS Send</button>
+            </div>
+            <div class="zfsas-tool-copy">
+              <div class="zfsas-tool-title">ZFS Send</div>
+              <div class="zfsas-help zfsas-tool-description">
+                Configure scheduled replication jobs, send retention policy, queue limits, and live send status for datasets you want mirrored elsewhere.
+              </div>
+            </div>
+          </div>
+          <div class="zfsas-tool-row">
+            <div class="zfsas-tool-button-wrap">
+              <button type="button" class="btn" id="open_dataset_migrator">Open Dataset Migrator</button>
+            </div>
+            <div class="zfsas-tool-copy">
+              <div class="zfsas-tool-title">Dataset Migrator</div>
+              <div class="zfsas-help zfsas-tool-description">
+                Convert top-level folders inside a dataset into child datasets with guided Docker handling, paranoid verification, rollback safety, and live progress reporting.
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -1877,8 +1954,18 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
         <div class="zfsas-help">
           Guided repair and recovery utilities live on their own page so they can surface scrub state, corruption diagnostics, and recovery actions without cluttering the main settings page.
         </div>
-        <div style="margin-top: 14px;">
-          <button type="button" class="btn btn-primary" id="open_recovery_tools">Open Recovery Tools</button>
+        <div class="zfsas-tool-list">
+          <div class="zfsas-tool-row">
+            <div class="zfsas-tool-button-wrap">
+              <button type="button" class="btn btn-primary" id="open_recovery_tools">Open Recovery Tools</button>
+            </div>
+            <div class="zfsas-tool-copy">
+              <div class="zfsas-tool-title">Recovery Tools</div>
+              <div class="zfsas-help zfsas-tool-description">
+                Open the guided recovery page for corruption diagnostics, scrub-aware repair workflows, and manual scan tools when you need to investigate damaged data.
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
