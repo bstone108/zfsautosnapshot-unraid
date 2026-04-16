@@ -9,6 +9,7 @@ OPS_STATUS_DIR="${OPS_ROOT}/status"
 RUNTIME_DIR="/var/run/zfs-autosnapshot-ops"
 SEND_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/send-workers"
 DELETE_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/delete-worker"
+PREP_LOCKS_DIR="${RUNTIME_DIR}/prep-locks"
 JOB_LOCKS_DIR="${RUNTIME_DIR}/job-locks"
 ACTIVE_SEND_DATASETS_DIR="${RUNTIME_DIR}/active-send-datasets"
 AUTOSNAPSHOT_RUNTIME_DIR="/var/run/zfs-autosnapshot"
@@ -40,6 +41,8 @@ declare -A SCHEDULE_THRESHOLD_RAW=()
 declare -A SCHEDULE_THRESHOLD_BYTES=()
 declare -A SCHEDULE_INCLUDE_CHILDREN=()
 declare -A SCHEDULE_PREFIX=()
+QUEUE_DELETE_LAST_ADDED=0
+QUEUE_DELETE_LAST_ESTIMATED_RECLAIM=0
 
 log() {
   printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$*"
@@ -70,7 +73,7 @@ ensure_runtime_layout() {
   ops_ensure_dir "$OPS_ROOT" || return 1
   ops_ensure_dir "$OPS_JOBS_DIR" || return 1
   ops_ensure_dir "$OPS_STATUS_DIR" || return 1
-  mkdir -p "$RUNTIME_DIR" "$SEND_WORKER_RUNTIME_DIR" "$DELETE_WORKER_RUNTIME_DIR" "$JOB_LOCKS_DIR" "$ACTIVE_SEND_DATASETS_DIR" "$(dirname "$LOG_FILE")" >/dev/null 2>&1 || true
+  mkdir -p "$RUNTIME_DIR" "$SEND_WORKER_RUNTIME_DIR" "$DELETE_WORKER_RUNTIME_DIR" "$PREP_LOCKS_DIR" "$JOB_LOCKS_DIR" "$ACTIVE_SEND_DATASETS_DIR" "$(dirname "$LOG_FILE")" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -431,6 +434,40 @@ delete_worker_running() {
   [[ -d "$DELETE_WORKER_RUNTIME_DIR/active.lockdir" ]]
 }
 
+prep_lock_dir_for_pool() {
+  local pool="$1"
+  printf '%s/pool-%s.lockdir' "$PREP_LOCKS_DIR" "$(printf '%s' "$pool" | tr -c 'A-Za-z0-9._-' '_')"
+}
+
+acquire_pool_prep_lock() {
+  local pool="$1"
+  local lock_dir pid_file pid
+
+  lock_dir="$(prep_lock_dir_for_pool "$pool")"
+  pid_file="${lock_dir}/pid"
+
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" > "$pid_file" 2>/dev/null || true
+    return 0
+  fi
+
+  pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+  if ! process_alive "$pid"; then
+    rm -rf "$lock_dir" >/dev/null 2>&1 || true
+    if mkdir "$lock_dir" 2>/dev/null; then
+      printf '%s\n' "$$" > "$pid_file" 2>/dev/null || true
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+release_pool_prep_lock() {
+  local pool="$1"
+  rm -rf "$(prep_lock_dir_for_pool "$pool")" >/dev/null 2>&1 || true
+}
+
 autosnapshot_run_active() {
   local pid=""
 
@@ -704,6 +741,13 @@ parse_send_checkpoint_schedule_id() {
   printf '%s' "${BASH_REMATCH[1]}"
 }
 
+schedule_destination_pool() {
+  local schedule_job_id="$1"
+  local dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
+  [[ -n "$dest_root" ]] || return 1
+  printf '%s' "${dest_root%%/*}"
+}
+
 list_tree_datasets() {
   local root_dataset="$1"
   local include_children="$2"
@@ -971,6 +1015,57 @@ find_oldest_deletable_destination_snapshot_for_schedule() {
       oldest_epoch="$snap_epoch"
     fi
   done < <(zfs list -H -p -r -t snapshot -o name,creation "$dest_root" 2>/dev/null || true)
+
+  printf -v "$result_snap_var" '%s' "$oldest_snap"
+  printf -v "$result_epoch_var" '%s' "$oldest_epoch"
+  [[ -n "$oldest_snap" ]]
+}
+
+find_oldest_deletable_destination_snapshot_for_pool() {
+  local pool="$1"
+  local constraints_name="$2"
+  local result_snap_var="$3"
+  local result_epoch_var="$4"
+  local -n constraints_ref="$constraints_name"
+  local dataset snap_name snap_epoch snap_dataset snap_base oldest_snap="" oldest_epoch=0
+  local userrefs schedule_job_id
+  local -A protected=()
+  local -A seen_snapshots=()
+
+  printf -v "$result_snap_var" ''
+  printf -v "$result_epoch_var" '0'
+
+  all_scheduled_job_protected_basenames protected
+
+  while IFS= read -r dataset; do
+    [[ -n "$dataset" ]] || continue
+    while IFS=$'\t' read -r snap_name snap_epoch; do
+      [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+      [[ -z "${seen_snapshots[$snap_name]:-}" ]] || continue
+      seen_snapshots["$snap_name"]=1
+
+      snap_dataset="${snap_name%@*}"
+      snap_base="${snap_name##*@}"
+
+      candidate_affects_any_constraint "$snap_dataset" "$constraints_name" || continue
+      [[ -z "${protected[$snap_base]:-}" ]] || continue
+      userrefs="$(snapshot_userrefs_count "$snap_name")"
+      (( userrefs == 0 )) || continue
+      snapshot_has_clones "$snap_name" && continue
+
+      schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
+      if [[ -n "$schedule_job_id" ]]; then
+        snapshot_delete_checkpoint_job_exists "$schedule_job_id" "$snap_base" && continue
+      else
+        snapshot_delete_job_exists_for_snapshot "$snap_name" && continue
+      fi
+
+      if [[ -z "$oldest_snap" ]] || (( snap_epoch < oldest_epoch )); then
+        oldest_snap="$snap_name"
+        oldest_epoch="$snap_epoch"
+      fi
+    done < <(zfs list -H -p -t snapshot -o name,creation -d 1 "$dataset" 2>/dev/null || true)
+  done < <(list_existing_destination_datasets_for_pool "$pool")
 
   printf -v "$result_snap_var" '%s' "$oldest_snap"
   printf -v "$result_epoch_var" '%s' "$oldest_epoch"
@@ -1466,6 +1561,30 @@ snapshot_delete_checkpoint_job_exists() {
   return 1
 }
 
+estimate_destination_checkpoint_reclaim_bytes() {
+  local schedule_job_id="$1"
+  local basename="$2"
+  local dest_root total=0 snap_name snap_epoch
+
+  dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
+  [[ -n "$dest_root" ]] || {
+    printf '0'
+    return 0
+  }
+  dataset_exists "$dest_root" || {
+    printf '0'
+    return 0
+  }
+
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" ]] || continue
+    [[ "${snap_name##*@}" == "$basename" ]] || continue
+    total=$(( total + $(snapshot_written_bytes "$snap_name") ))
+  done < <(job_list_basenames_for_root "$dest_root" "$(job_prefix_for_schedule "$schedule_job_id")")
+
+  printf '%s' "$total"
+}
+
 queue_snapshot_delete_job() {
   local dataset="$1"
   local snapshot="$2"
@@ -1475,14 +1594,19 @@ queue_snapshot_delete_job() {
   local delete_scope="${6:-snapshot}"
   local snapshot_name snapshot_epoch job_id requested_epoch path
   local guid="" createtxg=""
+  local estimated_reclaim=0 pool=""
   local -A props=()
   local -A job=()
+
+  QUEUE_DELETE_LAST_ADDED=0
+  QUEUE_DELETE_LAST_ESTIMATED_RECLAIM=0
 
   if ! snapshot_exists "$snapshot"; then
     return 1
   fi
 
   snapshot_name="${snapshot##*@}"
+  pool="${dataset%%/*}"
   requested_epoch="$(date +%s)"
 
   if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
@@ -1497,6 +1621,13 @@ queue_snapshot_delete_job() {
   createtxg="${props[createtxg]:-}"
   [[ "$snapshot_epoch" =~ ^[0-9]+$ ]] || snapshot_epoch=0
   [[ "$queue_sort_epoch" =~ ^[0-9]+$ ]] || queue_sort_epoch="$snapshot_epoch"
+
+  if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
+    estimated_reclaim="$(estimate_destination_checkpoint_reclaim_bytes "$send_schedule_job_id" "$snapshot_name")"
+  else
+    estimated_reclaim="$(snapshot_written_bytes "$snapshot")"
+  fi
+  [[ "$estimated_reclaim" =~ ^[0-9]+$ ]] || estimated_reclaim=0
 
   if command -v sha1sum >/dev/null 2>&1; then
     job_id="delete-$(printf '%s' "$snapshot" | sha1sum | awk '{print substr($1,1,16)}')-${requested_epoch}"
@@ -1518,6 +1649,8 @@ queue_snapshot_delete_job() {
   job[SNAPSHOT_EPOCH]="$snapshot_epoch"
   job[SNAPSHOT_GUID]="$guid"
   job[SNAPSHOT_CREATETXG]="$createtxg"
+  job[DELETE_POOL]="$pool"
+  job[ESTIMATED_RECLAIM_BYTES]="$estimated_reclaim"
   job[SEND_PROTECTED]="0"
   job[DELETE_SCOPE]="$delete_scope"
   job[LAST_ERROR]=""
@@ -1532,6 +1665,8 @@ queue_snapshot_delete_job() {
   fi
 
   job_write "$path" job
+  QUEUE_DELETE_LAST_ADDED=1
+  QUEUE_DELETE_LAST_ESTIMATED_RECLAIM="$estimated_reclaim"
 }
 
 snapshot_delete_conflicts_with_send_jobs() {
@@ -1597,11 +1732,61 @@ list_existing_destination_datasets_for_schedule() {
   fi
 }
 
+list_schedule_job_ids_for_destination_pool() {
+  local pool="$1"
+  local schedule_job_id dest_root
+
+  for schedule_job_id in "${SCHEDULE_JOB_IDS[@]}"; do
+    dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
+    [[ -n "$dest_root" ]] || continue
+    [[ "${dest_root%%/*}" == "$pool" ]] || continue
+    printf '%s\n' "$schedule_job_id"
+  done
+}
+
+list_existing_destination_datasets_for_pool() {
+  local pool="$1"
+  local schedule_job_id dataset
+  local -A seen=()
+
+  while IFS= read -r schedule_job_id; do
+    [[ -n "$schedule_job_id" ]] || continue
+    while IFS= read -r dataset; do
+      [[ -n "$dataset" ]] || continue
+      [[ -z "${seen[$dataset]:-}" ]] || continue
+      seen["$dataset"]=1
+      printf '%s\n' "$dataset"
+    done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+  done < <(list_schedule_job_ids_for_destination_pool "$pool")
+}
+
+add_planned_reclaim_for_capacity_dataset() {
+  local reclaimed_dataset="$1"
+  local reclaim_bytes="$2"
+  local capacity_dataset="$3"
+  local delta_map_name="$4"
+  local token base
+
+  [[ -n "$capacity_dataset" && -n "$delta_map_name" ]] || return 0
+  [[ "$reclaim_bytes" =~ ^[0-9]+$ ]] || return 0
+  (( reclaim_bytes > 0 )) || return 0
+
+  local -n delta_ref="$delta_map_name"
+
+  while IFS=$'\t' read -r token base; do
+    [[ -n "$token" ]] || continue
+    candidate_affects_constraint "$reclaimed_dataset" "$token" || continue
+    delta_ref["$token"]=$(( ${delta_ref[$token]:-0} + reclaim_bytes ))
+  done < <(emit_dataset_capacity_constraints "$capacity_dataset")
+}
+
 queue_destination_retention_for_dataset() {
   local dataset="$1"
   local schedule_job_id="$2"
   local newest_send_basename="$3"
   local mode="${4:-retention}"
+  local capacity_dataset="${5:-}"
+  local delta_map_name="${6:-}"
   local snap_name snap_epoch snap_base snap_age written_bytes userrefs snapshot_schedule_job_id
   local newest_snapshot=""
   local zero_change_anchor=""
@@ -1648,9 +1833,15 @@ queue_destination_retention_for_dataset() {
           if [[ -n "$snapshot_schedule_job_id" ]]; then
             [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
             queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by post-send zero-change cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+            if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
+              add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
+            fi
             queued_checkpoint_basenames["$snap_base"]=1
           else
             queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by post-send zero-change cleanup." || true
+            if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
+              add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
+            fi
           fi
           continue
         fi
@@ -1667,9 +1858,15 @@ queue_destination_retention_for_dataset() {
       if [[ -n "$snapshot_schedule_job_id" ]]; then
         [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
         queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+        if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
+          add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
+        fi
         queued_checkpoint_basenames["$snap_base"]=1
       else
         queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send retention cleanup." || true
+        if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
+          add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
+        fi
       fi
       continue
     fi
@@ -1683,9 +1880,15 @@ queue_destination_retention_for_dataset() {
         if [[ -n "$snapshot_schedule_job_id" ]]; then
           [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
           queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send weekly retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+          if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
+            add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
+          fi
           queued_checkpoint_basenames["$snap_base"]=1
         else
           queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send weekly retention cleanup." || true
+          if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
+            add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
+          fi
         fi
       fi
       continue
@@ -1700,13 +1903,93 @@ queue_destination_retention_for_dataset() {
         if [[ -n "$snapshot_schedule_job_id" ]]; then
           [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
           queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send daily retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+          if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
+            add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
+          fi
           queued_checkpoint_basenames["$snap_base"]=1
         else
           queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send daily retention cleanup." || true
+          if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
+            add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
+          fi
         fi
       fi
     fi
   done < <(zfs list -H -p -t snapshot -o name,creation -S creation -d 1 "$dataset" 2>/dev/null || true)
+}
+
+active_delete_queue_count_for_pool() {
+  local pool="$1"
+  local count=0 file state job_pool
+  # shellcheck disable=SC2034
+  local -A job=()
+
+  while IFS= read -r file; do
+    job_load "$file" job || continue
+    [[ "$(job_get job JOB_TYPE)" == "snapshot_delete" ]] || continue
+    state="$(job_get job STATE)"
+    job_state_is_active "$state" || continue
+    job_pool="$(job_get job DELETE_POOL)"
+    [[ -n "$job_pool" ]] || job_pool="$(job_get job DATASET)"
+    job_pool="${job_pool%%/*}"
+    [[ "$job_pool" == "$pool" ]] || continue
+    count=$((count + 1))
+  done < <(list_job_files)
+
+  printf '%s' "$count"
+}
+
+pool_has_active_delete_jobs() {
+  local count
+  count="$(active_delete_queue_count_for_pool "$1")"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  (( count > 0 ))
+}
+
+queue_pool_retention_cleanup() {
+  local pool="$1"
+  local capacity_dataset="$2"
+  local delta_map_name="$3"
+  local dataset
+
+  while IFS= read -r dataset; do
+    [[ -n "$dataset" ]] || continue
+    queue_destination_retention_for_dataset "$dataset" "" "" "retention" "$capacity_dataset" "$delta_map_name"
+  done < <(list_existing_destination_datasets_for_pool "$pool")
+}
+
+queue_pool_free_space_cleanup_for_schedule() {
+  local schedule_job_id="$1"
+  local capacity_dataset="$2"
+  local delta_map_name="$3"
+  local threshold="${SCHEDULE_THRESHOLD_BYTES[$schedule_job_id]}"
+  local pool effective candidate_snapshot candidate_epoch candidate_dataset
+  # shellcheck disable=SC2034
+  local -a active_constraints=()
+
+  pool="$(schedule_destination_pool "$schedule_job_id")"
+  [[ -n "$pool" && -n "$capacity_dataset" ]] || return 1
+  [[ "$threshold" =~ ^[0-9]+$ ]] || return 1
+
+  while :; do
+    get_dataset_active_constraints "$capacity_dataset" "$delta_map_name" effective active_constraints || return 1
+    (( effective >= threshold )) && return 0
+
+    candidate_snapshot=""
+    candidate_epoch=0
+    if ! find_oldest_deletable_destination_snapshot_for_pool "$pool" active_constraints candidate_snapshot candidate_epoch; then
+      return 1
+    fi
+
+    candidate_dataset="${candidate_snapshot%@*}"
+    queue_snapshot_delete_job "$candidate_dataset" "$candidate_snapshot" "$candidate_epoch" "Queued by scheduled-send low-space cleanup." || true
+    if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
+      add_planned_reclaim_for_capacity_dataset "$candidate_dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
+      continue
+    fi
+
+    return 1
+  done
 }
 
 queue_schedule_retention_cleanup() {

@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.08 (Testing Branch Only)
+
+- Reworked scheduled `ZFS Send` prep so it now runs as its own pool-scoped stage, queues retention and low-space snapshot deletions first, waits for that pool's delete queue to drain, and only then fans the actual send work back out into parallel transfer jobs.
+- Changed scheduled `ZFS Send` low-space planning so it now estimates reclaim from the snapshots it queues for deletion and can pull cleanup candidates from all `ZFS Send`-managed destination datasets on the same pool, instead of only the dataset tree belonging to the one schedule item that happened to start prep.
+
 ### 2026.04.16.07 (Testing Branch Only)
 
 - Reworked recursive `ZFS Send` queue handling so after the initial scheduled-send prep finishes, child datasets now fan out into their own top-down queue items for the actual transfer work and their own follow-up zero-change cleanup steps instead of appearing as one giant queue row.

@@ -2,6 +2,8 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Reworked scheduled `ZFS Send` prep so it now runs as its own pool-scoped stage, queues retention and low-space snapshot deletions first, waits for that pool's delete queue to drain, and only then fans the actual send work back out into parallel transfer jobs.
+- Changed scheduled `ZFS Send` low-space planning so it now estimates reclaim from the snapshots it queues for deletion and can pull cleanup candidates from all `ZFS Send`-managed destination datasets on the same pool, instead of only the dataset tree belonging to the one schedule item that happened to start prep.
 - Reworked recursive `ZFS Send` queue handling so after the initial scheduled-send prep finishes, child datasets now fan out into their own top-down queue items for the actual transfer work and their own follow-up zero-change cleanup steps instead of appearing as one giant queue row.
 - Changed successful queued send and cleanup items to disappear automatically about `5` seconds after completion, while unrecoverable failed send items now stay visible with both `Retry` and `Confirm Clear` controls so you can decide when to remove them from the queue.
 - Removed `ZFS Send` schedule options shorter than `6` hours so the scheduler now only offers `6h`, `12h`, `1d`, and `7d`, which better matches how long real replication runs can take.
