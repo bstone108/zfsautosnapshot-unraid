@@ -17,7 +17,7 @@ if (!zfsas_ops_ensure_storage_dirs()) {
 }
 
 $action = trim((string) ($_POST['action'] ?? ''));
-if ($action !== 'retry') {
+if (!in_array($action, ['retry', 'clear_failed'], true)) {
     zfsas_emit_marked_json([
         'ok' => false,
         'error' => 'Unknown send queue action.',
@@ -33,17 +33,31 @@ if ($jobId === '') {
 }
 
 $error = null;
-if (!zfsas_ops_retry_send_job($jobId, $error)) {
+if ($action === 'retry') {
+    if (!zfsas_ops_retry_send_job($jobId, $error)) {
+        zfsas_emit_marked_json([
+            'ok' => false,
+            'error' => $error ?: 'Unable to retry the selected send job.',
+        ], 400);
+    }
+
+    $kickError = null;
+    zfsas_ops_start_queue_kicker($kickError);
+
+    zfsas_emit_marked_json([
+        'ok' => true,
+        'message' => 'Send job queued for retry.',
+    ]);
+}
+
+if (!zfsas_ops_clear_send_job($jobId, $error)) {
     zfsas_emit_marked_json([
         'ok' => false,
-        'error' => $error ?: 'Unable to retry the selected send job.',
+        'error' => $error ?: 'Unable to clear the selected failed send job.',
     ], 400);
 }
 
-$kickError = null;
-zfsas_ops_start_queue_kicker($kickError);
-
 zfsas_emit_marked_json([
     'ok' => true,
-    'message' => 'Send job queued for retry.',
+    'message' => 'Failed send job cleared from the queue.',
 ]);

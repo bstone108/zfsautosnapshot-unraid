@@ -37,6 +37,7 @@ complete_delete_job() {
   job[WORKER_PID]=""
   job[LAST_ERROR]=""
   job[LAST_MESSAGE]="$message"
+  set_job_success_purge_after job
   persist_job
 }
 
@@ -47,6 +48,7 @@ skip_delete_job() {
   job[WORKER_PID]=""
   job[LAST_ERROR]=""
   job[LAST_MESSAGE]="$message"
+  set_job_success_purge_after job
   persist_job
 }
 

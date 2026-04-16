@@ -28,6 +28,7 @@ enqueue_all_scheduled_jobs_now() {
     job[JOB_ID]="send-${job_id}-manual-${now_epoch}"
     job[JOB_TYPE]="send"
     job[JOB_MODE]="scheduled"
+    job[JOB_ACTION]="prepare"
     job[STATE]="queued"
     job[PHASE]="queued"
     job[REQUESTED_EPOCH]="$now_epoch"
@@ -50,6 +51,7 @@ enqueue_all_scheduled_jobs_now() {
     job[WORKER_PID]=""
     job[PROGRESS_PERCENT]="5"
     job[MEMBER_COUNT]="0"
+    job[COMPLETES_SCHEDULE_WINDOW]="1"
     job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$now_epoch" "send-${job_id}-manual-${now_epoch}")"
     job_write "$job_file" job || true
   done

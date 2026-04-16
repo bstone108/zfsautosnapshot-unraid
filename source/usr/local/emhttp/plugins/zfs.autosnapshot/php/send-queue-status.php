@@ -14,6 +14,8 @@ foreach (zfsas_ops_recent_send_jobs(120) as $job) {
     $rows[] = [
         'id' => (string) ($job['JOB_ID'] ?? ''),
         'mode' => (string) ($job['JOB_MODE'] ?? ''),
+        'action' => (string) ($job['JOB_ACTION'] ?? ''),
+        'typeLabel' => zfsas_ops_send_job_type_label($job),
         'state' => (string) ($job['STATE'] ?? ''),
         'phase' => (string) ($job['PHASE'] ?? ''),
         'stateLabel' => zfsas_ops_send_job_state_label($job),
@@ -26,6 +28,7 @@ foreach (zfsas_ops_recent_send_jobs(120) as $job) {
         'progress' => zfsas_ops_send_job_progress_percent($job),
         'retryAt' => (string) ($job['RETRY_AT'] ?? '0'),
         'canRetry' => ((string) ($job['STATE'] ?? '') === 'failed'),
+        'canClear' => ((string) ($job['STATE'] ?? '') === 'failed'),
     ];
 }
 

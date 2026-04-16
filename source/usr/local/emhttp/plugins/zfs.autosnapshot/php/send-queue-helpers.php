@@ -138,6 +138,8 @@ function zfsas_ops_write_job_file($path, $payload)
 
 function zfsas_ops_list_jobs($types = null)
 {
+    zfsas_ops_purge_expired_jobs();
+
     $files = glob(zfsas_ops_jobs_dir() . '/*.job');
     if (!is_array($files)) {
         return [];
@@ -173,6 +175,32 @@ function zfsas_ops_list_jobs($types = null)
     });
 
     return $jobs;
+}
+
+function zfsas_ops_purge_expired_jobs()
+{
+    $now = time();
+    $files = glob(zfsas_ops_jobs_dir() . '/*.job');
+    if (!is_array($files)) {
+        return;
+    }
+
+    foreach ($files as $path) {
+        $job = zfsas_ops_parse_job_file($path);
+        if (!is_array($job)) {
+            continue;
+        }
+
+        $state = (string) ($job['STATE'] ?? '');
+        if (!in_array($state, ['complete', 'skipped'], true)) {
+            continue;
+        }
+
+        $purgeAfter = (int) ($job['PURGE_AFTER_EPOCH'] ?? 0);
+        if ($purgeAfter > 0 && $purgeAfter <= $now) {
+            @unlink($path);
+        }
+    }
 }
 
 function zfsas_ops_send_job_progress_percent($job)
@@ -221,6 +249,31 @@ function zfsas_ops_send_job_state_label($job)
     }
 
     return ucfirst(str_replace('_', ' ', $state));
+}
+
+function zfsas_ops_send_job_type_label($job)
+{
+    $mode = (string) ($job['JOB_MODE'] ?? '');
+    $action = (string) ($job['JOB_ACTION'] ?? '');
+
+    if ($mode === 'manual_snapshot') {
+        return 'Manual send';
+    }
+
+    switch ($action) {
+        case 'prepare':
+            return ((string) ($job['INCLUDE_CHILDREN'] ?? '0') === '1')
+                ? 'Recursive prep'
+                : 'Scheduled send';
+        case 'send_member':
+            return 'Child send';
+        case 'cleanup_member':
+            return 'Zero-change cleanup';
+        case 'finalize':
+            return 'Finalize cleanup';
+        default:
+            return 'Scheduled send';
+    }
 }
 
 function zfsas_ops_schedule_state_read()
@@ -487,6 +540,21 @@ function zfsas_ops_find_matching_manual_send_job($snapshot, $destination)
 function zfsas_ops_recent_send_jobs($limit = 100)
 {
     $jobs = zfsas_ops_list_jobs(['send']);
+    usort($jobs, function ($a, $b) {
+        $leftSort = (int) ($a['QUEUE_SORT'] ?? PHP_INT_MAX);
+        $rightSort = (int) ($b['QUEUE_SORT'] ?? PHP_INT_MAX);
+        if ($leftSort !== $rightSort) {
+            return $leftSort <=> $rightSort;
+        }
+
+        $leftRequested = (int) ($a['REQUESTED_EPOCH'] ?? 0);
+        $rightRequested = (int) ($b['REQUESTED_EPOCH'] ?? 0);
+        if ($leftRequested !== $rightRequested) {
+            return $leftRequested <=> $rightRequested;
+        }
+
+        return strnatcasecmp((string) ($a['JOB_ID'] ?? ''), (string) ($b['JOB_ID'] ?? ''));
+    });
     return array_slice($jobs, 0, max(1, (int) $limit));
 }
 
@@ -510,6 +578,28 @@ function zfsas_ops_retry_send_job($jobId, &$error = null)
         $job['PROGRESS_PERCENT'] = '5';
         if (!zfsas_ops_write_job_file($job['__path'], $job)) {
             $error = 'Unable to update the send job for retry.';
+            return false;
+        }
+        return true;
+    }
+
+    $error = 'Send job not found.';
+    return false;
+}
+
+function zfsas_ops_clear_send_job($jobId, &$error = null)
+{
+    $error = null;
+    foreach (zfsas_ops_list_jobs(['send']) as $job) {
+        if ((string) ($job['JOB_ID'] ?? '') !== (string) $jobId) {
+            continue;
+        }
+        if ((string) ($job['STATE'] ?? '') !== 'failed') {
+            $error = 'Only failed send jobs can be cleared.';
+            return false;
+        }
+        if (!@unlink((string) ($job['__path'] ?? ''))) {
+            $error = 'Unable to remove the failed send job from the queue.';
             return false;
         }
         return true;

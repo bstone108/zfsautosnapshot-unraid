@@ -23,6 +23,7 @@ DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS="183"
 DEFAULT_RETRY_DELAYS=(60 300 900)
 POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS:-3}"
 POST_DELETE_RECHECK_INTERVAL_SECONDS="${POST_DELETE_RECHECK_INTERVAL_SECONDS:-1}"
+JOB_SUCCESS_TTL_SECONDS="${JOB_SUCCESS_TTL_SECONDS:-5}"
 
 SEND_SNAPSHOT_PREFIX="$DEFAULT_SEND_SNAPSHOT_PREFIX"
 SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
@@ -335,6 +336,43 @@ job_state_is_active() {
     queued|running|retry_wait) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+job_state_is_success() {
+  case "$1" in
+    complete|skipped) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+job_completes_schedule_window() {
+  local assoc_name="$1"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+  local explicit action
+
+  explicit="${job_ref[COMPLETES_SCHEDULE_WINDOW]:-}"
+  if [[ -n "$explicit" ]]; then
+    [[ "$explicit" == "1" ]]
+    return
+  fi
+
+  action="${job_ref[JOB_ACTION]:-}"
+  case "$action" in
+    ""|single_send|finalize) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+set_job_success_purge_after() {
+  local assoc_name="$1"
+  local ttl="${2:-$JOB_SUCCESS_TTL_SECONDS}"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+  local now_epoch
+
+  now_epoch="$(date +%s)"
+  job_ref[PURGE_AFTER_EPOCH]="$(( now_epoch + ttl ))"
 }
 
 job_is_retry_ready() {
@@ -1084,6 +1122,7 @@ last_completed_schedule_job_epoch() {
     [[ "$(job_get job SCHEDULE_JOB_ID)" == "$schedule_job_id" ]] || continue
     state="$(job_get job STATE)"
     [[ "$state" == "complete" ]] || continue
+    job_completes_schedule_window job || continue
     requested="$(job_get job REQUESTED_EPOCH 0)"
     [[ "$requested" =~ ^[0-9]+$ ]] || requested=0
     (( requested > latest )) && latest="$requested"
@@ -1156,6 +1195,7 @@ enqueue_scheduled_send_jobs_due() {
     job[JOB_ID]="send-${job_id}-${window_key}"
     job[JOB_TYPE]="send"
     job[JOB_MODE]="scheduled"
+    job[JOB_ACTION]="prepare"
     job[STATE]="queued"
     job[PHASE]="queued"
     job[REQUESTED_EPOCH]="$requested_epoch"
@@ -1178,6 +1218,7 @@ enqueue_scheduled_send_jobs_due() {
     job[WORKER_PID]=""
     job[PROGRESS_PERCENT]="5"
     job[MEMBER_COUNT]="0"
+    job[COMPLETES_SCHEDULE_WINDOW]="1"
 
     job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "send-${job_id}-${window_key}")"
     job_write "$job_file" job || continue
@@ -1189,15 +1230,24 @@ enqueue_scheduled_send_jobs_due() {
 
 prune_old_jobs() {
   local keep_completed=100
+  local now_epoch purge_after state
   local file
   local -A job=()
   local complete_files=()
   local count=0
 
+  now_epoch="$(date +%s)"
+
   while IFS= read -r file; do
     job_load "$file" job || continue
-    case "$(job_get job STATE)" in
+    state="$(job_get job STATE)"
+    case "$state" in
       complete|skipped)
+        purge_after="$(job_get job PURGE_AFTER_EPOCH 0)"
+        if [[ "$purge_after" =~ ^[0-9]+$ ]] && (( purge_after > 0 )) && (( purge_after <= now_epoch )); then
+          rm -f "$file" >/dev/null 2>&1 || true
+          continue
+        fi
         complete_files+=("$file")
         ;;
     esac
@@ -1679,4 +1729,13 @@ queue_schedule_zero_change_cleanup() {
     [[ -n "$dataset" ]] || continue
     queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change"
   done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+}
+
+queue_schedule_zero_change_cleanup_for_dataset() {
+  local schedule_job_id="$1"
+  local dataset="$2"
+  local newest_send_basename="$3"
+
+  [[ -n "$schedule_job_id" && -n "$dataset" && -n "$newest_send_basename" ]] || return 1
+  queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change"
 }

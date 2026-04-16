@@ -548,7 +548,7 @@ if ($isPostRequest) {
             <th>Status</th>
             <th>Progress</th>
             <th>Message</th>
-            <th style="width:120px;">Action</th>
+            <th style="width:220px;">Action</th>
           </tr>
         </thead>
         <tbody id="send_queue_rows">
@@ -562,7 +562,7 @@ if ($isPostRequest) {
                 <td><code><?php echo zfsas_send_h($queueJob['SOURCE_ROOT'] ?? $queueJob['DATASET'] ?? ''); ?></code></td>
                 <td><code><?php echo zfsas_send_h($queueJob['DESTINATION_ROOT'] ?? ''); ?></code></td>
                 <td>
-                  <span class="zfsas-send-queue-badge"><?php echo zfsas_send_h(((string) ($queueJob['JOB_MODE'] ?? '') === 'manual_snapshot') ? 'Manual send' : 'Scheduled send'); ?></span>
+                  <span class="zfsas-send-queue-badge"><?php echo zfsas_send_h(zfsas_ops_send_job_type_label($queueJob)); ?></span>
                 </td>
                 <td>
                   <span class="zfsas-send-queue-badge<?php echo ((string) ($queueJob['STATE'] ?? '') === 'failed') ? ' error' : ''; ?>">
@@ -579,6 +579,7 @@ if ($isPostRequest) {
                 <td>
                   <?php if ((string) ($queueJob['STATE'] ?? '') === 'failed') : ?>
                     <button type="button" class="btn zfsas-send-retry-job" data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">Retry</button>
+                    <button type="button" class="btn zfsas-send-clear-job" data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">Confirm Clear</button>
                   <?php else : ?>
                     <span class="zfsas-send-help">-</span>
                   <?php endif; ?>
@@ -788,21 +789,21 @@ if ($isPostRequest) {
     var html = '';
     jobs.forEach(function (job) {
       var message = job.lastError || job.lastMessage || '';
-      var modeLabel = (job.mode === 'manual_snapshot') ? 'Manual send' : 'Scheduled send';
-      if (job.includeChildren) {
-        modeLabel += ' + children';
-      }
+      var typeLabel = job.typeLabel || ((job.mode === 'manual_snapshot') ? 'Manual send' : 'Scheduled send');
 
       html += '<tr data-job-id="' + escapeHtml(job.id || '') + '">';
       html += '<td><code>' + escapeHtml(job.source || '') + '</code></td>';
       html += '<td><code>' + escapeHtml(job.destination || '') + '</code></td>';
-      html += '<td>' + queueBadge(modeLabel, false) + '</td>';
+      html += '<td>' + queueBadge(typeLabel, false) + '</td>';
       html += '<td>' + queueBadge(job.stateLabel || job.state || 'Queued', job.state === 'failed') + '</td>';
       html += '<td>' + queueProgressHtml(job.progress) + '</td>';
       html += '<td>' + escapeHtml(message) + '</td>';
       html += '<td>';
       if (job.canRetry) {
         html += '<button type="button" class="btn zfsas-send-retry-job" data-job-id="' + escapeHtml(job.id || '') + '">Retry</button>';
+        if (job.canClear) {
+          html += ' <button type="button" class="btn zfsas-send-clear-job" data-job-id="' + escapeHtml(job.id || '') + '">Confirm Clear</button>';
+        }
       } else {
         html += '<span class="zfsas-send-help">-</span>';
       }
@@ -1274,8 +1275,13 @@ if ($isPostRequest) {
 
   if (queueRowsBody) {
     queueRowsBody.addEventListener('click', function (event) {
-      var button = event.target.closest('.zfsas-send-retry-job');
-      if (!button) {
+      var retryButton = event.target.closest('.zfsas-send-retry-job');
+      var clearButton = event.target.closest('.zfsas-send-clear-job');
+      var button = retryButton || clearButton;
+      var action = retryButton ? 'retry' : (clearButton ? 'clear_failed' : '');
+      var successMessage = retryButton ? 'Send job queued for retry.' : 'Failed send job cleared from the queue.';
+
+      if (!button || action === '') {
         return;
       }
 
@@ -1287,9 +1293,9 @@ if ($isPostRequest) {
       button.disabled = true;
       requestJsonPost(
         queueActionApiUrl,
-        {action: 'retry', job_id: jobId},
+        {action: action, job_id: jobId},
         function (payload) {
-          setRunStatus(payload && payload.message ? payload.message : 'Send job queued for retry.', false);
+          setRunStatus(payload && payload.message ? payload.message : successMessage, false);
           loadQueueJobs();
         },
         function (error, payload) {
