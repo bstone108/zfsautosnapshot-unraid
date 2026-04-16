@@ -1,10 +1,9 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.16.12" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.16.13" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.16.12 (2026-04-16)
-- Changed recursive `ZFS Send` fan-out so the actual child send items now queue only the transfer work, and each child send queues its own zero-change cleanup at the end instead of creating a separate cleanup queue row that just clogs the send queue.
-- Fixed scheduled `ZFS Send` timing so completed schedule windows are now remembered outside the short-lived queue rows, and automatic jobs only queue once per real local schedule window instead of being re-added every time the kicker wakes up after the old success rows auto-expire.
-- Aligned scheduled `ZFS Send` windows to local wall-clock boundaries, so `6h`, `12h`, and `1d` jobs now line up with the expected local hour and midnight boundaries instead of drifting off raw UTC math.
+### 2026.04.16.13 (2026-04-16)
+- Fixed post-send checkpoint cleanup so `ZFS Send` no longer deletes the previous send checkpoint from the destination after a successful replication. Destination-side send checkpoints now stay available there until the normal send retention policy or low-space cleanup decides they can go.
+- Fixed source-side checkpoint cleanup so after a new send snapshot has been verified on the destination, the source tree now removes every older checkpoint in that send chain instead of only trying to remove the single immediately previous one and leaving older leftovers behind forever.
 
   </CHANGES>
 
@@ -14,9 +13,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.16.12-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.16.12-noarch-1.txz</URL>
-    <MD5>b52b8614fba051149b4b8ae7383f070a</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.16.13-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.16.13-noarch-1.txz</URL>
+    <MD5>3253e1c94f448db4ab77d6ff64c85ded</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -24,10 +23,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.04.16.12-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.04.16.13-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="b52b8614fba051149b4b8ae7383f070a"
+PKG_MD5="3253e1c94f448db4ab77d6ff64c85ded"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
