@@ -27,8 +27,9 @@ foreach (zfsas_ops_recent_send_jobs(120) as $job) {
         'lastError' => (string) ($job['LAST_ERROR'] ?? ''),
         'progress' => zfsas_ops_send_job_progress_percent($job),
         'retryAt' => (string) ($job['RETRY_AT'] ?? '0'),
-        'canRetry' => ((string) ($job['STATE'] ?? '') === 'failed'),
+        'canRetry' => ((string) ($job['STATE'] ?? '') === 'failed' && (string) ($job['CANCELLED_BY_USER'] ?? '0') !== '1'),
         'canClear' => ((string) ($job['STATE'] ?? '') === 'failed'),
+        'canCancel' => in_array((string) ($job['STATE'] ?? ''), ['queued', 'running', 'retry_wait'], true),
     ];
 }
 

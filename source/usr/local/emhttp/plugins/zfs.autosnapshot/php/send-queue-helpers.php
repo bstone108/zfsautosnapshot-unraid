@@ -248,6 +248,10 @@ function zfsas_ops_send_job_state_label($job)
     $state = (string) ($job['STATE'] ?? 'queued');
     $phase = (string) ($job['PHASE'] ?? 'queued');
 
+    if ($state === 'failed' && (string) ($job['CANCELLED_BY_USER'] ?? '0') === '1') {
+        return 'Canceled';
+    }
+
     if ($state === 'running') {
         return ucfirst(str_replace('_', ' ', $phase));
     }
@@ -611,6 +615,126 @@ function zfsas_ops_clear_send_job($jobId, &$error = null)
             return false;
         }
         return true;
+    }
+
+    $error = 'Send job not found.';
+    return false;
+}
+
+function zfsas_ops_process_alive($pid)
+{
+    $pid = (int) $pid;
+    if ($pid <= 1) {
+        return false;
+    }
+
+    if (function_exists('posix_kill')) {
+        return @posix_kill($pid, 0);
+    }
+
+    $output = [];
+    $exitCode = 0;
+    @exec('kill -0 ' . (int) $pid . ' >/dev/null 2>&1', $output, $exitCode);
+    return $exitCode === 0;
+}
+
+function zfsas_ops_signal_process($pid, $signal)
+{
+    $pid = (int) $pid;
+    $signal = (int) $signal;
+    if ($pid <= 1 || $signal <= 0) {
+        return false;
+    }
+
+    if (function_exists('posix_kill')) {
+        return @posix_kill($pid, $signal);
+    }
+
+    $output = [];
+    $exitCode = 0;
+    @exec('kill -' . $signal . ' ' . $pid . ' >/dev/null 2>&1', $output, $exitCode);
+    return $exitCode === 0;
+}
+
+function zfsas_ops_wait_for_process_exit($pid, $timeoutMs)
+{
+    $pid = (int) $pid;
+    $timeoutMs = max(0, (int) $timeoutMs);
+    $deadline = microtime(true) + ($timeoutMs / 1000);
+
+    while (microtime(true) < $deadline) {
+        if (!zfsas_ops_process_alive($pid)) {
+            return true;
+        }
+        usleep(100000);
+    }
+
+    return !zfsas_ops_process_alive($pid);
+}
+
+function zfsas_ops_mark_send_job_canceled($job, &$error = null)
+{
+    $error = null;
+    if (!is_array($job) || empty($job['__path'])) {
+        $error = 'Send job not found.';
+        return false;
+    }
+
+    $job['STATE'] = 'failed';
+    $job['PHASE'] = 'failed';
+    $job['RETRY_AT'] = '0';
+    $job['WORKER_PID'] = '';
+    $job['PROGRESS_PERCENT'] = '100';
+    $job['LAST_ERROR'] = 'Canceled by user.';
+    $job['LAST_MESSAGE'] = 'Canceled by user.';
+    $job['CANCELLED_BY_USER'] = '1';
+    $job['ATTEMPT_COUNT'] = (string) max(3, (int) ($job['ATTEMPT_COUNT'] ?? 0));
+
+    if (!zfsas_ops_write_job_file($job['__path'], $job)) {
+        $error = 'Unable to update the canceled send job.';
+        return false;
+    }
+
+    return true;
+}
+
+function zfsas_ops_cancel_send_job($jobId, &$error = null)
+{
+    $error = null;
+    foreach (zfsas_ops_list_jobs(['send']) as $job) {
+        if ((string) ($job['JOB_ID'] ?? '') !== (string) $jobId) {
+            continue;
+        }
+
+        $state = (string) ($job['STATE'] ?? '');
+        if (!in_array($state, ['queued', 'running', 'retry_wait'], true)) {
+            $error = 'Only queued, waiting, or running send jobs can be canceled.';
+            return false;
+        }
+
+        if ($state === 'running') {
+            $workerPid = (int) ($job['WORKER_PID'] ?? 0);
+            if ($workerPid <= 1) {
+                $error = 'The send worker pid is missing for this running job.';
+                return false;
+            }
+
+            zfsas_ops_signal_process($workerPid, 15);
+            if (!zfsas_ops_wait_for_process_exit($workerPid, 5000)) {
+                zfsas_ops_signal_process($workerPid, 9);
+                if (!zfsas_ops_wait_for_process_exit($workerPid, 2000)) {
+                    $error = 'Unable to stop the running send worker for this job.';
+                    return false;
+                }
+            }
+
+            $reloaded = zfsas_ops_parse_job_file((string) $job['__path']);
+            if (is_array($reloaded)) {
+                $job = $reloaded;
+            }
+        }
+
+        return zfsas_ops_mark_send_job_canceled($job, $error);
     }
 
     $error = 'Send job not found.';

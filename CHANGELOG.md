@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.11 (Testing Branch Only)
+
+- Fixed a `ZFS Send` worker bug that could overwrite the real send failure with the generic `snapshot_created` error message and make bad queue items look like they were looping in the wrong phase.
+- Added a `Cancel` control to active `ZFS Send` queue items so stuck queued, waiting, or running send jobs can be stopped and left behind as a canceled queue row until you confirm-clear them.
+
 ### 2026.04.16.10 (Testing Branch Only)
 
 - Fixed legacy completed or skipped queue items so old jobs created before the auto-expire change are now purged out of the send queue instead of lingering in the GUI forever when they are no longer runnable.

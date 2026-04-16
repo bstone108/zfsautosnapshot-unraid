@@ -591,8 +591,12 @@ if ($isPostRequest) {
                 </td>
                 <td><?php echo zfsas_send_h((string) (($queueJob['LAST_ERROR'] ?? '') !== '' ? $queueJob['LAST_ERROR'] : ($queueJob['LAST_MESSAGE'] ?? ''))); ?></td>
                 <td>
-                  <?php if ((string) ($queueJob['STATE'] ?? '') === 'failed') : ?>
+                  <?php if (in_array((string) ($queueJob['STATE'] ?? ''), ['queued', 'running', 'retry_wait'], true)) : ?>
+                    <button type="button" class="btn zfsas-send-cancel-job" data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">Cancel</button>
+                  <?php elseif ((string) ($queueJob['STATE'] ?? '') === 'failed') : ?>
+                    <?php if ((string) ($queueJob['CANCELLED_BY_USER'] ?? '0') !== '1') : ?>
                     <button type="button" class="btn zfsas-send-retry-job" data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">Retry</button>
+                    <?php endif; ?>
                     <button type="button" class="btn zfsas-send-clear-job" data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">Confirm Clear</button>
                   <?php else : ?>
                     <span class="zfsas-send-help">-</span>
@@ -813,11 +817,15 @@ if ($isPostRequest) {
       html += '<td>' + queueProgressHtml(job.progress) + '</td>';
       html += '<td>' + escapeHtml(message) + '</td>';
       html += '<td>';
-      if (job.canRetry) {
+      if (job.canCancel) {
+        html += '<button type="button" class="btn zfsas-send-cancel-job" data-job-id="' + escapeHtml(job.id || '') + '">Cancel</button>';
+      } else if (job.canRetry) {
         html += '<button type="button" class="btn zfsas-send-retry-job" data-job-id="' + escapeHtml(job.id || '') + '">Retry</button>';
         if (job.canClear) {
           html += ' <button type="button" class="btn zfsas-send-clear-job" data-job-id="' + escapeHtml(job.id || '') + '">Confirm Clear</button>';
         }
+      } else if (job.canClear) {
+        html += '<button type="button" class="btn zfsas-send-clear-job" data-job-id="' + escapeHtml(job.id || '') + '">Confirm Clear</button>';
       } else {
         html += '<span class="zfsas-send-help">-</span>';
       }
@@ -1291,9 +1299,10 @@ if ($isPostRequest) {
     queueRowsBody.addEventListener('click', function (event) {
       var retryButton = event.target.closest('.zfsas-send-retry-job');
       var clearButton = event.target.closest('.zfsas-send-clear-job');
-      var button = retryButton || clearButton;
-      var action = retryButton ? 'retry' : (clearButton ? 'clear_failed' : '');
-      var successMessage = retryButton ? 'Send job queued for retry.' : 'Failed send job cleared from the queue.';
+      var cancelButton = event.target.closest('.zfsas-send-cancel-job');
+      var button = retryButton || clearButton || cancelButton;
+      var action = retryButton ? 'retry' : (clearButton ? 'clear_failed' : (cancelButton ? 'cancel' : ''));
+      var successMessage = retryButton ? 'Send job queued for retry.' : (clearButton ? 'Failed send job cleared from the queue.' : 'Send job canceled. It will stay in the queue until you clear it.');
 
       if (!button || action === '') {
         return;
@@ -1301,6 +1310,10 @@ if ($isPostRequest) {
 
       var jobId = button.getAttribute('data-job-id') || '';
       if (!jobId) {
+        return;
+      }
+
+      if (action === 'cancel' && !window.confirm('Cancel this send job? If it is running, the worker will be stopped and the job will stay in the queue as a canceled item until you clear it.')) {
         return;
       }
 
