@@ -87,6 +87,11 @@ main() {
     enqueue_scheduled_send_jobs_due "$now_epoch" || true
   fi
 
+  if ! unraid_array_actionable; then
+    log "$(unraid_array_action_message). Queue workers remain paused until the array is actionable."
+    exit 0
+  fi
+
   while send_worker_slot_available; do
     claim_next_send_job "$now_epoch" candidate_path || break
     [[ -n "$candidate_path" ]] || break

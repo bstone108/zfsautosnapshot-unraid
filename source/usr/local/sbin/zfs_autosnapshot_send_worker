@@ -193,6 +193,39 @@ wait_for_autosnapshot_to_finish() {
   done
 }
 
+wait_for_unraid_array_to_be_actionable_for_current_job() {
+  local mode suffix current_message last_message=""
+
+  mode="$(job_get job JOB_MODE)"
+  suffix="Waiting before starting this send job."
+  if [[ "$mode" == "manual_snapshot" ]]; then
+    suffix="Waiting before starting this manual send."
+  fi
+
+  while ! unraid_array_actionable; do
+    current_message="$(unraid_array_action_message). ${suffix}"
+    if [[ "$current_message" != "$last_message" ]]; then
+      log "$current_message"
+      last_message="$current_message"
+    fi
+    set_job_progress "preparing" "5" "$current_message"
+    sleep 5
+  done
+}
+
+wait_for_unraid_array_to_be_actionable_for_send_queue() {
+  local current_message last_message=""
+
+  while ! unraid_array_actionable; do
+    current_message="$(unraid_array_action_message). Send queue is paused."
+    if [[ "$current_message" != "$last_message" ]]; then
+      log "$current_message"
+      last_message="$current_message"
+    fi
+    sleep 5
+  done
+}
+
 schedule_run_base_sort() {
   local requested_epoch="$1"
   [[ "$requested_epoch" =~ ^[0-9]+$ ]] || requested_epoch=0
@@ -802,8 +835,10 @@ process_send_job() {
       ;;
   esac
 
-  set_job_progress "preparing" "15" "Preparing send job."
+  set_job_progress "preparing" "5" "Preparing send job."
+  wait_for_unraid_array_to_be_actionable_for_current_job
   wait_for_autosnapshot_to_finish
+  set_job_progress "preparing" "15" "Preparing send job."
 
   case "$mode:$action" in
     scheduled:prepare|scheduled:)
@@ -898,6 +933,7 @@ main() {
   log "Send worker $$ starting"
 
   while :; do
+    wait_for_unraid_array_to_be_actionable_for_send_queue
     now_epoch="$(date +%s)"
     candidate_path=""
     claim_next_send_job "$now_epoch" candidate_path || break

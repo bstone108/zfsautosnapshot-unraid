@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.17.03 (Testing Branch Only)
+
+- Fixed queue startup and runtime behavior so `ZFS Send` and delete workers now stay paused while Unraid reports the array as stopped, stopping, starting, or otherwise not actionable, instead of trying early ZFS operations that just fail and recover on retry during boot or shutdown transitions.
+- Clarified the new runtime cleanup queue model by keeping due work enqueueing intact while the array is paused, but preventing the queue kicker from launching workers until the array is actually ready to process snapshot sends and deletions.
+
 ### 2026.04.17.02 (Testing Branch Only)
 
 - Fixed a `ZFS Send` delete-daemon crash where the new runtime cleanup worker could die immediately with `job_id: unbound variable` before it started processing queued snapshot deletions, leaving large pending-delete counts stuck even though the send jobs themselves had finished normally.

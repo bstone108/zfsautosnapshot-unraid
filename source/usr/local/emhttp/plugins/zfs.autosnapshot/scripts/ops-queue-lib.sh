@@ -74,6 +74,127 @@ log() {
   printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$*"
 }
 
+find_mdcmd() {
+  if command -v mdcmd >/dev/null 2>&1; then
+    command -v mdcmd
+    return 0
+  fi
+  [[ -x /root/mdcmd ]] || return 1
+  printf '/root/mdcmd\n'
+}
+
+extract_status_value() {
+  local key="$1"
+  awk -F= -v key="$key" '$1 == key { print $2; exit }'
+}
+
+get_unraid_array_status() {
+  local mdcmd_bin
+  if mdcmd_bin="$(find_mdcmd 2>/dev/null)"; then
+    "$mdcmd_bin" status
+    return 0
+  fi
+  if [[ -r /proc/mdcmd ]]; then
+    cat /proc/mdcmd
+    return 0
+  fi
+  if [[ -r /var/local/emhttp/var.ini ]]; then
+    cat /var/local/emhttp/var.ini
+    return 0
+  fi
+  return 1
+}
+
+normalize_unraid_state_value() {
+  local value="${1:-}"
+  value="$(trim "$value")"
+  value="${value,,}"
+  printf '%s' "$value"
+}
+
+unraid_actionable_state_value() {
+  local status_text key="$1" value=""
+  status_text="$(get_unraid_array_status 2>/dev/null || true)"
+  [[ -n "$status_text" ]] || {
+    printf ''
+    return 1
+  }
+  value="$(printf '%s\n' "$status_text" | extract_status_value "$key" | head -n 1)"
+  normalize_unraid_state_value "$value"
+}
+
+unraid_array_actionable() {
+  local md_state fs_state sb_state started
+
+  md_state="$(unraid_actionable_state_value "mdState" || true)"
+  fs_state="$(unraid_actionable_state_value "fsState" || true)"
+  sb_state="$(unraid_actionable_state_value "sbState" || true)"
+  started="$(unraid_actionable_state_value "started" || true)"
+
+  case "$md_state" in
+    started|started_mounted|mounted)
+      return 0
+      ;;
+    stopped|stopping|starting|shutdown|shutting_down)
+      return 1
+      ;;
+  esac
+
+  case "$fs_state" in
+    started|mounted)
+      return 0
+      ;;
+    stopped|stopping|starting|shutdown|shutting_down)
+      return 1
+      ;;
+  esac
+
+  case "$sb_state" in
+    started|mounted)
+      return 0
+      ;;
+    stopped|stopping|starting|shutdown|shutting_down)
+      return 1
+      ;;
+  esac
+
+  case "$started" in
+    1|yes|true)
+      return 0
+      ;;
+    0|no|false)
+      return 1
+      ;;
+  esac
+
+  return 1
+}
+
+unraid_array_action_message() {
+  local md_state fs_state sb_state
+
+  md_state="$(unraid_actionable_state_value "mdState" || true)"
+  fs_state="$(unraid_actionable_state_value "fsState" || true)"
+  sb_state="$(unraid_actionable_state_value "sbState" || true)"
+
+  if [[ -n "$md_state" ]]; then
+    printf 'Waiting for Unraid array to become actionable (mdState=%s)' "$md_state"
+    return 0
+  fi
+
+  if [[ -n "$fs_state" ]]; then
+    printf 'Waiting for Unraid array filesystem state to become actionable (fsState=%s)' "$fs_state"
+    return 0
+  fi
+
+  if [[ -n "$sb_state" ]]; then
+    printf 'Waiting for Unraid system state to become actionable (sbState=%s)' "$sb_state"
+    return 0
+  fi
+
+  printf 'Waiting for Unraid to report an actionable array state'
+}
+
 trim() {
   local s="$1"
   s="${s#"${s%%[![:space:]]*}"}"

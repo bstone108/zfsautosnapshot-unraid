@@ -287,6 +287,19 @@ flush_state_if_needed() {
   fi
 }
 
+wait_for_unraid_array_to_be_actionable_for_delete_queue() {
+  local current_message last_message=""
+
+  while ! unraid_array_actionable; do
+    current_message="$(unraid_array_action_message). Delete queue is paused."
+    if [[ "$current_message" != "$last_message" ]]; then
+      log "$current_message"
+      last_message="$current_message"
+    fi
+    sleep 5
+  done
+}
+
 complete_delete_job() {
   local message="$1"
   log "$message"
@@ -508,6 +521,10 @@ main() {
 
   while :; do
     drain_inbox
+
+    if queue_has_items || [[ -s "$DELETE_QUEUE_INBOX_FILE" ]]; then
+      wait_for_unraid_array_to_be_actionable_for_delete_queue
+    fi
 
     if next_ready_job_id job_id; then
       IDLE_SINCE_EPOCH=0
