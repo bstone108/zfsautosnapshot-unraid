@@ -1,9 +1,9 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.17.06" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.17.07" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.17.06 (2026-04-17)
-- Changed the `ZFS Send` delete daemon to process the runtime cleanup queue in plain arrival order instead of rescanning the full backlog looking for the smallest sort key on every pass, which should stop large pending-delete queues from wasting time on queue-order bookkeeping instead of actual snapshot destruction.
-- Changed delayed delete retries so blocked snapshots are pushed to the tail of the runtime queue, and added explicit “Deleting snapshot …” log lines before each destroy step so it is finally obvious in the log whether the daemon is actively deleting a snapshot or still stuck in queue management.
+### 2026.04.17.07 (2026-04-17)
+- Simplified the `ZFS Send` delete worker so it no longer re-reads full snapshot identity metadata before every queued delete. It now only checks that the target is still an exact snapshot path, runs `zfs destroy`, retries a couple of times on transient errors, and then logs and drops that queue item if the delete still fails.
+- This should remove a big chunk of the per-item pre-delete overhead on slow pools while still keeping the worker from ever turning a queued snapshot delete into a whole-dataset destroy.
 
   </CHANGES>
 
@@ -13,9 +13,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.17.06-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.17.06-noarch-1.txz</URL>
-    <MD5>2d353e8dbe9ecd5a456397dabf4af662</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.17.07-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.17.07-noarch-1.txz</URL>
+    <MD5>54413b5191ed09cb05a3b0700f2f29bd</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -23,10 +23,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.04.17.06-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.04.17.07-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="2d353e8dbe9ecd5a456397dabf4af662"
+PKG_MD5="54413b5191ed09cb05a3b0700f2f29bd"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
