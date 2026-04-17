@@ -9,7 +9,7 @@ function zfsas_ops_plugin_config_dir()
 
 function zfsas_ops_root_dir()
 {
-    return zfsas_ops_plugin_config_dir() . '/ops_queue';
+    return '/tmp/zfs-autosnapshot-ops';
 }
 
 function zfsas_ops_jobs_dir()
@@ -60,7 +60,7 @@ function zfsas_ops_runtime_dir()
 
 function zfsas_ops_send_schedule_state_file()
 {
-    return zfsas_ops_status_dir() . '/send_schedule_state.json';
+    return zfsas_ops_plugin_config_dir() . '/send_schedule_state.state';
 }
 
 function zfsas_ops_apply_owner($path)
@@ -332,8 +332,25 @@ function zfsas_ops_schedule_state_read()
         return [];
     }
 
-    $decoded = json_decode($raw, true);
-    return is_array($decoded) ? $decoded : [];
+    $result = [];
+    foreach (preg_split('/\r?\n/', trim($raw)) as $line) {
+        $line = trim((string) $line);
+        if ($line === '') {
+            continue;
+        }
+        $parts = explode('|', $line, 2);
+        if (count($parts) !== 2) {
+            continue;
+        }
+        $jobId = trim((string) $parts[0]);
+        $windowKey = trim((string) $parts[1]);
+        if ($jobId === '' || !preg_match('/^\d+$/', $windowKey)) {
+            continue;
+        }
+        $result[$jobId] = $windowKey;
+    }
+
+    return $result;
 }
 
 function zfsas_ops_schedule_state_write($payload)
@@ -343,12 +360,20 @@ function zfsas_ops_schedule_state_write($payload)
     }
 
     $path = zfsas_ops_send_schedule_state_file();
-    $encoded = json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-    if (!is_string($encoded)) {
-        return false;
+    $lines = [];
+    if (is_array($payload)) {
+        ksort($payload, SORT_NATURAL);
+        foreach ($payload as $jobId => $windowKey) {
+            $jobId = trim((string) $jobId);
+            $windowKey = trim((string) $windowKey);
+            if ($jobId === '' || !preg_match('/^\d+$/', $windowKey)) {
+                continue;
+            }
+            $lines[] = $jobId . '|' . $windowKey;
+        }
     }
 
-    $written = @file_put_contents($path, $encoded . "\n");
+    $written = @file_put_contents($path, implode("\n", $lines) . ($lines ? "\n" : ''));
     if ($written === false) {
         return false;
     }

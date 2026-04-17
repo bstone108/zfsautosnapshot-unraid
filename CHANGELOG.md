@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.20 (Testing Branch Only)
+
+- Moved the hot `ZFS Send` queue out of `/boot` and into temp runtime storage so queue churn, retries, and bulk cleanup planning no longer hammer the Unraid flash device with thousands of tiny writes.
+- Changed scheduled send recovery so the durable state on `/boot` now stays minimal: it remembers the last fully completed schedule window, while interrupted child-send fan-outs are rebuilt after reboot by inspecting current-window send snapshots on the destination and only queueing the child datasets that are still missing.
+- Added upgrade cleanup that purges the old on-boot send queue files so stale pre-migration queue entries cannot survive this storage move and confuse the new runtime-only queue.
+
 ### 2026.04.16.19 (Testing Branch Only)
 
 - Fixed a `ZFS Send` scheduler bug where the queue kicker could crash with an `unbound variable` error while building a scheduled send job id, which could stall scheduled enqueueing even though the active send worker kept running.

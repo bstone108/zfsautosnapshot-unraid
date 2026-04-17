@@ -2,6 +2,9 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Moved the hot `ZFS Send` queue out of `/boot` and into temp runtime storage so queue churn, retries, and bulk cleanup planning no longer hammer the Unraid flash device with thousands of tiny writes.
+- Changed scheduled send recovery so the durable state on `/boot` now stays minimal: it remembers the last fully completed schedule window, while interrupted child-send fan-outs are rebuilt after reboot by inspecting current-window send snapshots on the destination and only queueing the child datasets that are still missing.
+- Added upgrade cleanup that purges the old on-boot send queue files so stale pre-migration queue entries cannot survive this storage move and confuse the new runtime-only queue.
 - Fixed a `ZFS Send` scheduler bug where the queue kicker could crash with an `unbound variable` error while building a scheduled send job id, which could stall scheduled enqueueing even though the active send worker kept running.
 - Fixed a `ZFS Send` queue write race where worker startup could delete another process's in-flight `.tmp` job file, which could corrupt child queue items, strip their action fields, and cause repeated blank-action retries.
 - Fixed recursive `ZFS Send` source checkpoint cleanup so each child dataset now deletes its older source-side send checkpoints only after that exact child checkpoint has been verified on the destination, instead of advancing the whole source tree and breaking lagging children like `foundryvtt`.

@@ -307,15 +307,65 @@ prepare_manual_snapshot_job() {
   return 0
 }
 
+build_resume_members_for_current_job() {
+  local source_root dest_root include_children basename source_dataset destination_dataset relative
+  local member_index=0
+  local needs_resume=0
+
+  source_root="$(job_get job SOURCE_ROOT)"
+  dest_root="$(job_get job DESTINATION_ROOT)"
+  include_children="$(job_get job INCLUDE_CHILDREN 0)"
+  basename="$(job_get job SOURCE_SNAPSHOT_NAME)"
+
+  [[ -n "$source_root" && -n "$dest_root" && -n "$basename" ]] || return 1
+  source_snapshot_exists_for_basename "$source_root" "$basename" || return 1
+
+  while IFS= read -r source_dataset; do
+    [[ -n "$source_dataset" ]] || continue
+    if [[ "$source_dataset" == "$source_root" ]]; then
+      destination_dataset="$dest_root"
+    else
+      relative="${source_dataset#"${source_root}"/}"
+      destination_dataset="${dest_root}/${relative}"
+    fi
+
+    if dataset_has_snapshot_basename "$destination_dataset" "$basename"; then
+      continue
+    fi
+
+    source_snapshot_exists_for_basename "$source_dataset" "$basename" || return 1
+
+    job[MEMBER_${member_index}_SOURCE]="$source_dataset"
+    job[MEMBER_${member_index}_DESTINATION]="$destination_dataset"
+    job[MEMBER_${member_index}_SNAPSHOT]="${source_dataset}@${basename}"
+    member_index=$((member_index + 1))
+    needs_resume=1
+  done < <(list_tree_datasets "$source_root" "$include_children")
+
+  job[MEMBER_COUNT]="$member_index"
+  if (( needs_resume == 0 )); then
+    job[LAST_MESSAGE]="Recovered scheduled send state. All child datasets already have ${basename}; queueing finalize only."
+  else
+    job[LAST_MESSAGE]="Recovered scheduled send state. Queueing only child datasets still missing ${basename}."
+  fi
+  persist_job
+  return 0
+}
+
 queue_child_send_jobs() {
   local member_count requested_epoch base_sort snapshot_basename schedule_job_id prefix previous_basename run_root_id
   local index source_dataset destination_dataset snapshot sort_key child_job_id finalize_job_id
   # shellcheck disable=SC2034
   local -A queued_job=()
+  local resume_only=0
 
   member_count="$(job_get job MEMBER_COUNT 0)"
   [[ "$member_count" =~ ^[0-9]+$ ]] || member_count=0
-  (( member_count > 0 )) || return 1
+  resume_only="$(job_get job RESUME_ONLY 0)"
+  [[ "$resume_only" == "1" ]] || resume_only=0
+  if (( member_count <= 0 )) && (( resume_only == 0 )); then
+    return 1
+  fi
 
   requested_epoch="$(job_get job REQUESTED_EPOCH 0)"
   [[ "$requested_epoch" =~ ^[0-9]+$ ]] || requested_epoch="$(date +%s)"
@@ -362,7 +412,11 @@ queue_child_send_jobs() {
     queued_job[ATTEMPT_COUNT]="0"
     queued_job[RETRY_AT]="0"
     queued_job[LAST_ERROR]=""
-    queued_job[LAST_MESSAGE]="Queued as part of recursive scheduled send fan-out."
+    if (( resume_only == 1 )); then
+      queued_job[LAST_MESSAGE]="Queued as part of recovered scheduled send fan-out."
+    else
+      queued_job[LAST_MESSAGE]="Queued as part of recursive scheduled send fan-out."
+    fi
     queued_job[WORKER_PID]=""
     queued_job[PROGRESS_PERCENT]="5"
     queued_job[MEMBER_COUNT]="1"
@@ -395,7 +449,11 @@ queue_child_send_jobs() {
   queued_job[ATTEMPT_COUNT]="0"
   queued_job[RETRY_AT]="0"
   queued_job[LAST_ERROR]=""
-  queued_job[LAST_MESSAGE]="Queued final checkpoint cleanup for recursive scheduled send."
+  if (( resume_only == 1 )); then
+    queued_job[LAST_MESSAGE]="Queued final checkpoint cleanup for recovered scheduled send."
+  else
+    queued_job[LAST_MESSAGE]="Queued final checkpoint cleanup for recursive scheduled send."
+  fi
   queued_job[WORKER_PID]=""
   queued_job[PROGRESS_PERCENT]="5"
   # shellcheck disable=SC2034
@@ -752,6 +810,17 @@ process_send_job() {
       if jobs_are_same_pool_overlap "$(job_get job SOURCE_ROOT)" "$(job_get job DESTINATION_ROOT)"; then
         fail_current_job_final "Source and destination overlap on the same pool. Choose a destination dataset outside the source tree."
         return 1
+      fi
+      if [[ "$(job_get job RESUME_ONLY 0)" == "1" ]]; then
+        build_resume_members_for_current_job || {
+          fail_current_job_final "Unable to rebuild the scheduled send resume state for this window. A fresh scheduled run will be needed."
+          return 1
+        }
+        set_job_progress "snapshot_created" "28" "Recovered scheduled send state. Queueing missing child send jobs."
+        queue_child_send_jobs || return 1
+        job[COMPLETES_SCHEDULE_WINDOW]="0"
+        complete_job "Recovered scheduled send state and queued the remaining transfer jobs."
+        return 0
       fi
       run_scheduled_prepare_phase || return $?
       prepare_scheduled_job_snapshot || return 1

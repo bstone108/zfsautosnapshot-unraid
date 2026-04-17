@@ -3,11 +3,11 @@
 PLUGIN_NAME="zfs.autosnapshot"
 CONFIG_DIR="/boot/config/plugins/${PLUGIN_NAME}"
 SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
-OPS_ROOT="${CONFIG_DIR}/ops_queue"
+OPS_ROOT="/tmp/zfs-autosnapshot-ops"
 OPS_JOBS_DIR="${OPS_ROOT}/jobs"
 OPS_STATUS_DIR="${OPS_ROOT}/status"
 FAILED_SEND_LOGS_DIR="${CONFIG_DIR}/failed_send_logs"
-SEND_SCHEDULE_STATE_FILE="${OPS_STATUS_DIR}/send_schedule_state.state"
+SEND_SCHEDULE_STATE_FILE="${CONFIG_DIR}/send_schedule_state.state"
 RUNTIME_DIR="/var/run/zfs-autosnapshot-ops"
 SEND_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/send-workers"
 DELETE_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/delete-worker"
@@ -536,7 +536,7 @@ load_schedule_state() {
 
 write_schedule_state() {
   local tmp job_id
-  ops_ensure_dir "$OPS_STATUS_DIR" || return 1
+  ops_ensure_dir "$CONFIG_DIR" || return 1
   tmp="$(mktemp "${SEND_SCHEDULE_STATE_FILE}.tmp.XXXXXX")" || return 1
 
   while IFS= read -r job_id; do
@@ -566,6 +566,171 @@ record_completed_schedule_window() {
   load_schedule_state
   SCHEDULE_LAST_COMPLETED_WINDOW["$schedule_job_id"]="$window_key"
   write_schedule_state
+}
+
+latest_current_window_send_basename_for_dataset() {
+  local schedule_job_id="$1"
+  local dataset="$2"
+  local window_key="$3"
+  local result_basename_var="$4"
+  local result_epoch_var="${5:-}"
+  local snap_name snap_epoch snap_base
+  local prefix
+
+  printf -v "$result_basename_var" ''
+  [[ -n "$result_epoch_var" ]] && printf -v "$result_epoch_var" '0'
+  [[ -n "$dataset" && "$window_key" =~ ^[0-9]+$ ]] || return 1
+  dataset_exists "$dataset" || return 1
+
+  prefix="$(job_prefix_for_schedule "$schedule_job_id")"
+  load_send_dataset_snapshot_cache "$dataset"
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+    (( snap_epoch >= window_key )) || continue
+    snap_base="${snap_name##*@}"
+    send_basename_matches_schedule "$snap_base" "$schedule_job_id" || continue
+    printf -v "$result_basename_var" '%s' "$snap_base"
+    if [[ -n "$result_epoch_var" ]]; then
+      printf -v "$result_epoch_var" '%s' "$snap_epoch"
+    fi
+    return 0
+  done <<< "${SEND_DATASET_SNAPSHOT_LINES_DESC[$dataset]}"
+
+  return 1
+}
+
+dataset_has_snapshot_basename() {
+  local dataset="$1"
+  local basename="$2"
+
+  [[ -n "$dataset" && -n "$basename" ]] || return 1
+  dataset_exists "$dataset" || return 1
+  load_send_dataset_snapshot_cache "$dataset"
+  [[ -n "${SEND_SNAPSHOT_CREATION_MAP["${dataset}@${basename}"]:-}" ]]
+}
+
+source_snapshot_exists_for_basename() {
+  local dataset="$1"
+  local basename="$2"
+  snapshot_exists "${dataset}@${basename}"
+}
+
+find_previous_schedule_checkpoint_basename() {
+  local source_dataset="$1"
+  local current_basename="$2"
+  local schedule_job_id="$3"
+  local result_var="$4"
+  local snap_name snap_epoch snap_base
+  local seen_current=0
+
+  printf -v "$result_var" ''
+  [[ -n "$source_dataset" && -n "$current_basename" && -n "$schedule_job_id" ]] || return 1
+  dataset_exists "$source_dataset" || return 1
+
+  load_send_dataset_snapshot_cache "$source_dataset"
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+    snap_base="${snap_name##*@}"
+    send_basename_matches_schedule "$snap_base" "$schedule_job_id" || continue
+    if [[ "$snap_base" == "$current_basename" ]]; then
+      seen_current=1
+      continue
+    fi
+    (( seen_current == 1 )) || continue
+    printf -v "$result_var" '%s' "$snap_base"
+    return 0
+  done <<< "${SEND_DATASET_SNAPSHOT_LINES_DESC[$source_dataset]}"
+
+  return 1
+}
+
+schedule_can_resume_current_window() {
+  local schedule_job_id="$1"
+  local window_key="$2"
+  local result_basename_var="$3"
+  local result_previous_var="${4:-}"
+  local dest_root source_root include_children current_basename previous_basename=""
+  local source_dataset destination_dataset relative
+
+  printf -v "$result_basename_var" ''
+  [[ -n "$result_previous_var" ]] && printf -v "$result_previous_var" ''
+  [[ "$window_key" =~ ^[0-9]+$ ]] || return 1
+
+  dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
+  source_root="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}"
+  include_children="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]:-0}"
+  [[ -n "$dest_root" && -n "$source_root" ]] || return 1
+
+  latest_current_window_send_basename_for_dataset "$schedule_job_id" "$dest_root" "$window_key" current_basename || return 1
+  source_snapshot_exists_for_basename "$source_root" "$current_basename" || return 1
+  while IFS= read -r source_dataset; do
+    [[ -n "$source_dataset" ]] || continue
+    if [[ "$source_dataset" == "$source_root" ]]; then
+      destination_dataset="$dest_root"
+    else
+      relative="${source_dataset#"${source_root}"/}"
+      destination_dataset="${dest_root}/${relative}"
+    fi
+
+    if dataset_has_snapshot_basename "$destination_dataset" "$current_basename"; then
+      continue
+    fi
+
+    source_snapshot_exists_for_basename "$source_dataset" "$current_basename" || return 1
+  done < <(list_tree_datasets "$source_root" "$include_children")
+  find_previous_schedule_checkpoint_basename "$source_root" "$current_basename" "$schedule_job_id" previous_basename || true
+
+  printf -v "$result_basename_var" '%s' "$current_basename"
+  if [[ -n "$result_previous_var" ]]; then
+    printf -v "$result_previous_var" '%s' "$previous_basename"
+  fi
+  return 0
+}
+
+enqueue_resume_prepare_job() {
+  local schedule_job_id="$1"
+  local window_key="$2"
+  local requested_epoch="$3"
+  local requested_at="$4"
+  local source_snapshot_basename="$5"
+  local previous_basename="${6:-}"
+  local job_file
+  local -A job=()
+
+  job[JOB_ID]="send-${schedule_job_id}-${window_key}-resume"
+  job[JOB_TYPE]="send"
+  job[JOB_MODE]="scheduled"
+  job[JOB_ACTION]="prepare"
+  job[STATE]="queued"
+  job[PHASE]="queued"
+  job[REQUESTED_EPOCH]="$requested_epoch"
+  job[REQUESTED_AT]="$requested_at"
+  job[QUEUE_SORT]="$requested_epoch"
+  job[WINDOW_KEY]="$window_key"
+  job[SCHEDULE_JOB_ID]="$schedule_job_id"
+  job[SOURCE_ROOT]="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]}"
+  job[DESTINATION_ROOT]="${SCHEDULE_DEST_ROOT[$schedule_job_id]}"
+  job[INCLUDE_CHILDREN]="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]}"
+  job[FREQUENCY]="${SCHEDULE_FREQUENCY[$schedule_job_id]}"
+  job[THRESHOLD]="${SCHEDULE_THRESHOLD_RAW[$schedule_job_id]}"
+  job[THRESHOLD_BYTES]="${SCHEDULE_THRESHOLD_BYTES[$schedule_job_id]}"
+  job[SNAPSHOT_PREFIX_BASE]="$SEND_SNAPSHOT_PREFIX"
+  job[SNAPSHOT_PREFIX]="$(job_prefix_for_schedule "$schedule_job_id")"
+  job[SOURCE_SNAPSHOT_NAME]="$source_snapshot_basename"
+  job[SOURCE_SNAPSHOT]="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]}@${source_snapshot_basename}"
+  job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
+  job[ATTEMPT_COUNT]="0"
+  job[RETRY_AT]="0"
+  job[LAST_ERROR]=""
+  job[LAST_MESSAGE]="Queued to resume an interrupted scheduled send window."
+  job[WORKER_PID]=""
+  job[PROGRESS_PERCENT]="5"
+  job[MEMBER_COUNT]="0"
+  job[COMPLETES_SCHEDULE_WINDOW]="1"
+  job[RESUME_ONLY]="1"
+
+  job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "${job[JOB_ID]}")"
+  job_write "$job_file" job
 }
 
 set_job_success_purge_after() {
@@ -1706,6 +1871,7 @@ schedule_window_exists() {
 enqueue_scheduled_send_jobs_due() {
   local now_epoch="$1"
   local job_id frequency current_window last_completed_window requested_at requested_epoch job_file
+  local resume_basename previous_basename
   local -A job=()
 
   load_schedule_state
@@ -1727,6 +1893,13 @@ enqueue_scheduled_send_jobs_due() {
 
     requested_epoch="$now_epoch"
     requested_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ' -r "$requested_epoch" 2>/dev/null || date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+    resume_basename=""
+    previous_basename=""
+    if schedule_can_resume_current_window "$job_id" "$current_window" resume_basename previous_basename; then
+      enqueue_resume_prepare_job "$job_id" "$current_window" "$requested_epoch" "$requested_at" "$resume_basename" "$previous_basename" || true
+      continue
+    fi
 
     job=()
     job[JOB_ID]="send-${job_id}-${current_window}"

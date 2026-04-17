@@ -51,6 +51,8 @@ SNAPSHOT_MANAGER_LOCK_DIR="${SNAPSHOT_MANAGER_RUNTIME_DIR}/locks"
 SNAPSHOT_MANAGER_CHILD_PID_FILE="${SNAPSHOT_MANAGER_RUNTIME_DIR}/snapshot_manager.child.pid"
 SNAPSHOT_MANAGER_STOP_FILE="${SNAPSHOT_MANAGER_RUNTIME_DIR}/snapshot_manager.stop"
 SNAPSHOT_MANAGER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_snapshot_manager_worker'
+LEGACY_OPS_QUEUE_DIR="${BOOT_PLUGIN_DIR}/ops_queue"
+TMP_OPS_QUEUE_DIR="/tmp/zfs-autosnapshot-ops"
 
 remember_pid() {
   local var_name="$1"
@@ -294,6 +296,8 @@ for RUN_MATCH in "$OPS_KICKER_RUN_MATCH" "$OPS_SEND_WORKER_RUN_MATCH" "$OPS_DELE
   stop_running_jobs
 done
 rm -rf "$OPS_JOB_LOCKS_DIR" >/dev/null 2>&1 || true
+rm -rf "$LEGACY_OPS_QUEUE_DIR" >/dev/null 2>&1 || true
+rm -rf "$TMP_OPS_QUEUE_DIR" >/dev/null 2>&1 || true
 
 RUNTIME_DIR="$RECOVERY_RUNTIME_DIR"
 LOCK_FILE="$RECOVERY_LOCK_FILE"
