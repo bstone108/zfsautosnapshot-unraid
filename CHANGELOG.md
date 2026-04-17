@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.17.05 (Testing Branch Only)
+
+- Fixed a `ZFS Send` delete-queue slowdown where the runtime delete daemon could spend most of its time rewriting the large live queue state file after every processed snapshot, making it look like the queue kicker was not starting work even though a delete worker was already running.
+- Changed the runtime delete daemon to batch those live state-file flushes on an interval instead of forcing a full rewrite after every single delete transition, so large pending-delete backlogs can drain normally again.
+
 ### 2026.04.17.04 (Testing Branch Only)
 
 - Changed the new runtime `ZFS Send` delete queue so planned shutdowns, reboots, and upgrades now flush the in-memory delete backlog into persistent plugin storage under `/boot/config/plugins/zfs.autosnapshot/runtime_queue`, and the next start reingests that saved backlog and clears the persisted file automatically.

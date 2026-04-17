@@ -10,6 +10,7 @@ STATE_DIRTY=0
 LAST_STATE_FLUSH_EPOCH=0
 IDLE_SINCE_EPOCH=0
 PERSIST_QUEUE_ON_EXIT=0
+DELETE_QUEUE_RUNTIME_STATE_FLUSH_INTERVAL_SECONDS="${DELETE_QUEUE_RUNTIME_STATE_FLUSH_INTERVAL_SECONDS:-15}"
 
 QUEUE_IDS=()
 declare -A QUEUE_INDEX_BY_ID=()
@@ -326,7 +327,7 @@ flush_state_if_needed() {
 
   (( STATE_DIRTY == 1 )) || return 0
   now="$(date +%s)"
-  if [[ "$force" == "1" || "$LAST_STATE_FLUSH_EPOCH" != "$now" ]]; then
+  if [[ "$force" == "1" ]] || (( LAST_STATE_FLUSH_EPOCH == 0 || now - LAST_STATE_FLUSH_EPOCH >= DELETE_QUEUE_RUNTIME_STATE_FLUSH_INTERVAL_SECONDS )); then
     write_state_snapshot
   fi
 }
@@ -520,7 +521,7 @@ mark_job_running() {
   job[STATE]="running"
   job[WORKER_PID]="$$"
   queue_store_job_assoc "$CURRENT_JOB_ID" job
-  flush_state_if_needed 1
+  flush_state_if_needed 0
 }
 
 cleanup() {
@@ -583,7 +584,7 @@ main() {
       mark_job_running
       process_delete_job || true
       CURRENT_JOB_ID=""
-      flush_state_if_needed 1
+      flush_state_if_needed 0
       continue
     fi
 
