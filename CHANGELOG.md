@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.17.04 (Testing Branch Only)
+
+- Changed the new runtime `ZFS Send` delete queue so planned shutdowns, reboots, and upgrades now flush the in-memory delete backlog into persistent plugin storage under `/boot/config/plugins/zfs.autosnapshot/runtime_queue`, and the next start reingests that saved backlog and clears the persisted file automatically.
+- Updated queue visibility and duplicate checks so the WebUI and queue logic can still see a persisted delete backlog before the runtime daemon has reloaded it, which keeps pending-delete counts and delete protection consistent across those controlled restarts.
+
 ### 2026.04.17.03 (Testing Branch Only)
 
 - Fixed queue startup and runtime behavior so `ZFS Send` and delete workers now stay paused while Unraid reports the array as stopped, stopping, starting, or otherwise not actionable, instead of trying early ZFS operations that just fail and recover on retry during boot or shutdown transitions.

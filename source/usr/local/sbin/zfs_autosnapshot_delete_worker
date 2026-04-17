@@ -9,6 +9,7 @@ CURRENT_JOB_ID=""
 STATE_DIRTY=0
 LAST_STATE_FLUSH_EPOCH=0
 IDLE_SINCE_EPOCH=0
+PERSIST_QUEUE_ON_EXIT=0
 
 QUEUE_IDS=()
 declare -A QUEUE_INDEX_BY_ID=()
@@ -216,6 +217,25 @@ load_persisted_state() {
   done < "$DELETE_QUEUE_STATE_FILE"
 }
 
+load_boot_persisted_state() {
+  local line
+  local -A job=()
+
+  [[ -f "$PERSISTED_DELETE_QUEUE_FILE" ]] || return 0
+
+  while IFS= read -r line; do
+    delete_queue_parse_state_line "$line" job || continue
+    if [[ "${job[STATE]:-queued}" == "running" ]]; then
+      job[STATE]="queued"
+      job[RETRY_AT]="0"
+      job[WORKER_PID]=""
+    fi
+    queue_add_job job || true
+  done < "$PERSISTED_DELETE_QUEUE_FILE"
+
+  rm -f "$PERSISTED_DELETE_QUEUE_FILE" >/dev/null 2>&1 || true
+}
+
 drain_inbox() {
   local fd=9
   local processing_file=""
@@ -274,6 +294,30 @@ write_state_snapshot() {
 
   LAST_STATE_FLUSH_EPOCH="$now"
   STATE_DIRTY=0
+}
+
+write_boot_persisted_snapshot() {
+  local tmp job_id
+  local -A job=()
+
+  ops_ensure_dir "$PERSISTED_QUEUE_DIR" || return 1
+  tmp="${PERSISTED_DELETE_QUEUE_FILE}.tmp.$$"
+  {
+    for job_id in "${QUEUE_IDS[@]}"; do
+      [[ -n "$job_id" ]] || continue
+      queue_job_exists "$job_id" || continue
+      queue_load_job_assoc "$job_id" job || continue
+      delete_queue_emit_state_line job
+    done
+  } > "$tmp"
+
+  if queue_has_items; then
+    mv "$tmp" "$PERSISTED_DELETE_QUEUE_FILE"
+    chmod 0640 "$PERSISTED_DELETE_QUEUE_FILE" >/dev/null 2>&1 || true
+    ops_apply_owner "$PERSISTED_DELETE_QUEUE_FILE"
+  else
+    rm -f "$PERSISTED_DELETE_QUEUE_FILE" "$tmp" >/dev/null 2>&1 || true
+  fi
 }
 
 flush_state_if_needed() {
@@ -493,6 +537,11 @@ cleanup() {
     fi
   fi
 
+  if (( PERSIST_QUEUE_ON_EXIT == 1 )); then
+    drain_inbox || true
+    write_boot_persisted_snapshot || true
+  fi
+
   flush_state_if_needed 1 || true
   rm -f "$DELETE_QUEUE_PID_FILE" >/dev/null 2>&1 || true
   rm -rf "$WORKER_LOCK_DIR" >/dev/null 2>&1 || true
@@ -506,7 +555,8 @@ main() {
   load_send_config
   parse_send_jobs_config
 
-  trap cleanup EXIT INT TERM
+  trap cleanup EXIT
+  trap 'PERSIST_QUEUE_ON_EXIT=1; exit 0' INT TERM
   mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
   printf '%s\n' "$$" > "$DELETE_QUEUE_PID_FILE"
   chmod 0640 "$DELETE_QUEUE_PID_FILE" >/dev/null 2>&1 || true
@@ -515,6 +565,7 @@ main() {
   exec >> "$LOG_FILE" 2>&1
   log "Delete daemon $$ starting"
 
+  load_boot_persisted_state
   load_persisted_state
   drain_inbox
   flush_state_if_needed 1

@@ -9,6 +9,8 @@ OPS_STATUS_DIR="${OPS_ROOT}/status"
 DELETE_QUEUE_STATE_FILE="${OPS_STATUS_DIR}/delete-queue.state"
 DELETE_QUEUE_INBOX_FILE="${OPS_ROOT}/delete-queue.inbox"
 DELETE_QUEUE_INBOX_LOCK_FILE="${OPS_ROOT}/delete-queue.inbox.lock"
+PERSISTED_QUEUE_DIR="${CONFIG_DIR}/runtime_queue"
+PERSISTED_DELETE_QUEUE_FILE="${PERSISTED_QUEUE_DIR}/delete-queue.persist"
 FAILED_SEND_LOGS_DIR="${CONFIG_DIR}/failed_send_logs"
 SEND_SCHEDULE_STATE_FILE="${CONFIG_DIR}/send_schedule_state.state"
 RUNTIME_DIR="/var/run/zfs-autosnapshot-ops"
@@ -220,6 +222,7 @@ ensure_runtime_layout() {
   ops_ensure_dir "$OPS_ROOT" || return 1
   ops_ensure_dir "$OPS_JOBS_DIR" || return 1
   ops_ensure_dir "$OPS_STATUS_DIR" || return 1
+  ops_ensure_dir "$PERSISTED_QUEUE_DIR" || return 1
   ops_ensure_dir "$FAILED_SEND_LOGS_DIR" || return 1
   mkdir -p "$RUNTIME_DIR" "$SEND_WORKER_RUNTIME_DIR" "$DELETE_WORKER_RUNTIME_DIR" "$PREP_LOCKS_DIR" "$JOB_LOCKS_DIR" "$ACTIVE_SEND_DATASETS_DIR" "$(dirname "$LOG_FILE")" >/dev/null 2>&1 || true
   # Only reap clearly stale temp files. Removing every *.tmp.* file at worker startup can
@@ -238,6 +241,10 @@ delete_queue_reset_index() {
 
 delete_queue_state_file_exists() {
   [[ -f "$DELETE_QUEUE_STATE_FILE" ]]
+}
+
+delete_queue_persisted_file_exists() {
+  [[ -f "$PERSISTED_DELETE_QUEUE_FILE" ]]
 }
 
 delete_queue_sanitize_field() {
@@ -418,6 +425,9 @@ start_delete_queue_daemon() {
 
 delete_queue_has_backlog() {
   if delete_queue_state_file_exists && grep -q $'^JOB\t' "$DELETE_QUEUE_STATE_FILE" 2>/dev/null; then
+    return 0
+  fi
+  if delete_queue_persisted_file_exists && grep -q $'^JOB\t' "$PERSISTED_DELETE_QUEUE_FILE" 2>/dev/null; then
     return 0
   fi
   [[ -s "$DELETE_QUEUE_INBOX_FILE" ]]
@@ -2503,7 +2513,7 @@ ensure_active_delete_queue_index() {
 }
 
 rebuild_active_delete_queue_index() {
-  local line state pool dataset
+  local line state pool dataset path
   local -A job=()
 
   DELETE_QUEUE_BY_SNAPSHOT=()
@@ -2511,25 +2521,38 @@ rebuild_active_delete_queue_index() {
   DELETE_QUEUE_COUNTS_BY_POOL=()
   DELETE_QUEUE_COUNTS_BY_DATASET=()
 
-  [[ -f "$DELETE_QUEUE_STATE_FILE" ]] || {
-    DELETE_QUEUE_INDEX_LOADED=1
-    return 0
-  }
+  for path in "$PERSISTED_DELETE_QUEUE_FILE" "$DELETE_QUEUE_STATE_FILE"; do
+    [[ -f "$path" ]] || continue
+    while IFS= read -r line; do
+      delete_queue_parse_state_line "$line" job || continue
+      state="$(job_get job STATE)"
+      job_state_is_active "$state" || continue
+      dataset="$(job_get job DATASET)"
+      pool="$(job_get job DELETE_POOL)"
+      [[ -n "$pool" ]] || pool="${dataset%%/*}"
+      DELETE_QUEUE_BY_SNAPSHOT["$(job_get job SNAPSHOT)"]=1
+      if [[ "$(job_get job DELETE_SCOPE)" == "checkpoint" ]]; then
+        DELETE_QUEUE_BY_CHECKPOINT["$(job_get job SEND_SCHEDULE_JOB_ID)|$(job_get job SNAPSHOT_NAME)"]=1
+      fi
+      [[ -n "$pool" ]] && DELETE_QUEUE_COUNTS_BY_POOL["$pool"]=$(( ${DELETE_QUEUE_COUNTS_BY_POOL[$pool]:-0} + 1 ))
+      [[ -n "$dataset" ]] && DELETE_QUEUE_COUNTS_BY_DATASET["$dataset"]=$(( ${DELETE_QUEUE_COUNTS_BY_DATASET[$dataset]:-0} + 1 ))
+    done < "$path"
+  done
 
-  while IFS= read -r line; do
-    delete_queue_parse_state_line "$line" job || continue
-    state="$(job_get job STATE)"
-    job_state_is_active "$state" || continue
-    dataset="$(job_get job DATASET)"
-    pool="$(job_get job DELETE_POOL)"
-    [[ -n "$pool" ]] || pool="${dataset%%/*}"
-    DELETE_QUEUE_BY_SNAPSHOT["$(job_get job SNAPSHOT)"]=1
-    if [[ "$(job_get job DELETE_SCOPE)" == "checkpoint" ]]; then
-      DELETE_QUEUE_BY_CHECKPOINT["$(job_get job SEND_SCHEDULE_JOB_ID)|$(job_get job SNAPSHOT_NAME)"]=1
-    fi
-    [[ -n "$pool" ]] && DELETE_QUEUE_COUNTS_BY_POOL["$pool"]=$(( ${DELETE_QUEUE_COUNTS_BY_POOL[$pool]:-0} + 1 ))
-    [[ -n "$dataset" ]] && DELETE_QUEUE_COUNTS_BY_DATASET["$dataset"]=$(( ${DELETE_QUEUE_COUNTS_BY_DATASET[$dataset]:-0} + 1 ))
-  done < "$DELETE_QUEUE_STATE_FILE"
+  if [[ -f "$DELETE_QUEUE_INBOX_FILE" ]]; then
+    while IFS= read -r line; do
+      delete_queue_parse_enqueue_line "$line" job || continue
+      dataset="$(job_get job DATASET)"
+      pool="$(job_get job DELETE_POOL)"
+      [[ -n "$pool" ]] || pool="${dataset%%/*}"
+      DELETE_QUEUE_BY_SNAPSHOT["$(job_get job SNAPSHOT)"]=1
+      if [[ "$(job_get job DELETE_SCOPE)" == "checkpoint" ]]; then
+        DELETE_QUEUE_BY_CHECKPOINT["$(job_get job SEND_SCHEDULE_JOB_ID)|$(job_get job SNAPSHOT_NAME)"]=1
+      fi
+      [[ -n "$pool" ]] && DELETE_QUEUE_COUNTS_BY_POOL["$pool"]=$(( ${DELETE_QUEUE_COUNTS_BY_POOL[$pool]:-0} + 1 ))
+      [[ -n "$dataset" ]] && DELETE_QUEUE_COUNTS_BY_DATASET["$dataset"]=$(( ${DELETE_QUEUE_COUNTS_BY_DATASET[$dataset]:-0} + 1 ))
+    done < "$DELETE_QUEUE_INBOX_FILE"
+  fi
 
   DELETE_QUEUE_INDEX_LOADED=1
 }
