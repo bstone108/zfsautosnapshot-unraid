@@ -15,6 +15,10 @@ DELETE_QUEUE_RUNTIME_STATE_FLUSH_INTERVAL_SECONDS="${DELETE_QUEUE_RUNTIME_STATE_
 QUEUE_IDS=()
 QUEUE_HEAD_INDEX=0
 QUEUE_MAX_INDEX=-1
+QUEUE_ACTIVE_COUNT=0
+QUEUE_RUNNING_COUNT=0
+QUEUE_RETRY_WAIT_COUNT=0
+QUEUE_QUEUED_COUNT=0
 declare -A QUEUE_INDEX_BY_ID=()
 declare -A QUEUE_STATE=()
 declare -A QUEUE_RETRY_AT=()
@@ -39,14 +43,47 @@ daemon_mark_dirty() {
   STATE_DIRTY=1
 }
 
+queue_state_counter_increment() {
+  local state="${1:-queued}"
+  case "$state" in
+    running)
+      QUEUE_RUNNING_COUNT=$((QUEUE_RUNNING_COUNT + 1))
+      ;;
+    retry_wait)
+      QUEUE_RETRY_WAIT_COUNT=$((QUEUE_RETRY_WAIT_COUNT + 1))
+      ;;
+    *)
+      QUEUE_QUEUED_COUNT=$((QUEUE_QUEUED_COUNT + 1))
+      ;;
+  esac
+}
+
+queue_state_counter_decrement() {
+  local state="${1:-queued}"
+  case "$state" in
+    running)
+      (( QUEUE_RUNNING_COUNT > 0 )) && QUEUE_RUNNING_COUNT=$((QUEUE_RUNNING_COUNT - 1))
+      ;;
+    retry_wait)
+      (( QUEUE_RETRY_WAIT_COUNT > 0 )) && QUEUE_RETRY_WAIT_COUNT=$((QUEUE_RETRY_WAIT_COUNT - 1))
+      ;;
+    *)
+      (( QUEUE_QUEUED_COUNT > 0 )) && QUEUE_QUEUED_COUNT=$((QUEUE_QUEUED_COUNT - 1))
+      ;;
+  esac
+}
+
+queue_record_state_transition() {
+  local old_state="${1:-queued}"
+  local new_state="${2:-queued}"
+
+  [[ "$old_state" == "$new_state" ]] && return 0
+  queue_state_counter_decrement "$old_state"
+  queue_state_counter_increment "$new_state"
+}
+
 queue_has_items() {
-  local job_id
-  for job_id in "${QUEUE_IDS[@]}"; do
-    [[ -n "$job_id" ]] || continue
-    [[ -n "${QUEUE_STATE[$job_id]+set}" ]] || continue
-    return 0
-  done
-  return 1
+  (( QUEUE_ACTIVE_COUNT > 0 ))
 }
 
 queue_job_exists() {
@@ -105,6 +142,8 @@ queue_add_job() {
   QUEUE_DELETE_SCOPE["$job_id"]="${job_ref[DELETE_SCOPE]:-snapshot}"
   QUEUE_SEND_SCHEDULE_JOB_ID["$job_id"]="${job_ref[SEND_SCHEDULE_JOB_ID]:-}"
   QUEUE_WORKER_PID["$job_id"]="${job_ref[WORKER_PID]:-}"
+  QUEUE_ACTIVE_COUNT=$((QUEUE_ACTIVE_COUNT + 1))
+  queue_state_counter_increment "${QUEUE_STATE[$job_id]}"
 
   snapshot="${job_ref[SNAPSHOT]:-}"
   snapshot_name="${job_ref[SNAPSHOT_NAME]:-}"
@@ -153,7 +192,7 @@ queue_move_job_to_tail() {
 
 queue_remove_job() {
   local job_id="$1"
-  local snapshot delete_scope schedule_job_id snapshot_name
+  local snapshot delete_scope schedule_job_id snapshot_name state
 
   queue_job_exists "$job_id" || return 0
 
@@ -161,6 +200,7 @@ queue_remove_job() {
   snapshot_name="${QUEUE_SNAPSHOT_NAME[$job_id]:-}"
   delete_scope="${QUEUE_DELETE_SCOPE[$job_id]:-snapshot}"
   schedule_job_id="${QUEUE_SEND_SCHEDULE_JOB_ID[$job_id]:-}"
+  state="${QUEUE_STATE[$job_id]:-queued}"
 
   if [[ -n "${QUEUE_INDEX_BY_ID[$job_id]+set}" ]]; then
     unset "QUEUE_IDS[${QUEUE_INDEX_BY_ID[$job_id]}]"
@@ -175,6 +215,8 @@ queue_remove_job() {
   unset 'QUEUE_SNAPSHOT_GUID[$job_id]' 'QUEUE_SNAPSHOT_CREATETXG[$job_id]' 'QUEUE_DELETE_POOL[$job_id]'
   unset 'QUEUE_ESTIMATED_RECLAIM_BYTES[$job_id]' 'QUEUE_SEND_PROTECTED[$job_id]' 'QUEUE_DELETE_SCOPE[$job_id]'
   unset 'QUEUE_SEND_SCHEDULE_JOB_ID[$job_id]' 'QUEUE_WORKER_PID[$job_id]'
+  (( QUEUE_ACTIVE_COUNT > 0 )) && QUEUE_ACTIVE_COUNT=$((QUEUE_ACTIVE_COUNT - 1))
+  queue_state_counter_decrement "$state"
 
   [[ -n "$snapshot" ]] && unset 'QUEUE_BY_SNAPSHOT[$snapshot]'
   if [[ "$delete_scope" == "checkpoint" && -n "$schedule_job_id" ]]; then
@@ -215,10 +257,12 @@ queue_load_job_assoc() {
 queue_store_job_assoc() {
   local job_id="$1"
   local assoc_name="$2"
+  local previous_state
   # shellcheck disable=SC2178
   local -n job_ref="$assoc_name"
 
   queue_job_exists "$job_id" || return 1
+  previous_state="${QUEUE_STATE[$job_id]:-queued}"
   QUEUE_STATE["$job_id"]="${job_ref[STATE]:-queued}"
   QUEUE_RETRY_AT["$job_id"]="${job_ref[RETRY_AT]:-0}"
   QUEUE_REQUESTED_EPOCH["$job_id"]="${job_ref[REQUESTED_EPOCH]:-0}"
@@ -235,12 +279,14 @@ queue_store_job_assoc() {
   QUEUE_DELETE_SCOPE["$job_id"]="${job_ref[DELETE_SCOPE]:-snapshot}"
   QUEUE_SEND_SCHEDULE_JOB_ID["$job_id"]="${job_ref[SEND_SCHEDULE_JOB_ID]:-}"
   QUEUE_WORKER_PID["$job_id"]="${job_ref[WORKER_PID]:-}"
+  queue_record_state_transition "$previous_state" "${QUEUE_STATE[$job_id]}"
   daemon_mark_dirty
   return 0
 }
 
-load_persisted_state() {
+load_legacy_runtime_state() {
   local line
+  local imported=0
   local -A job=()
 
   [[ -f "$DELETE_QUEUE_STATE_FILE" ]] || return 0
@@ -253,8 +299,12 @@ load_persisted_state() {
       job[WORKER_PID]=""
     fi
     queue_add_job job || true
+    imported=1
   done < "$DELETE_QUEUE_STATE_FILE"
 
+  if (( imported == 1 )); then
+    rm -f "$DELETE_QUEUE_STATE_FILE" >/dev/null 2>&1 || true
+  fi
   queue_advance_head_index
 }
 
@@ -311,19 +361,33 @@ drain_inbox() {
 }
 
 write_state_snapshot() {
-  local tmp now job_id
-  local -A job=()
+  local tmp now head_job_id current_job_id current_state current_snapshot current_dataset
 
   now="$(date +%s)"
   tmp="${DELETE_QUEUE_STATE_FILE}.tmp.$$"
   {
-    printf 'META\t%s\t%s\n' "$$" "$now"
-    for job_id in "${QUEUE_IDS[@]}"; do
-      [[ -n "$job_id" ]] || continue
-      queue_job_exists "$job_id" || continue
-      queue_load_job_assoc "$job_id" job || continue
-      delete_queue_emit_state_line job
-    done
+    queue_advance_head_index
+    head_job_id="${QUEUE_IDS[$QUEUE_HEAD_INDEX]:-}"
+    current_job_id="$CURRENT_JOB_ID"
+    current_state=""
+    current_snapshot=""
+    current_dataset=""
+    if [[ -n "$current_job_id" ]] && queue_job_exists "$current_job_id"; then
+      current_state="${QUEUE_STATE[$current_job_id]:-}"
+      current_snapshot="${QUEUE_SNAPSHOT[$current_job_id]:-}"
+      current_dataset="${QUEUE_DATASET[$current_job_id]:-}"
+    fi
+    printf 'PID=%s\n' "$$"
+    printf 'UPDATED_EPOCH=%s\n' "$now"
+    printf 'PENDING_COUNT=%s\n' "$QUEUE_ACTIVE_COUNT"
+    printf 'RUNNING_COUNT=%s\n' "$QUEUE_RUNNING_COUNT"
+    printf 'RETRY_WAIT_COUNT=%s\n' "$QUEUE_RETRY_WAIT_COUNT"
+    printf 'FAILED_COUNT=0\n'
+    printf 'HEAD_JOB_ID=%s\n' "$head_job_id"
+    printf 'CURRENT_JOB_ID=%s\n' "$current_job_id"
+    printf 'CURRENT_JOB_STATE=%s\n' "$current_state"
+    printf 'CURRENT_DATASET=%s\n' "$current_dataset"
+    printf 'CURRENT_SNAPSHOT=%s\n' "$current_snapshot"
   } > "$tmp"
 
   if queue_has_items; then
@@ -424,8 +488,7 @@ retry_delete_job() {
 snapshot_delete_target_is_safe() {
   local snapshot="$1"
 
-  [[ -n "$snapshot" && "$snapshot" == *@* ]] || return 1
-  snapshot_exists "$snapshot"
+  [[ -n "$snapshot" && "$snapshot" == *@* ]]
 }
 
 destroy_single_snapshot_with_retries() {
@@ -520,7 +583,7 @@ process_delete_job() {
   snapshot="$(job_get job SNAPSHOT)"
 
   if ! snapshot_delete_target_is_safe "$snapshot"; then
-    skip_delete_job "Snapshot ${snapshot} is already gone or is no longer a safe snapshot target."
+    fail_delete_job "Snapshot ${snapshot} is not a safe snapshot target."
     return 0
   fi
 
@@ -613,7 +676,7 @@ main() {
   log "Delete daemon $$ starting"
 
   load_boot_persisted_state
-  load_persisted_state
+  load_legacy_runtime_state
   drain_inbox
   flush_state_if_needed 1
 

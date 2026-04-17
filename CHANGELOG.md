@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.17.08 (Testing Branch Only)
+
+- Reworked the runtime `ZFS Send` delete queue so it no longer rewrites the full live queue snapshot during normal operation. The delete daemon now keeps the real queue in memory, writes only a tiny runtime status file for the WebUI, and only serializes the full backlog during controlled shutdown, reboot, or upgrade handoff.
+- Added one-time import of the older job-style runtime delete state on startup so an upgraded box can reingest an existing backlog, throw away the old heavy state file, and continue draining deletes under the lighter in-memory model.
+- Simplified per-item delete handling again so the worker only sanity-checks that a queued target still looks like a snapshot path before calling `zfs destroy`, instead of doing another exact preflight lookup for every delete.
+
 ### 2026.04.17.07 (Testing Branch Only)
 
 - Simplified the `ZFS Send` delete worker so it no longer re-reads full snapshot identity metadata before every queued delete. It now only checks that the target is still an exact snapshot path, runs `zfs destroy`, retries a couple of times on transient errors, and then logs and drops that queue item if the delete still fails.

@@ -247,6 +247,46 @@ function zfsas_ops_delete_queue_state_rows()
     return $rows;
 }
 
+function zfsas_ops_delete_queue_status_counts()
+{
+    $path = zfsas_ops_delete_queue_state_path();
+    $counts = [
+        'pending' => 0,
+        'running' => 0,
+        'retry_wait' => 0,
+        'failed' => 0,
+    ];
+
+    if (!is_file($path)) {
+        return $counts;
+    }
+
+    $lines = @file($path, FILE_IGNORE_NEW_LINES);
+    if (!is_array($lines)) {
+        return $counts;
+    }
+
+    foreach ($lines as $line) {
+        if (!preg_match('/^([A-Z_]+)=(.*)$/', (string) $line, $match)) {
+            continue;
+        }
+
+        $key = (string) $match[1];
+        $value = (int) trim((string) $match[2]);
+        if ($key === 'PENDING_COUNT') {
+            $counts['pending'] = max(0, $value);
+        } elseif ($key === 'RUNNING_COUNT') {
+            $counts['running'] = max(0, $value);
+        } elseif ($key === 'RETRY_WAIT_COUNT') {
+            $counts['retry_wait'] = max(0, $value);
+        } elseif ($key === 'FAILED_COUNT') {
+            $counts['failed'] = max(0, $value);
+        }
+    }
+
+    return $counts;
+}
+
 function zfsas_ops_delete_queue_inbox_rows()
 {
     $path = zfsas_ops_delete_queue_inbox_path();
@@ -808,7 +848,9 @@ function zfsas_ops_delete_snapshot_map()
 
 function zfsas_ops_pending_delete_job_count()
 {
-    return count(zfsas_ops_delete_queue_active_rows());
+    $counts = zfsas_ops_delete_queue_status_counts();
+    $activeCount = count(zfsas_ops_delete_queue_active_rows());
+    return max((int) ($counts['pending'] ?? 0), $activeCount);
 }
 
 function zfsas_ops_queue_pending_counts_by_dataset()

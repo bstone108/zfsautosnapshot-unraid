@@ -247,6 +247,16 @@ delete_queue_persisted_file_exists() {
   [[ -f "$PERSISTED_DELETE_QUEUE_FILE" ]]
 }
 
+delete_queue_status_value() {
+  local key="$1"
+  local value=""
+
+  [[ -f "$DELETE_QUEUE_STATE_FILE" ]] || return 1
+  value="$(grep -E "^${key}=" "$DELETE_QUEUE_STATE_FILE" 2>/dev/null | head -n 1 | cut -d= -f2-)"
+  [[ -n "$value" ]] || return 1
+  printf '%s' "$value"
+}
+
 delete_queue_sanitize_field() {
   local value="${1:-}"
   value="${value//$'\t'/ }"
@@ -424,7 +434,12 @@ start_delete_queue_daemon() {
 }
 
 delete_queue_has_backlog() {
-  if delete_queue_state_file_exists && grep -q $'^JOB\t' "$DELETE_QUEUE_STATE_FILE" 2>/dev/null; then
+  local pending_count="0"
+  local running_count="0"
+
+  pending_count="$(delete_queue_status_value "PENDING_COUNT" 2>/dev/null || printf '0')"
+  running_count="$(delete_queue_status_value "RUNNING_COUNT" 2>/dev/null || printf '0')"
+  if [[ "$pending_count" =~ ^[0-9]+$ && "$running_count" =~ ^[0-9]+$ ]] && (( pending_count > 0 || running_count > 0 )); then
     return 0
   fi
   if delete_queue_persisted_file_exists && grep -q $'^JOB\t' "$PERSISTED_DELETE_QUEUE_FILE" 2>/dev/null; then
