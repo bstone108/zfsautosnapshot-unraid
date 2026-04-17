@@ -30,6 +30,9 @@ foreach (zfsas_ops_recent_send_jobs(120) as $job) {
         'canRetry' => ((string) ($job['STATE'] ?? '') === 'failed' && (string) ($job['CANCELLED_BY_USER'] ?? '0') !== '1'),
         'canClear' => ((string) ($job['STATE'] ?? '') === 'failed'),
         'canCancel' => in_array((string) ($job['STATE'] ?? ''), ['queued', 'running', 'retry_wait'], true),
+        'logDownloadUrl' => ((string) ($job['STATE'] ?? '') === 'failed')
+            ? zfsas_ops_failed_send_log_download_url((string) ($job['JOB_ID'] ?? ''))
+            : '',
     ];
 }
 

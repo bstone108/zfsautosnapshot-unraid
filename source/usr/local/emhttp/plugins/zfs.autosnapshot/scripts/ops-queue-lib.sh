@@ -6,6 +6,7 @@ SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
 OPS_ROOT="${CONFIG_DIR}/ops_queue"
 OPS_JOBS_DIR="${OPS_ROOT}/jobs"
 OPS_STATUS_DIR="${OPS_ROOT}/status"
+FAILED_SEND_LOGS_DIR="${CONFIG_DIR}/failed_send_logs"
 SEND_SCHEDULE_STATE_FILE="${OPS_STATUS_DIR}/send_schedule_state.state"
 RUNTIME_DIR="/var/run/zfs-autosnapshot-ops"
 SEND_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/send-workers"
@@ -75,9 +76,86 @@ ensure_runtime_layout() {
   ops_ensure_dir "$OPS_ROOT" || return 1
   ops_ensure_dir "$OPS_JOBS_DIR" || return 1
   ops_ensure_dir "$OPS_STATUS_DIR" || return 1
+  ops_ensure_dir "$FAILED_SEND_LOGS_DIR" || return 1
   mkdir -p "$RUNTIME_DIR" "$SEND_WORKER_RUNTIME_DIR" "$DELETE_WORKER_RUNTIME_DIR" "$PREP_LOCKS_DIR" "$JOB_LOCKS_DIR" "$ACTIVE_SEND_DATASETS_DIR" "$(dirname "$LOG_FILE")" >/dev/null 2>&1 || true
   find "$OPS_JOBS_DIR" -maxdepth 1 -type f -name '*.tmp.*' -exec rm -f {} \; >/dev/null 2>&1 || true
   return 0
+}
+
+sanitize_job_id_for_path() {
+  local job_id="$1"
+  local sanitized
+  sanitized="$(printf '%s' "$job_id" | tr -c 'A-Za-z0-9._-' '_')"
+  [[ -n "$sanitized" ]] || sanitized="unknown-job"
+  printf '%s' "$sanitized"
+}
+
+failed_send_log_path() {
+  local job_id="$1"
+  printf '%s/%s.log' "$FAILED_SEND_LOGS_DIR" "$(sanitize_job_id_for_path "$job_id")"
+}
+
+delete_preserved_failed_send_log() {
+  local job_id="$1"
+  local path
+  path="$(failed_send_log_path "$job_id")"
+  [[ -e "$path" ]] || return 0
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  rm -f "$path"
+}
+
+preserve_failed_send_log_for_job() {
+  local assoc_name="$1"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+  local job_type job_id path tmp now_utc phase mode action source destination
+
+  job_type="${job_ref[JOB_TYPE]:-}"
+  [[ "$job_type" == "send" ]] || return 0
+
+  job_id="${job_ref[JOB_ID]:-}"
+  [[ -n "$job_id" ]] || return 0
+
+  ops_ensure_dir "$FAILED_SEND_LOGS_DIR" || return 1
+  path="$(failed_send_log_path "$job_id")"
+  tmp="${path}.tmp.$$"
+  now_utc="$(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+  phase="${job_ref[PHASE]:-failed}"
+  mode="${job_ref[JOB_MODE]:-}"
+  action="${job_ref[JOB_ACTION]:-}"
+  source="${job_ref[SOURCE_ROOT]:-${job_ref[DATASET]:-}}"
+  destination="${job_ref[DESTINATION_ROOT]:-}"
+
+  {
+    if [[ -f "$path" ]]; then
+      cat "$path"
+      printf '\n'
+    else
+      printf 'ZFS Send Failure Log Archive\n'
+      printf 'Job ID: %s\n' "$job_id"
+      printf 'This file keeps every preserved shared-send-log snapshot captured when this queue item entered final failed state.\n\n'
+    fi
+    printf '===== Failure Capture %s =====\n' "$now_utc"
+    printf 'State: %s\n' "${job_ref[STATE]:-failed}"
+    printf 'Phase: %s\n' "$phase"
+    [[ -n "$mode" ]] && printf 'Mode: %s\n' "$mode"
+    [[ -n "$action" ]] && printf 'Action: %s\n' "$action"
+    [[ -n "$source" ]] && printf 'Source: %s\n' "$source"
+    [[ -n "$destination" ]] && printf 'Destination: %s\n' "$destination"
+    [[ -n "${job_ref[LAST_ERROR]:-}" ]] && printf 'Last Error: %s\n' "${job_ref[LAST_ERROR]}"
+    [[ -n "${job_ref[LAST_MESSAGE]:-}" ]] && printf 'Last Message: %s\n' "${job_ref[LAST_MESSAGE]}"
+    printf 'Shared Log Source: %s\n\n' "$LOG_FILE"
+    if [[ -f "$LOG_FILE" && ! -L "$LOG_FILE" && -r "$LOG_FILE" ]]; then
+      cat "$LOG_FILE"
+      printf '\n'
+    else
+      printf 'Shared send log was unavailable or unreadable at preservation time.\n\n'
+    fi
+  } > "$tmp"
+
+  mv -f "$tmp" "$path"
+  chmod 0640 "$path" >/dev/null 2>&1 || true
+  ops_apply_owner "$path"
 }
 
 parse_config_value() {
@@ -1558,6 +1636,7 @@ mark_job_failed_or_retry() {
     job_ref[RETRY_AT]="0"
     # shellcheck disable=SC2153
     job_ref[PROGRESS_PERCENT]="100"
+    preserve_failed_send_log_for_job "$assoc_name" || true
   fi
 }
 

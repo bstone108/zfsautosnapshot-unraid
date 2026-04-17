@@ -7,6 +7,7 @@ $saveApiUrl = "/plugins/{$pluginName}/php/save-send-settings.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-send-now.php";
 $queueStatusApiUrl = "/plugins/{$pluginName}/php/send-queue-status.php";
 $queueActionApiUrl = "/plugins/{$pluginName}/php/send-queue-action.php";
+$queueLogDownloadApiUrl = "/plugins/{$pluginName}/php/send-log-download.php";
 $mainSettingsUrl = '/Settings/ZFSAutoSnapshot?section=special-features';
 
 require_once __DIR__ . '/response-helpers.php';
@@ -324,6 +325,13 @@ if ($isPostRequest) {
       white-space: nowrap;
     }
 
+    .zfsas-send-queue-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
     @media (max-width: 980px) {
       .zfsas-send-add-row {
         grid-template-columns: 1fr;
@@ -562,7 +570,7 @@ if ($isPostRequest) {
             <th>Status</th>
             <th>Progress</th>
             <th>Message</th>
-            <th style="width:220px;">Action</th>
+            <th style="width:320px;">Action</th>
           </tr>
         </thead>
         <tbody id="send_queue_rows">
@@ -591,9 +599,11 @@ if ($isPostRequest) {
                 </td>
                 <td><?php echo zfsas_send_h((string) (($queueJob['LAST_ERROR'] ?? '') !== '' ? $queueJob['LAST_ERROR'] : ($queueJob['LAST_MESSAGE'] ?? ''))); ?></td>
                 <td>
+                  <div class="zfsas-send-queue-actions">
                   <?php if (in_array((string) ($queueJob['STATE'] ?? ''), ['queued', 'running', 'retry_wait'], true)) : ?>
                     <button type="button" class="btn zfsas-send-cancel-job" data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">Cancel</button>
                   <?php elseif ((string) ($queueJob['STATE'] ?? '') === 'failed') : ?>
+                    <a class="btn" href="<?php echo zfsas_send_h($queueLogDownloadApiUrl . '?job_id=' . rawurlencode((string) ($queueJob['JOB_ID'] ?? ''))); ?>">Download Log</a>
                     <?php if ((string) ($queueJob['CANCELLED_BY_USER'] ?? '0') !== '1') : ?>
                     <button type="button" class="btn zfsas-send-retry-job" data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">Retry</button>
                     <?php endif; ?>
@@ -601,6 +611,7 @@ if ($isPostRequest) {
                   <?php else : ?>
                     <span class="zfsas-send-help">-</span>
                   <?php endif; ?>
+                  </div>
                 </td>
               </tr>
             <?php endforeach; ?>
@@ -628,6 +639,7 @@ if ($isPostRequest) {
   var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
   var queueStatusApiUrl = <?php echo json_encode($queueStatusApiUrl); ?>;
   var queueActionApiUrl = <?php echo json_encode($queueActionApiUrl); ?>;
+  var queueLogDownloadApiUrl = <?php echo json_encode($queueLogDownloadApiUrl); ?>;
   var jobsBody = byId('zfsas_send_jobs_body');
   var queueRowsBody = byId('send_queue_rows');
   var pendingDeleteStatusEl = byId('send_pending_delete_status');
@@ -794,6 +806,14 @@ if ($isPostRequest) {
       + '</div>';
   }
 
+  function buildQueueLogDownloadUrl(jobId) {
+    var normalizedJobId = String(jobId || '').trim();
+    if (normalizedJobId === '') {
+      return queueLogDownloadApiUrl;
+    }
+    return queueLogDownloadApiUrl + '?job_id=' + encodeURIComponent(normalizedJobId);
+  }
+
   function renderQueueJobs(jobs) {
     if (!queueRowsBody) {
       return;
@@ -816,20 +836,22 @@ if ($isPostRequest) {
       html += '<td>' + queueBadge(job.stateLabel || job.state || 'Queued', job.state === 'failed') + '</td>';
       html += '<td>' + queueProgressHtml(job.progress) + '</td>';
       html += '<td>' + escapeHtml(message) + '</td>';
-      html += '<td>';
+      html += '<td><div class="zfsas-send-queue-actions">';
       if (job.canCancel) {
         html += '<button type="button" class="btn zfsas-send-cancel-job" data-job-id="' + escapeHtml(job.id || '') + '">Cancel</button>';
       } else if (job.canRetry) {
+        html += '<a class="btn" href="' + escapeHtml(job.logDownloadUrl || buildQueueLogDownloadUrl(job.id || '')) + '">Download Log</a>';
         html += '<button type="button" class="btn zfsas-send-retry-job" data-job-id="' + escapeHtml(job.id || '') + '">Retry</button>';
         if (job.canClear) {
           html += ' <button type="button" class="btn zfsas-send-clear-job" data-job-id="' + escapeHtml(job.id || '') + '">Confirm Clear</button>';
         }
       } else if (job.canClear) {
+        html += '<a class="btn" href="' + escapeHtml(job.logDownloadUrl || buildQueueLogDownloadUrl(job.id || '')) + '">Download Log</a>';
         html += '<button type="button" class="btn zfsas-send-clear-job" data-job-id="' + escapeHtml(job.id || '') + '">Confirm Clear</button>';
       } else {
         html += '<span class="zfsas-send-help">-</span>';
       }
-      html += '</td>';
+      html += '</div></td>';
       html += '</tr>';
     });
 

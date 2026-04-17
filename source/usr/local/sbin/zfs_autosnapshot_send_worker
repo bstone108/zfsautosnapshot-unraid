@@ -53,6 +53,7 @@ complete_job() {
     record_completed_schedule_window "$(job_get job SCHEDULE_JOB_ID)" "$(job_get job WINDOW_KEY)" || true
   fi
   set_job_success_purge_after job
+  delete_preserved_failed_send_log "$(job_get job JOB_ID)" >/dev/null 2>&1 || true
   persist_job
 }
 
@@ -65,6 +66,7 @@ skip_job() {
   job[LAST_ERROR]=""
   job[WORKER_PID]=""
   set_job_success_purge_after job
+  delete_preserved_failed_send_log "$(job_get job JOB_ID)" >/dev/null 2>&1 || true
   persist_job
 }
 
@@ -85,6 +87,7 @@ fail_current_job_final() {
   job[WORKER_PID]=""
   job[LAST_ERROR]="$message"
   job[LAST_MESSAGE]="$message"
+  preserve_failed_send_log_for_job job || true
   persist_job || true
 }
 

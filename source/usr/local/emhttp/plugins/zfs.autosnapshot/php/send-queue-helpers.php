@@ -22,6 +22,37 @@ function zfsas_ops_status_dir()
     return zfsas_ops_root_dir() . '/status';
 }
 
+function zfsas_ops_failed_send_logs_dir()
+{
+    return zfsas_ops_plugin_config_dir() . '/failed_send_logs';
+}
+
+function zfsas_ops_shared_send_log_path()
+{
+    return '/var/log/zfs_autosnapshot_send.log';
+}
+
+function zfsas_ops_sanitize_job_id_for_path($jobId)
+{
+    $jobId = (string) $jobId;
+    $sanitized = preg_replace('/[^A-Za-z0-9_.-]+/', '_', $jobId);
+    if (!is_string($sanitized) || $sanitized === '') {
+        return 'unknown-job';
+    }
+
+    return $sanitized;
+}
+
+function zfsas_ops_failed_send_log_path($jobId)
+{
+    return zfsas_ops_failed_send_logs_dir() . '/' . zfsas_ops_sanitize_job_id_for_path($jobId) . '.log';
+}
+
+function zfsas_ops_failed_send_log_download_url($jobId)
+{
+    return '/plugins/zfs.autosnapshot/php/send-log-download.php?job_id=' . rawurlencode((string) $jobId);
+}
+
 function zfsas_ops_runtime_dir()
 {
     return '/var/run/zfs-autosnapshot-ops';
@@ -52,7 +83,8 @@ function zfsas_ops_ensure_storage_dirs()
 {
     return zfsas_ops_ensure_dir(zfsas_ops_root_dir())
         && zfsas_ops_ensure_dir(zfsas_ops_jobs_dir())
-        && zfsas_ops_ensure_dir(zfsas_ops_status_dir());
+        && zfsas_ops_ensure_dir(zfsas_ops_status_dir())
+        && zfsas_ops_ensure_dir(zfsas_ops_failed_send_logs_dir());
 }
 
 function zfsas_ops_kv_escape($value)
@@ -610,6 +642,9 @@ function zfsas_ops_clear_send_job($jobId, &$error = null)
             $error = 'Only failed send jobs can be cleared.';
             return false;
         }
+        if (!zfsas_ops_delete_failed_send_log($jobId, $error)) {
+            return false;
+        }
         if (!@unlink((string) ($job['__path'] ?? ''))) {
             $error = 'Unable to remove the failed send job from the queue.';
             return false;
@@ -692,6 +727,29 @@ function zfsas_ops_mark_send_job_canceled($job, &$error = null)
 
     if (!zfsas_ops_write_job_file($job['__path'], $job)) {
         $error = 'Unable to update the canceled send job.';
+        return false;
+    }
+
+    return true;
+}
+
+function zfsas_ops_delete_failed_send_log($jobId, &$error = null)
+{
+    $error = null;
+    $path = zfsas_ops_failed_send_log_path($jobId);
+    clearstatcache(true, $path);
+
+    if (!file_exists($path)) {
+        return true;
+    }
+
+    if (is_link($path) || !is_file($path)) {
+        $error = 'Preserved send log path is invalid.';
+        return false;
+    }
+
+    if (!@unlink($path)) {
+        $error = 'Unable to remove the preserved send log.';
         return false;
     }
 

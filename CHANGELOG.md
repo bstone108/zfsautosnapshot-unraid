@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.16 (Testing Branch Only)
+
+- Added a `Download Log` action to failed `ZFS Send` queue items and changed failed-job logging so the shared send log is copied into persistent plugin storage when a job lands in final failed state, surviving later runs and reboots until you clear that queue item.
+- Changed repeated failures for the same `ZFS Send` queue item to append new preserved log captures into the same archived failure log instead of overwriting the earlier evidence, so you can see the whole sequence across retries in one download.
+
 ### 2026.04.16.15 (Testing Branch Only)
 
 - Fixed source-side `ZFS Send` checkpoint cleanup again so if there is only one configured send schedule using that source dataset, older send checkpoints from earlier schedule incarnations are now treated as part of the same send chain and cleaned up too, instead of leaving the second-most-recent source checkpoint behind forever.
