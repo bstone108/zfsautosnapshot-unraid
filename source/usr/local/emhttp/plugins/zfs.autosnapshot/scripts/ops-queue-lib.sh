@@ -1729,7 +1729,7 @@ enqueue_scheduled_send_jobs_due() {
     requested_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ' -r "$requested_epoch" 2>/dev/null || date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
     job=()
-    job[JOB_ID]="send-${job_id}-${window_key}"
+    job[JOB_ID]="send-${job_id}-${current_window}"
     job[JOB_TYPE]="send"
     job[JOB_MODE]="scheduled"
     job[JOB_ACTION]="prepare"

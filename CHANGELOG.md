@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.19 (Testing Branch Only)
+
+- Fixed a `ZFS Send` scheduler bug where the queue kicker could crash with an `unbound variable` error while building a scheduled send job id, which could stall scheduled enqueueing even though the active send worker kept running.
+
 ### 2026.04.16.18 (Testing Branch Only)
 
 - Fixed a `ZFS Send` queue write race where worker startup could delete another process's in-flight `.tmp` job file, which could corrupt child queue items, strip their action fields, and cause repeated blank-action retries.
