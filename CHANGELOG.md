@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.17.02 (Testing Branch Only)
+
+- Fixed a `ZFS Send` delete-daemon crash where the new runtime cleanup worker could die immediately with `job_id: unbound variable` before it started processing queued snapshot deletions, leaving large pending-delete counts stuck even though the send jobs themselves had finished normally.
+
 ### 2026.04.17.01 (Testing Branch Only)
 
 - Replaced the old one-file-per-delete `ZFS Send` cleanup queue with a runtime delete daemon that keeps active delete work in memory, rebuilds from one lightweight runtime state snapshot when needed, and ingests new cleanup work through a single temp inbox instead of creating thousands of separate queue files.

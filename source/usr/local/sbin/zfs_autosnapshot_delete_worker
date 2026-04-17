@@ -432,22 +432,22 @@ next_ready_job_id() {
   local result_var="$1"
   local best_id=""
   local best_sort=-1
-  local job_id state retry_at sort_key now_epoch
+  local candidate_job_id state retry_at sort_key now_epoch
 
   now_epoch="$(date +%s)"
   printf -v "$result_var" ''
 
-  for job_id in "${QUEUE_IDS[@]}"; do
-    [[ -n "$job_id" ]] || continue
-    queue_job_exists "$job_id" || continue
-    state="${QUEUE_STATE[$job_id]}"
-    retry_at="${QUEUE_RETRY_AT[$job_id]:-0}"
+  for candidate_job_id in "${QUEUE_IDS[@]}"; do
+    [[ -n "$candidate_job_id" ]] || continue
+    queue_job_exists "$candidate_job_id" || continue
+    state="${QUEUE_STATE[$candidate_job_id]}"
+    retry_at="${QUEUE_RETRY_AT[$candidate_job_id]:-0}"
     job_is_retry_ready "$state" "$retry_at" "$now_epoch" || continue
-    sort_key="${QUEUE_QUEUE_SORT[$job_id]:-0}"
+    sort_key="${QUEUE_QUEUE_SORT[$candidate_job_id]:-0}"
     [[ "$sort_key" =~ ^[0-9]+$ ]] || sort_key=0
     if (( best_sort == -1 || sort_key < best_sort )); then
       best_sort="$sort_key"
-      best_id="$job_id"
+      best_id="$candidate_job_id"
     fi
   done
 
