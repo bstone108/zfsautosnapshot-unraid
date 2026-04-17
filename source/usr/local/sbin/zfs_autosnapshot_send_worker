@@ -461,11 +461,8 @@ cleanup_previous_scheduled_checkpoint() {
     snap_base="${snap_name##*@}"
     [[ "$snap_base" == "$current_basename" ]] && continue
     if ! send_basename_matches_schedule "$snap_base" "$schedule_job_id"; then
-      local parsed_schedule_id schedule_count=0 candidate_job_id
-      parsed_schedule_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
-      if [[ -n "$parsed_schedule_id" ]]; then
-        [[ "$parsed_schedule_id" == "$schedule_job_id" ]] || continue
-      elif [[ "$snap_base" == "${SEND_SNAPSHOT_PREFIX}"* ]]; then
+      local schedule_count=0 candidate_job_id
+      if [[ "$snap_base" == "${SEND_SNAPSHOT_PREFIX}"* ]]; then
         for candidate_job_id in "${SCHEDULE_JOB_IDS[@]}"; do
           [[ "${SCHEDULE_SOURCE_ROOT[$candidate_job_id]:-}" == "$source_root" ]] || continue
           schedule_count=$((schedule_count + 1))

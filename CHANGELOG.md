@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.15 (Testing Branch Only)
+
+- Fixed source-side `ZFS Send` checkpoint cleanup again so if there is only one configured send schedule using that source dataset, older send checkpoints from earlier schedule incarnations are now treated as part of the same send chain and cleaned up too, instead of leaving the second-most-recent source checkpoint behind forever.
+
 ### 2026.04.16.14 (Testing Branch Only)
 
 - Fixed source-side `ZFS Send` checkpoint cleanup again so it can now catch older legacy-format send checkpoints on the source tree when there is only one send schedule using that source dataset, instead of leaving the original setup-era checkpoint behind forever.
