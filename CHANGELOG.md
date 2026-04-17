@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.17.06 (Testing Branch Only)
+
+- Changed the `ZFS Send` delete daemon to process the runtime cleanup queue in plain arrival order instead of rescanning the full backlog looking for the smallest sort key on every pass, which should stop large pending-delete queues from wasting time on queue-order bookkeeping instead of actual snapshot destruction.
+- Changed delayed delete retries so blocked snapshots are pushed to the tail of the runtime queue, and added explicit “Deleting snapshot …” log lines before each destroy step so it is finally obvious in the log whether the daemon is actively deleting a snapshot or still stuck in queue management.
+
 ### 2026.04.17.05 (Testing Branch Only)
 
 - Fixed a `ZFS Send` delete-queue slowdown where the runtime delete daemon could spend most of its time rewriting the large live queue state file after every processed snapshot, making it look like the queue kicker was not starting work even though a delete worker was already running.

@@ -13,6 +13,8 @@ PERSIST_QUEUE_ON_EXIT=0
 DELETE_QUEUE_RUNTIME_STATE_FLUSH_INTERVAL_SECONDS="${DELETE_QUEUE_RUNTIME_STATE_FLUSH_INTERVAL_SECONDS:-15}"
 
 QUEUE_IDS=()
+QUEUE_HEAD_INDEX=0
+QUEUE_MAX_INDEX=-1
 declare -A QUEUE_INDEX_BY_ID=()
 declare -A QUEUE_STATE=()
 declare -A QUEUE_RETRY_AT=()
@@ -74,7 +76,7 @@ queue_delete_duplicate_exists() {
 
 queue_add_job() {
   local assoc_name="$1"
-  local job_id snapshot delete_scope schedule_job_id snapshot_name
+  local job_id snapshot delete_scope schedule_job_id snapshot_name new_index
   # shellcheck disable=SC2178
   local -n job_ref="$assoc_name"
 
@@ -83,8 +85,10 @@ queue_add_job() {
   queue_job_exists "$job_id" && return 0
   queue_delete_duplicate_exists "$assoc_name" && return 0
 
-  QUEUE_IDS+=("$job_id")
-  QUEUE_INDEX_BY_ID["$job_id"]=$((${#QUEUE_IDS[@]} - 1))
+  new_index=$((QUEUE_MAX_INDEX + 1))
+  QUEUE_IDS[new_index]="$job_id"
+  QUEUE_INDEX_BY_ID["$job_id"]="$new_index"
+  QUEUE_MAX_INDEX="$new_index"
   QUEUE_STATE["$job_id"]="${job_ref[STATE]:-queued}"
   QUEUE_RETRY_AT["$job_id"]="${job_ref[RETRY_AT]:-0}"
   QUEUE_REQUESTED_EPOCH["$job_id"]="${job_ref[REQUESTED_EPOCH]:-0}"
@@ -116,6 +120,37 @@ queue_add_job() {
   return 0
 }
 
+queue_advance_head_index() {
+  while (( QUEUE_HEAD_INDEX <= QUEUE_MAX_INDEX )); do
+    if [[ -n "${QUEUE_IDS[$QUEUE_HEAD_INDEX]:-}" ]]; then
+      return 0
+    fi
+    QUEUE_HEAD_INDEX=$((QUEUE_HEAD_INDEX + 1))
+  done
+
+  return 0
+}
+
+queue_move_job_to_tail() {
+  local job_id="$1"
+  local old_index new_index
+
+  queue_job_exists "$job_id" || return 1
+  old_index="${QUEUE_INDEX_BY_ID[$job_id]:-}"
+  [[ "$old_index" =~ ^[0-9]+$ ]] || return 1
+
+  unset "QUEUE_IDS[$old_index]"
+  new_index=$((QUEUE_MAX_INDEX + 1))
+  QUEUE_IDS[new_index]="$job_id"
+  QUEUE_INDEX_BY_ID["$job_id"]="$new_index"
+  QUEUE_MAX_INDEX="$new_index"
+  if (( old_index == QUEUE_HEAD_INDEX )); then
+    queue_advance_head_index
+  fi
+  daemon_mark_dirty
+  return 0
+}
+
 queue_remove_job() {
   local job_id="$1"
   local snapshot delete_scope schedule_job_id snapshot_name
@@ -129,6 +164,9 @@ queue_remove_job() {
 
   if [[ -n "${QUEUE_INDEX_BY_ID[$job_id]+set}" ]]; then
     unset "QUEUE_IDS[${QUEUE_INDEX_BY_ID[$job_id]}]"
+    if [[ "${QUEUE_INDEX_BY_ID[$job_id]}" =~ ^[0-9]+$ ]] && (( QUEUE_INDEX_BY_ID[$job_id] == QUEUE_HEAD_INDEX )); then
+      queue_advance_head_index
+    fi
     unset 'QUEUE_INDEX_BY_ID[$job_id]'
   fi
 
@@ -216,6 +254,8 @@ load_persisted_state() {
     fi
     queue_add_job job || true
   done < "$DELETE_QUEUE_STATE_FILE"
+
+  queue_advance_head_index
 }
 
 load_boot_persisted_state() {
@@ -235,6 +275,7 @@ load_boot_persisted_state() {
   done < "$PERSISTED_DELETE_QUEUE_FILE"
 
   rm -f "$PERSISTED_DELETE_QUEUE_FILE" >/dev/null 2>&1 || true
+  queue_advance_head_index
 }
 
 drain_inbox() {
@@ -266,6 +307,7 @@ drain_inbox() {
   done < "$processing_file"
 
   rm -f "$processing_file" >/dev/null 2>&1 || true
+  queue_advance_head_index
 }
 
 write_state_snapshot() {
@@ -375,6 +417,7 @@ retry_delete_job() {
   job[RETRY_AT]="$((now_epoch + delay))"
   job[WORKER_PID]=""
   queue_store_job_assoc "$CURRENT_JOB_ID" job
+  queue_move_job_to_tail "$CURRENT_JOB_ID" || true
   log "$message"
 }
 
@@ -420,6 +463,7 @@ process_send_checkpoint_delete() {
 
   [[ -n "$schedule_job_id" ]] || schedule_job_id="$(parse_send_checkpoint_schedule_id "$basename" 2>/dev/null || true)"
   if [[ -z "$schedule_job_id" || -z "${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}" ]]; then
+    log "Deleting send-managed snapshot ${snapshot}."
     delete_single_snapshot "$snapshot"
     complete_delete_job "Deleted send-managed snapshot ${snapshot}."
     return 0
@@ -441,18 +485,21 @@ process_send_checkpoint_delete() {
   prefix="$(job_prefix_for_schedule "$schedule_job_id")"
 
   if [[ "$delete_scope" == "checkpoint" ]]; then
+    log "Deleting scheduled-send checkpoint ${basename} across its source and destination trees."
     dataset_exists "$source_root" && delete_checkpoint_basename_across_tree "$source_root" "$basename" "$prefix" "source"
     dataset_exists "$dest_root" && delete_checkpoint_basename_across_tree "$dest_root" "$basename" "$prefix" "destination"
     complete_delete_job "Deleted scheduled-send checkpoint ${basename} across its source and destination trees."
     return 0
   fi
 
+  log "Deleting snapshot ${snapshot}."
   delete_single_snapshot "$snapshot"
   complete_delete_job "Deleted snapshot ${snapshot}."
 }
 
 process_standard_delete() {
   local snapshot="$1"
+  log "Deleting snapshot ${snapshot}."
   delete_single_snapshot "$snapshot"
   complete_delete_job "Deleted snapshot ${snapshot}."
 }
@@ -488,30 +535,24 @@ process_delete_job() {
 
 next_ready_job_id() {
   local result_var="$1"
-  local best_id=""
-  local best_sort=-1
-  local candidate_job_id state retry_at sort_key now_epoch
+  local candidate_job_id state retry_at now_epoch index
 
   now_epoch="$(date +%s)"
   printf -v "$result_var" ''
+  queue_advance_head_index
 
-  for candidate_job_id in "${QUEUE_IDS[@]}"; do
+  for ((index = QUEUE_HEAD_INDEX; index <= QUEUE_MAX_INDEX; index++)); do
+    candidate_job_id="${QUEUE_IDS[$index]:-}"
     [[ -n "$candidate_job_id" ]] || continue
     queue_job_exists "$candidate_job_id" || continue
     state="${QUEUE_STATE[$candidate_job_id]}"
     retry_at="${QUEUE_RETRY_AT[$candidate_job_id]:-0}"
     job_is_retry_ready "$state" "$retry_at" "$now_epoch" || continue
-    sort_key="${QUEUE_QUEUE_SORT[$candidate_job_id]:-0}"
-    [[ "$sort_key" =~ ^[0-9]+$ ]] || sort_key=0
-    if (( best_sort == -1 || sort_key < best_sort )); then
-      best_sort="$sort_key"
-      best_id="$candidate_job_id"
-    fi
+    printf -v "$result_var" '%s' "$candidate_job_id"
+    return 0
   done
 
-  [[ -n "$best_id" ]] || return 1
-  printf -v "$result_var" '%s' "$best_id"
-  return 0
+  return 1
 }
 
 mark_job_running() {
