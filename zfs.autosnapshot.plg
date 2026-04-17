@@ -1,9 +1,9 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.17.03" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.17.04" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.17.03 (2026-04-17)
-- Fixed queue startup and runtime behavior so `ZFS Send` and delete workers now stay paused while Unraid reports the array as stopped, stopping, starting, or otherwise not actionable, instead of trying early ZFS operations that just fail and recover on retry during boot or shutdown transitions.
-- Clarified the new runtime cleanup queue model by keeping due work enqueueing intact while the array is paused, but preventing the queue kicker from launching workers until the array is actually ready to process snapshot sends and deletions.
+### 2026.04.17.04 (2026-04-17)
+- Changed the new runtime `ZFS Send` delete queue so planned shutdowns, reboots, and upgrades now flush the in-memory delete backlog into persistent plugin storage under `/boot/config/plugins/zfs.autosnapshot/runtime_queue`, and the next start reingests that saved backlog and clears the persisted file automatically.
+- Updated queue visibility and duplicate checks so the WebUI and queue logic can still see a persisted delete backlog before the runtime daemon has reloaded it, which keeps pending-delete counts and delete protection consistent across those controlled restarts.
 
   </CHANGES>
 
@@ -13,9 +13,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.17.03-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.17.03-noarch-1.txz</URL>
-    <MD5>b182176ffcedded1ee0ea858a72e7e18</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.17.04-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.17.04-noarch-1.txz</URL>
+    <MD5>a6cc1ef42f37059b7992530c0c5eed0c</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -23,10 +23,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.04.17.03-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.04.17.04-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="b182176ffcedded1ee0ea858a72e7e18"
+PKG_MD5="a6cc1ef42f37059b7992530c0c5eed0c"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
