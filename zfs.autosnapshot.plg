@@ -1,10 +1,8 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.17.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.17.02" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.17.01 (2026-04-17)
-- Replaced the old one-file-per-delete `ZFS Send` cleanup queue with a runtime delete daemon that keeps active delete work in memory, rebuilds from one lightweight runtime state snapshot when needed, and ingests new cleanup work through a single temp inbox instead of creating thousands of separate queue files.
-- Changed send-side retention, zero-change cleanup, low-space cleanup, and Snapshot Manager delete requests to feed that new delete daemon backend, which should stop huge cleanup passes from collapsing under tens of thousands of tiny queue files while still preserving the same delete protections and duplicate suppression.
-- Updated the WebUI queue helpers so pending-delete counts and Snapshot Manager “already queued” hiding now read the new runtime delete-daemon state and its intake buffer, instead of depending on old per-delete job files to exist.
+### 2026.04.17.02 (2026-04-17)
+- Fixed a `ZFS Send` delete-daemon crash where the new runtime cleanup worker could die immediately with `job_id: unbound variable` before it started processing queued snapshot deletions, leaving large pending-delete counts stuck even though the send jobs themselves had finished normally.
 
   </CHANGES>
 
@@ -14,9 +12,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.17.01-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.17.01-noarch-1.txz</URL>
-    <MD5>936ec70016c5c66f75dfc519dd5f18c9</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.17.02-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.17.02-noarch-1.txz</URL>
+    <MD5>316728e96040907d7b3179d4e82bb3ab</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -24,10 +22,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.04.17.01-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.04.17.02-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="936ec70016c5c66f75dfc519dd5f18c9"
+PKG_MD5="316728e96040907d7b3179d4e82bb3ab"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
