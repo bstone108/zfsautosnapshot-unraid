@@ -659,6 +659,7 @@ run_scheduled_prepare_phase() {
 
 process_send_job() {
   local mode action member_count index
+  clear_send_cleanup_caches
   mode="$(job_get job JOB_MODE)"
   action="$(job_get job JOB_ACTION)"
 

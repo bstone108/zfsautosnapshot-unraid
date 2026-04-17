@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.17 (Testing Branch Only)
+
+- Reworked `ZFS Send` cleanup planning so destination retention and low-space cleanup now batch snapshot metadata and active delete-job checks in memory instead of repeatedly rescanning ZFS and the queue for every candidate snapshot. This should make very large send-managed snapshot sets much less painful to process.
+- Reworked autosnapshot cleanup to cache per-dataset snapshot metadata during the run and reuse it across time-based and low-space cleanup decisions, while still invalidating the affected dataset cache after a real delete so follow-up reclaim decisions stay correct.
+
 ### 2026.04.16.16 (Testing Branch Only)
 
 - Added a `Download Log` action to failed `ZFS Send` queue items and changed failed-job logging so the shared send log is copied into persistent plugin storage when a job lands in final failed state, surviving later runs and reboots until you clear that queue item.

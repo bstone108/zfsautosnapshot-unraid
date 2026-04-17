@@ -46,6 +46,21 @@ declare -A SCHEDULE_PREFIX=()
 declare -A SCHEDULE_LAST_COMPLETED_WINDOW=()
 QUEUE_DELETE_LAST_ADDED=0
 QUEUE_DELETE_LAST_ESTIMATED_RECLAIM=0
+DELETE_QUEUE_INDEX_LOADED=0
+
+declare -A SEND_DATASET_SNAPSHOT_LINES_ASC=()
+declare -A SEND_DATASET_SNAPSHOT_LINES_DESC=()
+declare -A SEND_SNAPSHOT_CREATION_MAP=()
+declare -A SEND_SNAPSHOT_WRITTEN_MAP=()
+declare -A SEND_SNAPSHOT_USERREFS_MAP=()
+declare -A SEND_SNAPSHOT_HAS_CLONES_MAP=()
+declare -A SEND_SNAPSHOT_GUID_MAP=()
+declare -A SEND_SNAPSHOT_CREATETXG_MAP=()
+declare -A SEND_CHECKPOINT_RECLAIM_CACHE=()
+declare -A DELETE_QUEUE_BY_SNAPSHOT=()
+declare -A DELETE_QUEUE_BY_CHECKPOINT=()
+declare -A SEND_EPOCH_DAY_KEY_CACHE=()
+declare -A SEND_EPOCH_WEEK_KEY_CACHE=()
 
 log() {
   printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$*"
@@ -692,6 +707,169 @@ snapshot_written_bytes() {
   printf '%s' "$value"
 }
 
+clear_send_cleanup_caches() {
+  SEND_DATASET_SNAPSHOT_LINES_ASC=()
+  SEND_DATASET_SNAPSHOT_LINES_DESC=()
+  SEND_SNAPSHOT_CREATION_MAP=()
+  SEND_SNAPSHOT_WRITTEN_MAP=()
+  SEND_SNAPSHOT_USERREFS_MAP=()
+  SEND_SNAPSHOT_HAS_CLONES_MAP=()
+  SEND_SNAPSHOT_GUID_MAP=()
+  SEND_SNAPSHOT_CREATETXG_MAP=()
+  SEND_CHECKPOINT_RECLAIM_CACHE=()
+  DELETE_QUEUE_BY_SNAPSHOT=()
+  DELETE_QUEUE_BY_CHECKPOINT=()
+  SEND_EPOCH_DAY_KEY_CACHE=()
+  SEND_EPOCH_WEEK_KEY_CACHE=()
+  DELETE_QUEUE_INDEX_LOADED=0
+}
+
+load_send_dataset_snapshot_cache() {
+  local dataset="$1"
+  local metadata snap property value asc_lines="" desc_lines="" listed_snap
+  local -A creation_map=()
+
+  if [[ -n "${SEND_DATASET_SNAPSHOT_LINES_ASC[$dataset]+set}" ]]; then
+    return 0
+  fi
+
+  metadata="$(zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg "$dataset" 2>/dev/null || true)"
+
+  while IFS=$'\t' read -r snap property value; do
+    [[ -n "$snap" && -n "$property" ]] || continue
+    [[ "$snap" == *"@"* ]] || continue
+    [[ "${snap%@*}" == "$dataset" ]] || continue
+
+    case "$property" in
+      creation)
+        creation_map["$snap"]="$value"
+        SEND_SNAPSHOT_CREATION_MAP["$snap"]="$value"
+        ;;
+      written)
+        SEND_SNAPSHOT_WRITTEN_MAP["$snap"]="$value"
+        ;;
+      userrefs)
+        SEND_SNAPSHOT_USERREFS_MAP["$snap"]="$value"
+        ;;
+      clones)
+        value="$(trim "$value")"
+        if [[ -n "$value" && "$value" != "-" ]]; then
+          SEND_SNAPSHOT_HAS_CLONES_MAP["$snap"]="1"
+        else
+          SEND_SNAPSHOT_HAS_CLONES_MAP["$snap"]="0"
+        fi
+        ;;
+      guid)
+        SEND_SNAPSHOT_GUID_MAP["$snap"]="$value"
+        ;;
+      createtxg)
+        SEND_SNAPSHOT_CREATETXG_MAP["$snap"]="$value"
+        ;;
+    esac
+  done <<< "$metadata"
+
+  if (( ${#creation_map[@]} > 0 )); then
+    while IFS= read -r listed_snap; do
+      [[ -n "$listed_snap" ]] || continue
+      asc_lines+="${listed_snap}"$'\t'"${creation_map[$listed_snap]}"$'\n'
+    done < <(printf '%s\n' "${!creation_map[@]}")
+    asc_lines="$(printf '%s' "$asc_lines" | LC_ALL=C sort -t $'\t' -k2,2n || true)"
+    desc_lines="$(printf '%s' "$asc_lines" | LC_ALL=C sort -t $'\t' -k2,2nr || true)"
+  fi
+
+  SEND_DATASET_SNAPSHOT_LINES_ASC["$dataset"]="$asc_lines"
+  SEND_DATASET_SNAPSHOT_LINES_DESC["$dataset"]="$desc_lines"
+}
+
+send_snapshot_written_bytes_cached() {
+  local snapshot="$1"
+  local dataset value
+  dataset="${snapshot%@*}"
+  load_send_dataset_snapshot_cache "$dataset"
+  value="${SEND_SNAPSHOT_WRITTEN_MAP[$snapshot]:-}"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+    return 0
+  fi
+  snapshot_written_bytes "$snapshot"
+}
+
+send_snapshot_userrefs_count_cached() {
+  local snapshot="$1"
+  local dataset value
+  dataset="${snapshot%@*}"
+  load_send_dataset_snapshot_cache "$dataset"
+  value="${SEND_SNAPSHOT_USERREFS_MAP[$snapshot]:-}"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+    return 0
+  fi
+  snapshot_userrefs_count "$snapshot"
+}
+
+send_snapshot_has_clones_cached() {
+  local snapshot="$1"
+  local dataset value
+  dataset="${snapshot%@*}"
+  load_send_dataset_snapshot_cache "$dataset"
+  value="${SEND_SNAPSHOT_HAS_CLONES_MAP[$snapshot]:-}"
+  if [[ "$value" == "1" ]]; then
+    return 0
+  fi
+  if [[ "$value" == "0" ]]; then
+    return 1
+  fi
+  snapshot_has_clones "$snapshot"
+}
+
+zfs_get_snapshot_props_cached() {
+  local snapshot="$1"
+  local result_name="$2"
+  local dataset creation guid createtxg
+  local -n result_ref="$result_name"
+
+  dataset="${snapshot%@*}"
+  load_send_dataset_snapshot_cache "$dataset"
+
+  creation="${SEND_SNAPSHOT_CREATION_MAP[$snapshot]:-}"
+  guid="${SEND_SNAPSHOT_GUID_MAP[$snapshot]:-}"
+  createtxg="${SEND_SNAPSHOT_CREATETXG_MAP[$snapshot]:-}"
+
+  if [[ -n "$guid" ]]; then
+    result_ref=()
+    [[ -n "$creation" ]] && result_ref[creation]="$creation"
+    [[ -n "$guid" ]] && result_ref[guid]="$guid"
+    [[ -n "$createtxg" ]] && result_ref[createtxg]="$createtxg"
+    return 0
+  fi
+
+  zfs_get_snapshot_props "$snapshot" "$result_name"
+}
+
+send_day_key_for_epoch() {
+  local epoch="$1"
+  local key="${SEND_EPOCH_DAY_KEY_CACHE[$epoch]:-}"
+  if [[ -n "$key" ]]; then
+    printf '%s' "$key"
+    return 0
+  fi
+  key="$(date -d @"$epoch" +%Y-%m-%d)"
+  SEND_EPOCH_DAY_KEY_CACHE["$epoch"]="$key"
+  printf '%s' "$key"
+}
+
+send_week_key_for_epoch() {
+  local epoch="$1"
+  local key="${SEND_EPOCH_WEEK_KEY_CACHE[$epoch]:-}"
+  if [[ -n "$key" ]]; then
+    printf '%s' "$key"
+    return 0
+  fi
+  key="$(date -d @"$epoch" +%Y-%W)"
+  SEND_EPOCH_WEEK_KEY_CACHE["$epoch"]="$key"
+  printf '%s' "$key"
+}
+
 send_retention_keep_all_seconds() {
   printf '%s' $(( SEND_KEEP_ALL_FOR_DAYS * 86400 ))
 }
@@ -950,6 +1128,7 @@ dataset_exists() {
 zfs_get_snapshot_props() {
   local snapshot="$1"
   local result_name="$2"
+  # shellcheck disable=SC2178  # nameref target is an associative array in callers
   local -n result_ref="$result_name"
   local line property value
 
@@ -1257,7 +1436,13 @@ find_oldest_deletable_destination_snapshot_for_schedule() {
       oldest_snap="$snap_name"
       oldest_epoch="$snap_epoch"
     fi
-  done < <(zfs list -H -p -r -t snapshot -o name,creation "$dest_root" 2>/dev/null || true)
+  done < <(
+    while IFS= read -r snap_dataset; do
+      [[ -n "$snap_dataset" ]] || continue
+      load_send_dataset_snapshot_cache "$snap_dataset"
+      printf '%s' "${SEND_DATASET_SNAPSHOT_LINES_ASC[$snap_dataset]}"
+    done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+  )
 
   printf -v "$result_snap_var" '%s' "$oldest_snap"
   printf -v "$result_epoch_var" '%s' "$oldest_epoch"
@@ -1282,6 +1467,7 @@ find_oldest_deletable_destination_snapshot_for_pool() {
 
   while IFS= read -r dataset; do
     [[ -n "$dataset" ]] || continue
+    load_send_dataset_snapshot_cache "$dataset"
     while IFS=$'\t' read -r snap_name snap_epoch; do
       [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
       [[ -z "${seen_snapshots[$snap_name]:-}" ]] || continue
@@ -1292,9 +1478,9 @@ find_oldest_deletable_destination_snapshot_for_pool() {
 
       candidate_affects_any_constraint "$snap_dataset" "$constraints_name" || continue
       [[ -z "${protected[$snap_base]:-}" ]] || continue
-      userrefs="$(snapshot_userrefs_count "$snap_name")"
+      userrefs="$(send_snapshot_userrefs_count_cached "$snap_name")"
       (( userrefs == 0 )) || continue
-      snapshot_has_clones "$snap_name" && continue
+      send_snapshot_has_clones_cached "$snap_name" && continue
 
       schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
       if [[ -n "$schedule_job_id" ]]; then
@@ -1307,7 +1493,7 @@ find_oldest_deletable_destination_snapshot_for_pool() {
         oldest_snap="$snap_name"
         oldest_epoch="$snap_epoch"
       fi
-    done < <(zfs list -H -p -t snapshot -o name,creation -d 1 "$dataset" 2>/dev/null || true)
+    done <<< "${SEND_DATASET_SNAPSHOT_LINES_ASC[$dataset]}"
   done < <(list_existing_destination_datasets_for_pool "$pool")
 
   printf -v "$result_snap_var" '%s' "$oldest_snap"
@@ -1756,63 +1942,68 @@ find_job_by_id() {
 
 snapshot_delete_job_exists_for_snapshot() {
   local snapshot="$1"
-  local file state
-  local -A job=()
-
-  while IFS= read -r file; do
-    job_load "$file" job || continue
-    [[ "$(job_get job JOB_TYPE)" == "snapshot_delete" ]] || continue
-    [[ "$(job_get job SNAPSHOT)" == "$snapshot" ]] || continue
-    state="$(job_get job STATE)"
-    [[ "$state" == "complete" || "$state" == "skipped" ]] && continue
-    return 0
-  done < <(list_job_files)
-
-  return 1
+  ensure_active_delete_queue_index
+  [[ -n "${DELETE_QUEUE_BY_SNAPSHOT[$snapshot]:-}" ]]
 }
 
 snapshot_delete_checkpoint_job_exists() {
   local schedule_job_id="$1"
   local basename="$2"
+  local key
+
+  ensure_active_delete_queue_index
+  key="${schedule_job_id}|${basename}"
+  [[ -n "${DELETE_QUEUE_BY_CHECKPOINT[$key]:-}" ]]
+}
+
+ensure_active_delete_queue_index() {
+  (( DELETE_QUEUE_INDEX_LOADED == 1 )) && return 0
+  rebuild_active_delete_queue_index
+}
+
+rebuild_active_delete_queue_index() {
   local file state
   local -A job=()
+
+  DELETE_QUEUE_BY_SNAPSHOT=()
+  DELETE_QUEUE_BY_CHECKPOINT=()
 
   while IFS= read -r file; do
     job_load "$file" job || continue
     [[ "$(job_get job JOB_TYPE)" == "snapshot_delete" ]] || continue
-    [[ "$(job_get job DELETE_SCOPE)" == "checkpoint" ]] || continue
-    [[ "$(job_get job SEND_SCHEDULE_JOB_ID)" == "$schedule_job_id" ]] || continue
-    [[ "$(job_get job SNAPSHOT_NAME)" == "$basename" ]] || continue
     state="$(job_get job STATE)"
     [[ "$state" == "complete" || "$state" == "skipped" ]] && continue
-    return 0
+    DELETE_QUEUE_BY_SNAPSHOT["$(job_get job SNAPSHOT)"]=1
+    if [[ "$(job_get job DELETE_SCOPE)" == "checkpoint" ]]; then
+      DELETE_QUEUE_BY_CHECKPOINT["$(job_get job SEND_SCHEDULE_JOB_ID)|$(job_get job SNAPSHOT_NAME)"]=1
+    fi
   done < <(list_job_files)
 
-  return 1
+  DELETE_QUEUE_INDEX_LOADED=1
 }
 
 estimate_destination_checkpoint_reclaim_bytes() {
   local schedule_job_id="$1"
   local basename="$2"
-  local dest_root total=0 snap_name snap_epoch
+  local cache_key="${schedule_job_id}|${basename}"
+  local loaded_key="${schedule_job_id}|__loaded__"
+  local dataset snap_name snap_epoch snap_base
 
-  dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
-  [[ -n "$dest_root" ]] || {
-    printf '0'
-    return 0
-  }
-  dataset_exists "$dest_root" || {
-    printf '0'
-    return 0
-  }
+  if [[ -z "${SEND_CHECKPOINT_RECLAIM_CACHE[$loaded_key]:-}" ]]; then
+    while IFS= read -r dataset; do
+      [[ -n "$dataset" ]] || continue
+      load_send_dataset_snapshot_cache "$dataset"
+      while IFS=$'\t' read -r snap_name snap_epoch; do
+        [[ -n "$snap_name" ]] || continue
+        snap_base="${snap_name##*@}"
+        send_basename_matches_schedule "$snap_base" "$schedule_job_id" || continue
+        SEND_CHECKPOINT_RECLAIM_CACHE["${schedule_job_id}|${snap_base}"]=$(( ${SEND_CHECKPOINT_RECLAIM_CACHE["${schedule_job_id}|${snap_base}"]:-0} + $(send_snapshot_written_bytes_cached "$snap_name") ))
+      done <<< "${SEND_DATASET_SNAPSHOT_LINES_ASC[$dataset]}"
+    done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+    SEND_CHECKPOINT_RECLAIM_CACHE["$loaded_key"]=1
+  fi
 
-  while IFS=$'\t' read -r snap_name snap_epoch; do
-    [[ -n "$snap_name" ]] || continue
-    [[ "${snap_name##*@}" == "$basename" ]] || continue
-    total=$(( total + $(snapshot_written_bytes "$snap_name") ))
-  done < <(job_list_basenames_for_root "$dest_root" "$(job_prefix_for_schedule "$schedule_job_id")")
-
-  printf '%s' "$total"
+  printf '%s' "${SEND_CHECKPOINT_RECLAIM_CACHE[$cache_key]:-0}"
 }
 
 queue_snapshot_delete_job() {
@@ -1831,10 +2022,6 @@ queue_snapshot_delete_job() {
   QUEUE_DELETE_LAST_ADDED=0
   QUEUE_DELETE_LAST_ESTIMATED_RECLAIM=0
 
-  if ! snapshot_exists "$snapshot"; then
-    return 1
-  fi
-
   snapshot_name="${snapshot##*@}"
   pool="${dataset%%/*}"
   requested_epoch="$(date +%s)"
@@ -1845,7 +2032,7 @@ queue_snapshot_delete_job() {
     snapshot_delete_job_exists_for_snapshot "$snapshot" && return 0
   fi
 
-  zfs_get_snapshot_props "$snapshot" props || return 1
+  zfs_get_snapshot_props_cached "$snapshot" props || return 1
   snapshot_epoch="${props[creation]:-0}"
   guid="${props[guid]:-}"
   createtxg="${props[createtxg]:-}"
@@ -1855,7 +2042,7 @@ queue_snapshot_delete_job() {
   if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
     estimated_reclaim="$(estimate_destination_checkpoint_reclaim_bytes "$send_schedule_job_id" "$snapshot_name")"
   else
-    estimated_reclaim="$(snapshot_written_bytes "$snapshot")"
+    estimated_reclaim="$(send_snapshot_written_bytes_cached "$snapshot")"
   fi
   [[ "$estimated_reclaim" =~ ^[0-9]+$ ]] || estimated_reclaim=0
 
@@ -1897,6 +2084,11 @@ queue_snapshot_delete_job() {
   job_write "$path" job
   QUEUE_DELETE_LAST_ADDED=1
   QUEUE_DELETE_LAST_ESTIMATED_RECLAIM="$estimated_reclaim"
+  DELETE_QUEUE_BY_SNAPSHOT["$snapshot"]=1
+  if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
+    DELETE_QUEUE_BY_CHECKPOINT["${send_schedule_job_id}|${snapshot_name}"]=1
+  fi
+  DELETE_QUEUE_INDEX_LOADED=1
 }
 
 snapshot_delete_conflicts_with_send_jobs() {
@@ -2028,6 +2220,7 @@ queue_destination_retention_for_dataset() {
   local -A queued_checkpoint_basenames=()
 
   dataset_exists "$dataset" || return 0
+  load_send_dataset_snapshot_cache "$dataset"
 
   keep_all_seconds="$(send_retention_keep_all_seconds)"
   keep_daily_seconds="$(send_retention_keep_daily_until_seconds)"
@@ -2042,7 +2235,7 @@ queue_destination_retention_for_dataset() {
     if [[ -z "$newest_snapshot" ]]; then
       newest_snapshot="$snap_name"
       if [[ "$mode" == "zero_change" ]]; then
-        written_bytes="$(snapshot_written_bytes "$snap_name")"
+        written_bytes="$(send_snapshot_written_bytes_cached "$snap_name")"
         if (( written_bytes == 0 )); then
           zero_change_anchor="$snap_name"
         fi
@@ -2050,13 +2243,13 @@ queue_destination_retention_for_dataset() {
       continue
     fi
 
-    userrefs="$(snapshot_userrefs_count "$snap_name")"
+    userrefs="$(send_snapshot_userrefs_count_cached "$snap_name")"
     (( userrefs == 0 )) || continue
-    snapshot_has_clones "$snap_name" && continue
+    send_snapshot_has_clones_cached "$snap_name" && continue
     [[ -z "${protected[$snap_base]:-}" ]] || continue
 
     if [[ "$mode" == "zero_change" ]]; then
-      written_bytes="$(snapshot_written_bytes "$snap_name")"
+      written_bytes="$(send_snapshot_written_bytes_cached "$snap_name")"
       if (( written_bytes == 0 )); then
         if [[ -n "$zero_change_anchor" ]]; then
           snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
@@ -2102,7 +2295,7 @@ queue_destination_retention_for_dataset() {
     fi
 
     if (( snap_age > keep_daily_seconds )); then
-      week_key="$(date -d @"$snap_epoch" +%Y-%W)"
+      week_key="$(send_week_key_for_epoch "$snap_epoch")"
       if [[ "$kept_week" != *$'\n'"$week_key"$'\n'* ]]; then
         kept_week+="$week_key"$'\n'
       else
@@ -2125,7 +2318,7 @@ queue_destination_retention_for_dataset() {
     fi
 
     if (( snap_age > keep_all_seconds )); then
-      day_key="$(date -d @"$snap_epoch" +%Y-%m-%d)"
+      day_key="$(send_day_key_for_epoch "$snap_epoch")"
       if [[ "$kept_day" != *$'\n'"$day_key"$'\n'* ]]; then
         kept_day+="$day_key"$'\n'
       else
@@ -2145,7 +2338,7 @@ queue_destination_retention_for_dataset() {
         fi
       fi
     fi
-  done < <(zfs list -H -p -t snapshot -o name,creation -S creation -d 1 "$dataset" 2>/dev/null || true)
+  done <<< "${SEND_DATASET_SNAPSHOT_LINES_DESC[$dataset]}"
 }
 
 active_delete_queue_count_for_pool() {

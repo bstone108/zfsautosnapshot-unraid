@@ -88,12 +88,19 @@ LOW_SPACE_UNRESOLVED_NOTES=$'\n'
 # shellcheck disable=SC2034  # tracked through indirect helpers
 PROTECTED_LATEST_SNAPSHOTS=$'\n'
 declare -A LOW_SPACE_DATASET_SNAPSHOT_LINES=()
+declare -A LOW_SPACE_DATASET_SNAPSHOT_LINES_DESC=()
 declare -A LOW_SPACE_DATASET_CANDIDATE_SNAP=()
 declare -A LOW_SPACE_DATASET_CANDIDATE_USED=()
 declare -A LOW_SPACE_DATASET_CANDIDATE_EPOCH=()
 declare -A LOW_SPACE_DATASET_ANY_SNAPS=()
 declare -A LOW_SPACE_DATASET_GENERATION=()
 declare -A LOW_SPACE_DATASET_REFRESH_GENERATION=()
+declare -A DATASET_SNAPSHOT_METADATA_LOADED=()
+declare -A SNAPSHOT_USED_CACHE=()
+declare -A SNAPSHOT_WRITTEN_CACHE=()
+declare -A SNAPSHOT_USERREFS_CACHE=()
+declare -A SNAPSHOT_DAY_KEY_CACHE=()
+declare -A SNAPSHOT_WEEK_KEY_CACHE=()
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -737,46 +744,99 @@ load_snapshot_property_maps() {
 	local -n written_ref="$3"
 	# shellcheck disable=SC2034  # nameref targets are used by the caller
 	local -n userrefs_ref="$4"
-	local metadata snap property value
+	local snap snap_created
 
 	used_ref=()
 	written_ref=()
 	userrefs_ref=()
 
+	load_dataset_snapshot_inventory "$dataset"
+
+	while IFS=$'\t' read -r snap snap_created; do
+		[[ -n "$snap" ]] || continue
+		# shellcheck disable=SC2034  # nameref write consumed by caller
+		used_ref["$snap"]="${SNAPSHOT_USED_CACHE[$snap]:-0}"
+		# shellcheck disable=SC2034  # nameref write consumed by caller
+		written_ref["$snap"]="${SNAPSHOT_WRITTEN_CACHE[$snap]:-0}"
+		# shellcheck disable=SC2034  # nameref write consumed by caller
+		userrefs_ref["$snap"]="${SNAPSHOT_USERREFS_CACHE[$snap]:-0}"
+	done <<<"${LOW_SPACE_DATASET_SNAPSHOT_LINES[$dataset]}"
+}
+
+load_dataset_snapshot_metadata_cache() {
+	local dataset="$1"
+	local metadata inventory snap property value snap_created asc_lines="" desc_lines=""
+
+	if [[ -n "${DATASET_SNAPSHOT_METADATA_LOADED[$dataset]:-}" ]]; then
+		return 0
+	fi
+
+	inventory="$(zfs list -H -p -t snapshot -o name,creation -r "$dataset" 2>/dev/null | grep -F "@${PREFIX}" || true)"
 	metadata="$(zfs get -H -p -o name,property,value -t snapshot -r used,written,userrefs "$dataset" 2>/dev/null | grep -F "@${PREFIX}" || true)"
+
+	while IFS=$'\t' read -r snap snap_created; do
+		[[ -n "$snap" && -n "$snap_created" ]] || continue
+		asc_lines+="${snap}"$'\t'"${snap_created}"$'\n'
+	done <<<"$inventory"
+
+	if [[ -n "$asc_lines" ]]; then
+		asc_lines="$(printf '%s' "$asc_lines" | LC_ALL=C sort -t $'\t' -k2,2n || true)"
+		desc_lines="$(printf '%s' "$asc_lines" | LC_ALL=C sort -t $'\t' -k2,2nr || true)"
+	fi
 
 	while IFS=$'\t' read -r snap property value; do
 		[[ -n "$snap" && -n "$property" ]] || continue
-
 		case "$property" in
 		used)
-			# shellcheck disable=SC2034  # nameref write consumed by caller
-			used_ref["$snap"]="$value"
+			SNAPSHOT_USED_CACHE["$snap"]="$value"
 			;;
 		written)
-			# shellcheck disable=SC2034  # nameref write consumed by caller
-			written_ref["$snap"]="$value"
+			SNAPSHOT_WRITTEN_CACHE["$snap"]="$value"
 			;;
 		userrefs)
-			# shellcheck disable=SC2034  # nameref write consumed by caller
-			userrefs_ref["$snap"]="$value"
+			SNAPSHOT_USERREFS_CACHE["$snap"]="$value"
 			;;
 		esac
 	done <<<"$metadata"
+
+	LOW_SPACE_DATASET_SNAPSHOT_LINES["$dataset"]="$asc_lines"
+	LOW_SPACE_DATASET_SNAPSHOT_LINES_DESC["$dataset"]="$desc_lines"
+	LOW_SPACE_DATASET_GENERATION["$dataset"]=${LOW_SPACE_DATASET_GENERATION["$dataset"]:-0}
+	LOW_SPACE_DATASET_REFRESH_GENERATION["$dataset"]=-1
+	DATASET_SNAPSHOT_METADATA_LOADED["$dataset"]=1
 }
 
 load_dataset_snapshot_inventory() {
 	local dataset="$1"
-	local inventory
+	load_dataset_snapshot_metadata_cache "$dataset"
+}
 
-	if [[ -n "${LOW_SPACE_DATASET_SNAPSHOT_LINES[$dataset]+set}" ]]; then
+snapshot_day_key_for_epoch() {
+	local epoch="$1"
+	local key="${SNAPSHOT_DAY_KEY_CACHE[$epoch]:-}"
+
+	if [[ -n "$key" ]]; then
+		printf '%s' "$key"
 		return 0
 	fi
 
-	inventory="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$dataset" | grep -F "@${PREFIX}" | sort -t $'\t' -k2,2n || true)"
-	LOW_SPACE_DATASET_SNAPSHOT_LINES["$dataset"]="$inventory"
-	LOW_SPACE_DATASET_GENERATION["$dataset"]=${LOW_SPACE_DATASET_GENERATION["$dataset"]:-0}
-	LOW_SPACE_DATASET_REFRESH_GENERATION["$dataset"]=-1
+	key="$(date -d @"$epoch" +%Y-%m-%d)"
+	SNAPSHOT_DAY_KEY_CACHE["$epoch"]="$key"
+	printf '%s' "$key"
+}
+
+snapshot_week_key_for_epoch() {
+	local epoch="$1"
+	local key="${SNAPSHOT_WEEK_KEY_CACHE[$epoch]:-}"
+
+	if [[ -n "$key" ]]; then
+		printf '%s' "$key"
+		return 0
+	fi
+
+	key="$(date -d @"$epoch" +%Y-%W)"
+	SNAPSHOT_WEEK_KEY_CACHE["$epoch"]="$key"
+	printf '%s' "$key"
 }
 
 refresh_dataset_cleanup_candidate() {
@@ -785,13 +845,9 @@ refresh_dataset_cleanup_candidate() {
 	local inventory snap_name snap_created protection_reason used_bytes written_bytes
 	local chain_start="" chain_start_epoch="" chain_start_used=0 found_snapshots=0
 	local selected_snap="" selected_epoch="" selected_used=0
-	local -A space_used_map=()
-	local -A space_userrefs_map=()
-	local -A space_written_map=()
 
 	load_dataset_snapshot_inventory "$dataset"
 	inventory="${LOW_SPACE_DATASET_SNAPSHOT_LINES[$dataset]}"
-	load_snapshot_property_maps "$dataset" space_used_map space_written_map space_userrefs_map
 
 	while IFS=$'\t' read -r snap_name snap_created; do
 		[[ -n "$snap_name" && -n "$snap_created" ]] || continue
@@ -809,7 +865,7 @@ refresh_dataset_cleanup_candidate() {
 			continue
 		fi
 
-		protection_reason="$(snapshot_protection_reason "$snap_name" "${space_userrefs_map[$snap_name]:-0}" || true)"
+		protection_reason="$(snapshot_protection_reason "$snap_name" "${SNAPSHOT_USERREFS_CACHE[$snap_name]:-0}" || true)"
 		if [[ -n "$protection_reason" ]]; then
 			if ((count_skips)) && record_skipped_held_snapshot "$snap_name"; then
 				log "Low-space cleanup -> skipping held/leased snapshot: $snap_name (${protection_reason})"
@@ -820,8 +876,8 @@ refresh_dataset_cleanup_candidate() {
 			continue
 		fi
 
-		used_bytes="$(snapshot_numeric_property "${space_used_map[$snap_name]:-0}" 0)"
-		written_bytes="$(snapshot_numeric_property "${space_written_map[$snap_name]:-0}" 0)"
+		used_bytes="$(snapshot_numeric_property "${SNAPSHOT_USED_CACHE[$snap_name]:-0}" 0)"
+		written_bytes="$(snapshot_numeric_property "${SNAPSHOT_WRITTEN_CACHE[$snap_name]:-0}" 0)"
 
 		if [[ -z "$chain_start" ]]; then
 			chain_start="$snap_name"
@@ -865,6 +921,9 @@ ensure_dataset_cleanup_candidate() {
 mark_dataset_cleanup_candidate_dirty() {
 	local dataset="$1"
 	LOW_SPACE_DATASET_GENERATION["$dataset"]=$(( ${LOW_SPACE_DATASET_GENERATION["$dataset"]:-0} + 1 ))
+	unset 'LOW_SPACE_DATASET_SNAPSHOT_LINES[$dataset]'
+	unset 'LOW_SPACE_DATASET_SNAPSHOT_LINES_DESC[$dataset]'
+	unset 'DATASET_SNAPSHOT_METADATA_LOADED[$dataset]'
 }
 
 mark_cleanup_candidates_dirty_for_snapshot() {
@@ -1471,17 +1530,13 @@ time_clean_dataset() {
 	local protection_reason written_raw written_bytes userrefs_raw used_raw used_bytes
 	local zero_change_anchor=""
 	local latest_snapshot=""
-	local -A snap_written_map=()
-	local -A snap_userrefs_map=()
-	snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$ds" | grep -F "@${PREFIX}" || true)"
+	load_dataset_snapshot_inventory "$ds"
+	snaps="${LOW_SPACE_DATASET_SNAPSHOT_LINES_DESC[$ds]}"
 
 	if [[ -z "$snaps" ]]; then
 		log "  No ${PREFIX} snapshots found."
 		return 0
 	fi
-
-	declare -A snap_used_map=()
-	load_snapshot_property_maps "$ds" snap_used_map snap_written_map snap_userrefs_map
 
 	# Keep seen day/week keys in newline-delimited sets for broad Bash compatibility.
 	local kept_day=$'\n'
@@ -1490,11 +1545,11 @@ time_clean_dataset() {
 	while IFS=$'\t' read -r snap_name snap_created; do
 		[[ -z "$snap_name" || -z "$snap_created" ]] && continue
 
-		written_raw="${snap_written_map[$snap_name]:-}"
+		written_raw="${SNAPSHOT_WRITTEN_CACHE[$snap_name]:-}"
 		written_bytes="$(snapshot_numeric_property "$written_raw" -1)"
-		used_raw="${snap_used_map[$snap_name]:-0}"
+		used_raw="${SNAPSHOT_USED_CACHE[$snap_name]:-0}"
 		used_bytes="$(snapshot_numeric_property "$used_raw" 0)"
-		userrefs_raw="${snap_userrefs_map[$snap_name]:-0}"
+		userrefs_raw="${SNAPSHOT_USERREFS_CACHE[$snap_name]:-0}"
 		protection_reason="$(snapshot_protection_reason "$snap_name" "$userrefs_raw" || true)"
 
 		if [[ -z "$latest_snapshot" ]]; then
@@ -1540,7 +1595,7 @@ time_clean_dataset() {
 
 		if ((age > KEEP_DAILY_UNTIL_SECONDS)); then
 			local week_key
-			week_key="$(date -d @"$snap_created" +%Y-%W)"
+			week_key="$(snapshot_week_key_for_epoch "$snap_created")"
 			if [[ "$kept_week" != *$'\n'"$week_key"$'\n'* ]]; then
 				kept_week+="$week_key"$'\n'
 				log "  Keeping weekly latest: $snap_name"
@@ -1558,7 +1613,7 @@ time_clean_dataset() {
 
 		if ((age > KEEP_ALL_FOR_SECONDS)); then
 			local day_key
-			day_key="$(date -d @"$snap_created" +%Y-%m-%d)"
+			day_key="$(snapshot_day_key_for_epoch "$snap_created")"
 			if [[ "$kept_day" != *$'\n'"$day_key"$'\n'* ]]; then
 				kept_day+="$day_key"$'\n'
 				log "  Keeping daily latest: $snap_name"
@@ -1728,12 +1783,19 @@ blocked_low_datasets=$'\n'
 blocked_low_dataset_notes=$'\n'
 simulated_deleted_snaps=$'\n'
 LOW_SPACE_DATASET_SNAPSHOT_LINES=()
+LOW_SPACE_DATASET_SNAPSHOT_LINES_DESC=()
 LOW_SPACE_DATASET_CANDIDATE_SNAP=()
 LOW_SPACE_DATASET_CANDIDATE_USED=()
 LOW_SPACE_DATASET_CANDIDATE_EPOCH=()
 LOW_SPACE_DATASET_ANY_SNAPS=()
 LOW_SPACE_DATASET_GENERATION=()
 LOW_SPACE_DATASET_REFRESH_GENERATION=()
+DATASET_SNAPSHOT_METADATA_LOADED=()
+SNAPSHOT_USED_CACHE=()
+SNAPSHOT_WRITTEN_CACHE=()
+SNAPSHOT_USERREFS_CACHE=()
+SNAPSHOT_DAY_KEY_CACHE=()
+SNAPSHOT_WEEK_KEY_CACHE=()
 
 if (( cleanup_deferred_for_send == 0 )); then
 	while :; do
