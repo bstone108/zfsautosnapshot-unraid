@@ -95,8 +95,8 @@ main() {
   done
 
   if ! delete_worker_running; then
-    if claim_next_delete_job candidate_delete; then
-      [[ -n "$candidate_delete" ]] && spawn_delete_worker
+    if delete_queue_has_backlog; then
+      spawn_delete_worker
     fi
   fi
 

@@ -22,6 +22,21 @@ function zfsas_ops_status_dir()
     return zfsas_ops_root_dir() . '/status';
 }
 
+function zfsas_ops_delete_queue_state_path()
+{
+    return zfsas_ops_status_dir() . '/delete-queue.state';
+}
+
+function zfsas_ops_delete_queue_inbox_path()
+{
+    return zfsas_ops_root_dir() . '/delete-queue.inbox';
+}
+
+function zfsas_ops_delete_queue_inbox_lock_path()
+{
+    return zfsas_ops_root_dir() . '/delete-queue.inbox.lock';
+}
+
 function zfsas_ops_failed_send_logs_dir()
 {
     return zfsas_ops_plugin_config_dir() . '/failed_send_logs';
@@ -56,6 +71,11 @@ function zfsas_ops_failed_send_log_download_url($jobId)
 function zfsas_ops_runtime_dir()
 {
     return '/var/run/zfs-autosnapshot-ops';
+}
+
+function zfsas_ops_delete_queue_daemon_pid_path()
+{
+    return zfsas_ops_runtime_dir() . '/delete-worker/daemon.pid';
 }
 
 function zfsas_ops_send_schedule_state_file()
@@ -165,6 +185,220 @@ function zfsas_ops_write_job_file($path, $payload)
 
     @chmod($path, 0640);
     zfsas_ops_apply_owner($path);
+    return true;
+}
+
+function zfsas_ops_delete_queue_state_rows()
+{
+    $path = zfsas_ops_delete_queue_state_path();
+    if (!is_file($path)) {
+        return [];
+    }
+
+    $lines = @file($path, FILE_IGNORE_NEW_LINES);
+    if (!is_array($lines)) {
+        return [];
+    }
+
+    $rows = [];
+    foreach ($lines as $line) {
+        $parts = explode("\t", (string) $line);
+        if (($parts[0] ?? '') !== 'JOB' || count($parts) < 18) {
+            continue;
+        }
+
+        $state = (string) ($parts[2] ?? 'queued');
+        if (!in_array($state, ['queued', 'running', 'retry_wait'], true)) {
+            continue;
+        }
+
+        $rows[] = [
+            'JOB_ID' => (string) ($parts[1] ?? ''),
+            'STATE' => $state,
+            'RETRY_AT' => (string) ($parts[3] ?? '0'),
+            'REQUESTED_EPOCH' => (string) ($parts[4] ?? '0'),
+            'QUEUE_SORT' => (string) ($parts[5] ?? '0'),
+            'DATASET' => (string) ($parts[6] ?? ''),
+            'SNAPSHOT' => (string) ($parts[7] ?? ''),
+            'SNAPSHOT_NAME' => (string) ($parts[8] ?? ''),
+            'SNAPSHOT_EPOCH' => (string) ($parts[9] ?? '0'),
+            'SNAPSHOT_GUID' => (string) ($parts[10] ?? ''),
+            'SNAPSHOT_CREATETXG' => (string) ($parts[11] ?? ''),
+            'DELETE_POOL' => (string) ($parts[12] ?? ''),
+            'ESTIMATED_RECLAIM_BYTES' => (string) ($parts[13] ?? '0'),
+            'SEND_PROTECTED' => (string) ($parts[14] ?? '0'),
+            'DELETE_SCOPE' => (string) ($parts[15] ?? 'snapshot'),
+            'SEND_SCHEDULE_JOB_ID' => (string) ($parts[16] ?? ''),
+            'WORKER_PID' => (string) ($parts[17] ?? ''),
+        ];
+    }
+
+    return $rows;
+}
+
+function zfsas_ops_delete_queue_inbox_rows()
+{
+    $path = zfsas_ops_delete_queue_inbox_path();
+    if (!is_file($path)) {
+        return [];
+    }
+
+    $lines = @file($path, FILE_IGNORE_NEW_LINES);
+    if (!is_array($lines)) {
+        return [];
+    }
+
+    $rows = [];
+    foreach ($lines as $line) {
+        $parts = explode("\t", (string) $line);
+        if (($parts[0] ?? '') !== 'ENQUEUE' || count($parts) < 15) {
+            continue;
+        }
+
+        $rows[] = [
+            'JOB_ID' => (string) ($parts[1] ?? ''),
+            'STATE' => 'queued',
+            'RETRY_AT' => '0',
+            'REQUESTED_EPOCH' => (string) ($parts[2] ?? '0'),
+            'QUEUE_SORT' => (string) ($parts[3] ?? '0'),
+            'DATASET' => (string) ($parts[4] ?? ''),
+            'SNAPSHOT' => (string) ($parts[5] ?? ''),
+            'SNAPSHOT_NAME' => (string) ($parts[6] ?? ''),
+            'SNAPSHOT_EPOCH' => (string) ($parts[7] ?? '0'),
+            'SNAPSHOT_GUID' => (string) ($parts[8] ?? ''),
+            'SNAPSHOT_CREATETXG' => (string) ($parts[9] ?? ''),
+            'DELETE_POOL' => (string) ($parts[10] ?? ''),
+            'ESTIMATED_RECLAIM_BYTES' => (string) ($parts[11] ?? '0'),
+            'SEND_PROTECTED' => (string) ($parts[12] ?? '0'),
+            'DELETE_SCOPE' => (string) ($parts[13] ?? 'snapshot'),
+            'SEND_SCHEDULE_JOB_ID' => (string) ($parts[14] ?? ''),
+            'WORKER_PID' => '',
+        ];
+    }
+
+    return $rows;
+}
+
+function zfsas_ops_delete_queue_active_rows()
+{
+    $rows = [];
+    $seen = [];
+
+    foreach (array_merge(zfsas_ops_delete_queue_state_rows(), zfsas_ops_delete_queue_inbox_rows()) as $row) {
+        $key = '';
+        if (($row['DELETE_SCOPE'] ?? 'snapshot') === 'checkpoint' && !empty($row['SEND_SCHEDULE_JOB_ID']) && !empty($row['SNAPSHOT_NAME'])) {
+            $key = 'checkpoint|' . (string) $row['SEND_SCHEDULE_JOB_ID'] . '|' . (string) $row['SNAPSHOT_NAME'];
+        } else {
+            $key = 'snapshot|' . (string) ($row['SNAPSHOT'] ?? '');
+        }
+        if ($key === '' || isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $rows[] = $row;
+    }
+
+    return $rows;
+}
+
+function zfsas_ops_delete_queue_daemon_running()
+{
+    $path = zfsas_ops_delete_queue_daemon_pid_path();
+    if (!is_file($path)) {
+        return false;
+    }
+
+    $pid = (int) trim((string) @file_get_contents($path));
+    return $pid > 1 && zfsas_ops_process_alive($pid);
+}
+
+function zfsas_ops_start_delete_queue_daemon(&$error = null)
+{
+    $error = null;
+    $script = '/usr/local/sbin/zfs_autosnapshot_delete_worker';
+    $log = '/var/log/zfs_autosnapshot_send.log';
+
+    if (zfsas_ops_delete_queue_daemon_running()) {
+        return true;
+    }
+
+    if (!is_file($script) || !is_executable($script)) {
+        $error = 'Delete queue daemon is missing or not executable.';
+        return false;
+    }
+
+    $command = 'nohup ' . escapeshellarg($script) . ' >> ' . escapeshellarg($log) . ' 2>&1 < /dev/null & echo $!';
+    $output = [];
+    $exitCode = 0;
+    @exec($command, $output, $exitCode);
+    if ($exitCode !== 0) {
+        $error = 'Unable to start the delete queue daemon.';
+        return false;
+    }
+
+    for ($attempt = 0; $attempt < 20; $attempt++) {
+        if (zfsas_ops_delete_queue_daemon_running()) {
+            return true;
+        }
+        usleep(100000);
+    }
+
+    return zfsas_ops_delete_queue_daemon_running();
+}
+
+function zfsas_ops_delete_queue_command_line($payload)
+{
+    $parts = ['ENQUEUE'];
+    $fields = [
+        'JOB_ID',
+        'REQUESTED_EPOCH',
+        'QUEUE_SORT',
+        'DATASET',
+        'SNAPSHOT',
+        'SNAPSHOT_NAME',
+        'SNAPSHOT_EPOCH',
+        'SNAPSHOT_GUID',
+        'SNAPSHOT_CREATETXG',
+        'DELETE_POOL',
+        'ESTIMATED_RECLAIM_BYTES',
+        'SEND_PROTECTED',
+        'DELETE_SCOPE',
+        'SEND_SCHEDULE_JOB_ID',
+    ];
+
+    foreach ($fields as $field) {
+        $value = str_replace(["\t", "\r", "\n"], ' ', (string) ($payload[$field] ?? ''));
+        $parts[] = $value;
+    }
+
+    return implode("\t", $parts);
+}
+
+function zfsas_ops_append_delete_queue_inbox($line)
+{
+    $lockPath = zfsas_ops_delete_queue_inbox_lock_path();
+    $inboxPath = zfsas_ops_delete_queue_inbox_path();
+
+    $lockHandle = @fopen($lockPath, 'c');
+    if (!is_resource($lockHandle)) {
+        return false;
+    }
+
+    if (!@flock($lockHandle, LOCK_EX)) {
+        @fclose($lockHandle);
+        return false;
+    }
+
+    $written = @file_put_contents($inboxPath, $line . PHP_EOL, FILE_APPEND);
+    @flock($lockHandle, LOCK_UN);
+    @fclose($lockHandle);
+
+    if ($written === false) {
+        return false;
+    }
+
+    @chmod($inboxPath, 0660);
+    zfsas_ops_apply_owner($inboxPath);
     return true;
 }
 
@@ -502,12 +736,7 @@ function zfsas_ops_dataset_send_activity_map()
 function zfsas_ops_delete_snapshot_map()
 {
     $map = [];
-    $jobs = zfsas_ops_list_jobs(['snapshot_delete']);
-    foreach ($jobs as $job) {
-        $state = (string) ($job['STATE'] ?? 'queued');
-        if (!in_array($state, ['queued', 'running', 'retry_wait'], true)) {
-            continue;
-        }
+    foreach (zfsas_ops_delete_queue_active_rows() as $job) {
         $snapshot = (string) ($job['SNAPSHOT'] ?? '');
         if ($snapshot === '') {
             continue;
@@ -520,21 +749,13 @@ function zfsas_ops_delete_snapshot_map()
 
 function zfsas_ops_pending_delete_job_count()
 {
-    $count = 0;
-    foreach (zfsas_ops_list_jobs(['snapshot_delete']) as $job) {
-        $state = (string) ($job['STATE'] ?? 'queued');
-        if (in_array($state, ['queued', 'running', 'retry_wait'], true)) {
-            $count++;
-        }
-    }
-
-    return $count;
+    return count(zfsas_ops_delete_queue_active_rows());
 }
 
 function zfsas_ops_queue_pending_counts_by_dataset()
 {
     $counts = [];
-    foreach (zfsas_ops_list_jobs(['send', 'snapshot_delete']) as $job) {
+    foreach (zfsas_ops_list_jobs(['send']) as $job) {
         $state = (string) ($job['STATE'] ?? 'queued');
         if (!in_array($state, ['queued', 'running', 'retry_wait'], true)) {
             continue;
@@ -548,6 +769,18 @@ function zfsas_ops_queue_pending_counts_by_dataset()
         }
         $counts[$dataset]++;
     }
+
+    foreach (zfsas_ops_delete_queue_active_rows() as $job) {
+        $dataset = (string) ($job['DATASET'] ?? '');
+        if ($dataset === '') {
+            continue;
+        }
+        if (!isset($counts[$dataset])) {
+            $counts[$dataset] = 0;
+        }
+        $counts[$dataset]++;
+    }
+
     return $counts;
 }
 
@@ -945,16 +1178,15 @@ function zfsas_ops_enqueue_snapshot_delete($dataset, $snapshotRow, $forceCheckpo
         return false;
     }
 
+    if (isset(zfsas_ops_delete_snapshot_map()[$snapshot])) {
+        return true;
+    }
+
     $requestedEpoch = time();
     $jobId = 'delete-' . substr(sha1(strtolower($snapshot)), 0, 16) . '-' . $requestedEpoch;
-    $path = zfsas_ops_job_path($jobId, $requestedEpoch);
     $payload = [
         'JOB_ID' => $jobId,
-        'JOB_TYPE' => 'snapshot_delete',
-        'STATE' => 'queued',
-        'PHASE' => 'queued',
         'REQUESTED_EPOCH' => (string) $requestedEpoch,
-        'REQUESTED_AT' => gmdate('Y-m-d\TH:i:s\Z', $requestedEpoch),
         'QUEUE_SORT' => (string) (((int) ($snapshotRow['createdEpoch'] ?? $requestedEpoch) * 1000) + random_int(1, 999)),
         'DATASET' => $dataset,
         'SNAPSHOT' => $snapshot,
@@ -962,22 +1194,23 @@ function zfsas_ops_enqueue_snapshot_delete($dataset, $snapshotRow, $forceCheckpo
         'SNAPSHOT_EPOCH' => (string) ((int) ($snapshotRow['createdEpoch'] ?? 0)),
         'SNAPSHOT_GUID' => (string) ($snapshotRow['guid'] ?? ''),
         'SNAPSHOT_CREATETXG' => (string) ($snapshotRow['createtxg'] ?? ''),
+        'DELETE_POOL' => strtok($dataset, '/'),
+        'ESTIMATED_RECLAIM_BYTES' => (string) ((int) ($snapshotRow['writtenBytes'] ?? $snapshotRow['usedBytes'] ?? 0)),
         'SEND_PROTECTED' => !empty($snapshotRow['sendProtected']) ? '1' : '0',
         'DELETE_SCOPE' => ($forceCheckpointDelete && !empty($snapshotRow['sendProtected'])) ? 'checkpoint' : 'snapshot',
-        'LAST_ERROR' => '',
-        'LAST_MESSAGE' => 'Queued for deletion.',
-        'WORKER_PID' => '',
-        'RETRY_AT' => '0',
     ];
 
     if (!empty($snapshotRow['sendScheduleJobId'])) {
         $payload['SEND_SCHEDULE_JOB_ID'] = (string) $snapshotRow['sendScheduleJobId'];
     }
 
-    if (!zfsas_ops_write_job_file($path, $payload)) {
+    if (!zfsas_ops_append_delete_queue_inbox(zfsas_ops_delete_queue_command_line($payload))) {
         $error = 'Unable to queue the snapshot deletion.';
         return false;
     }
+
+    $daemonError = null;
+    zfsas_ops_start_delete_queue_daemon($daemonError);
 
     return true;
 }

@@ -4,76 +4,320 @@ set -Eeuo pipefail
 # shellcheck source=/dev/null
 source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
 
-WORKER_LOCK_DIR="${DELETE_WORKER_RUNTIME_DIR}/active.lockdir"
+WORKER_LOCK_DIR="${DELETE_QUEUE_LOCK_DIR}"
 CURRENT_JOB_ID=""
-CURRENT_JOB_PATH=""
+STATE_DIRTY=0
+LAST_STATE_FLUSH_EPOCH=0
+IDLE_SINCE_EPOCH=0
 
-cleanup() {
-  local exit_code="$?"
-  if [[ -n "$CURRENT_JOB_ID" ]]; then
-    release_job_claim "$CURRENT_JOB_ID"
+QUEUE_IDS=()
+declare -A QUEUE_INDEX_BY_ID=()
+declare -A QUEUE_STATE=()
+declare -A QUEUE_RETRY_AT=()
+declare -A QUEUE_REQUESTED_EPOCH=()
+declare -A QUEUE_QUEUE_SORT=()
+declare -A QUEUE_DATASET=()
+declare -A QUEUE_SNAPSHOT=()
+declare -A QUEUE_SNAPSHOT_NAME=()
+declare -A QUEUE_SNAPSHOT_EPOCH=()
+declare -A QUEUE_SNAPSHOT_GUID=()
+declare -A QUEUE_SNAPSHOT_CREATETXG=()
+declare -A QUEUE_DELETE_POOL=()
+declare -A QUEUE_ESTIMATED_RECLAIM_BYTES=()
+declare -A QUEUE_SEND_PROTECTED=()
+declare -A QUEUE_DELETE_SCOPE=()
+declare -A QUEUE_SEND_SCHEDULE_JOB_ID=()
+declare -A QUEUE_WORKER_PID=()
+declare -A QUEUE_BY_SNAPSHOT=()
+declare -A QUEUE_BY_CHECKPOINT=()
+
+daemon_mark_dirty() {
+  STATE_DIRTY=1
+}
+
+queue_has_items() {
+  local job_id
+  for job_id in "${QUEUE_IDS[@]}"; do
+    [[ -n "$job_id" ]] || continue
+    [[ -n "${QUEUE_STATE[$job_id]+set}" ]] || continue
+    return 0
+  done
+  return 1
+}
+
+queue_job_exists() {
+  local job_id="$1"
+  [[ -n "${QUEUE_STATE[$job_id]+set}" ]]
+}
+
+queue_delete_duplicate_exists() {
+  local assoc_name="$1"
+  local key snapshot schedule_job_id snapshot_name delete_scope
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+
+  snapshot="${job_ref[SNAPSHOT]:-}"
+  delete_scope="${job_ref[DELETE_SCOPE]:-snapshot}"
+  schedule_job_id="${job_ref[SEND_SCHEDULE_JOB_ID]:-}"
+  snapshot_name="${job_ref[SNAPSHOT_NAME]:-}"
+
+  if [[ "$delete_scope" == "checkpoint" && -n "$schedule_job_id" ]]; then
+    key="${schedule_job_id}|${snapshot_name}"
+    [[ -n "${QUEUE_BY_CHECKPOINT[$key]:-}" ]]
+    return
   fi
-  rm -rf "$WORKER_LOCK_DIR" >/dev/null 2>&1 || true
-  exit "$exit_code"
+
+  [[ -n "${QUEUE_BY_SNAPSHOT[$snapshot]:-}" ]]
 }
 
-persist_job() {
-  job_write "$CURRENT_JOB_PATH" job
+queue_add_job() {
+  local assoc_name="$1"
+  local job_id snapshot delete_scope schedule_job_id snapshot_name
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+
+  job_id="${job_ref[JOB_ID]:-}"
+  [[ -n "$job_id" ]] || return 1
+  queue_job_exists "$job_id" && return 0
+  queue_delete_duplicate_exists "$assoc_name" && return 0
+
+  QUEUE_IDS+=("$job_id")
+  QUEUE_INDEX_BY_ID["$job_id"]=$((${#QUEUE_IDS[@]} - 1))
+  QUEUE_STATE["$job_id"]="${job_ref[STATE]:-queued}"
+  QUEUE_RETRY_AT["$job_id"]="${job_ref[RETRY_AT]:-0}"
+  QUEUE_REQUESTED_EPOCH["$job_id"]="${job_ref[REQUESTED_EPOCH]:-0}"
+  QUEUE_QUEUE_SORT["$job_id"]="${job_ref[QUEUE_SORT]:-0}"
+  QUEUE_DATASET["$job_id"]="${job_ref[DATASET]:-}"
+  QUEUE_SNAPSHOT["$job_id"]="${job_ref[SNAPSHOT]:-}"
+  QUEUE_SNAPSHOT_NAME["$job_id"]="${job_ref[SNAPSHOT_NAME]:-}"
+  QUEUE_SNAPSHOT_EPOCH["$job_id"]="${job_ref[SNAPSHOT_EPOCH]:-0}"
+  QUEUE_SNAPSHOT_GUID["$job_id"]="${job_ref[SNAPSHOT_GUID]:-}"
+  QUEUE_SNAPSHOT_CREATETXG["$job_id"]="${job_ref[SNAPSHOT_CREATETXG]:-}"
+  QUEUE_DELETE_POOL["$job_id"]="${job_ref[DELETE_POOL]:-}"
+  QUEUE_ESTIMATED_RECLAIM_BYTES["$job_id"]="${job_ref[ESTIMATED_RECLAIM_BYTES]:-0}"
+  QUEUE_SEND_PROTECTED["$job_id"]="${job_ref[SEND_PROTECTED]:-0}"
+  QUEUE_DELETE_SCOPE["$job_id"]="${job_ref[DELETE_SCOPE]:-snapshot}"
+  QUEUE_SEND_SCHEDULE_JOB_ID["$job_id"]="${job_ref[SEND_SCHEDULE_JOB_ID]:-}"
+  QUEUE_WORKER_PID["$job_id"]="${job_ref[WORKER_PID]:-}"
+
+  snapshot="${job_ref[SNAPSHOT]:-}"
+  snapshot_name="${job_ref[SNAPSHOT_NAME]:-}"
+  delete_scope="${job_ref[DELETE_SCOPE]:-snapshot}"
+  schedule_job_id="${job_ref[SEND_SCHEDULE_JOB_ID]:-}"
+
+  [[ -n "$snapshot" ]] && QUEUE_BY_SNAPSHOT["$snapshot"]="$job_id"
+  if [[ "$delete_scope" == "checkpoint" && -n "$schedule_job_id" ]]; then
+    QUEUE_BY_CHECKPOINT["${schedule_job_id}|${snapshot_name}"]="$job_id"
+  fi
+
+  daemon_mark_dirty
+  return 0
 }
 
-set_delete_running() {
-  local message="$1"
-  job[STATE]="running"
-  job[PHASE]="deleting"
-  job[WORKER_PID]="$$"
-  job[LAST_MESSAGE]="$message"
-  persist_job
+queue_remove_job() {
+  local job_id="$1"
+  local snapshot delete_scope schedule_job_id snapshot_name
+
+  queue_job_exists "$job_id" || return 0
+
+  snapshot="${QUEUE_SNAPSHOT[$job_id]:-}"
+  snapshot_name="${QUEUE_SNAPSHOT_NAME[$job_id]:-}"
+  delete_scope="${QUEUE_DELETE_SCOPE[$job_id]:-snapshot}"
+  schedule_job_id="${QUEUE_SEND_SCHEDULE_JOB_ID[$job_id]:-}"
+
+  if [[ -n "${QUEUE_INDEX_BY_ID[$job_id]+set}" ]]; then
+    unset "QUEUE_IDS[${QUEUE_INDEX_BY_ID[$job_id]}]"
+    unset 'QUEUE_INDEX_BY_ID[$job_id]'
+  fi
+
+  unset 'QUEUE_STATE[$job_id]' 'QUEUE_RETRY_AT[$job_id]' 'QUEUE_REQUESTED_EPOCH[$job_id]' 'QUEUE_QUEUE_SORT[$job_id]'
+  unset 'QUEUE_DATASET[$job_id]' 'QUEUE_SNAPSHOT[$job_id]' 'QUEUE_SNAPSHOT_NAME[$job_id]' 'QUEUE_SNAPSHOT_EPOCH[$job_id]'
+  unset 'QUEUE_SNAPSHOT_GUID[$job_id]' 'QUEUE_SNAPSHOT_CREATETXG[$job_id]' 'QUEUE_DELETE_POOL[$job_id]'
+  unset 'QUEUE_ESTIMATED_RECLAIM_BYTES[$job_id]' 'QUEUE_SEND_PROTECTED[$job_id]' 'QUEUE_DELETE_SCOPE[$job_id]'
+  unset 'QUEUE_SEND_SCHEDULE_JOB_ID[$job_id]' 'QUEUE_WORKER_PID[$job_id]'
+
+  [[ -n "$snapshot" ]] && unset 'QUEUE_BY_SNAPSHOT[$snapshot]'
+  if [[ "$delete_scope" == "checkpoint" && -n "$schedule_job_id" ]]; then
+    unset "QUEUE_BY_CHECKPOINT[${schedule_job_id}|${snapshot_name}]"
+  fi
+
+  daemon_mark_dirty
+}
+
+queue_load_job_assoc() {
+  local job_id="$1"
+  local assoc_name="$2"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+
+  job_ref=()
+  queue_job_exists "$job_id" || return 1
+  job_ref[JOB_ID]="$job_id"
+  job_ref[STATE]="${QUEUE_STATE[$job_id]}"
+  job_ref[RETRY_AT]="${QUEUE_RETRY_AT[$job_id]}"
+  job_ref[REQUESTED_EPOCH]="${QUEUE_REQUESTED_EPOCH[$job_id]}"
+  job_ref[QUEUE_SORT]="${QUEUE_QUEUE_SORT[$job_id]}"
+  job_ref[DATASET]="${QUEUE_DATASET[$job_id]}"
+  job_ref[SNAPSHOT]="${QUEUE_SNAPSHOT[$job_id]}"
+  job_ref[SNAPSHOT_NAME]="${QUEUE_SNAPSHOT_NAME[$job_id]}"
+  job_ref[SNAPSHOT_EPOCH]="${QUEUE_SNAPSHOT_EPOCH[$job_id]}"
+  job_ref[SNAPSHOT_GUID]="${QUEUE_SNAPSHOT_GUID[$job_id]}"
+  job_ref[SNAPSHOT_CREATETXG]="${QUEUE_SNAPSHOT_CREATETXG[$job_id]}"
+  job_ref[DELETE_POOL]="${QUEUE_DELETE_POOL[$job_id]}"
+  job_ref[ESTIMATED_RECLAIM_BYTES]="${QUEUE_ESTIMATED_RECLAIM_BYTES[$job_id]}"
+  job_ref[SEND_PROTECTED]="${QUEUE_SEND_PROTECTED[$job_id]}"
+  job_ref[DELETE_SCOPE]="${QUEUE_DELETE_SCOPE[$job_id]}"
+  job_ref[SEND_SCHEDULE_JOB_ID]="${QUEUE_SEND_SCHEDULE_JOB_ID[$job_id]}"
+  job_ref[WORKER_PID]="${QUEUE_WORKER_PID[$job_id]}"
+  return 0
+}
+
+queue_store_job_assoc() {
+  local job_id="$1"
+  local assoc_name="$2"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+
+  queue_job_exists "$job_id" || return 1
+  QUEUE_STATE["$job_id"]="${job_ref[STATE]:-queued}"
+  QUEUE_RETRY_AT["$job_id"]="${job_ref[RETRY_AT]:-0}"
+  QUEUE_REQUESTED_EPOCH["$job_id"]="${job_ref[REQUESTED_EPOCH]:-0}"
+  QUEUE_QUEUE_SORT["$job_id"]="${job_ref[QUEUE_SORT]:-0}"
+  QUEUE_DATASET["$job_id"]="${job_ref[DATASET]:-}"
+  QUEUE_SNAPSHOT["$job_id"]="${job_ref[SNAPSHOT]:-}"
+  QUEUE_SNAPSHOT_NAME["$job_id"]="${job_ref[SNAPSHOT_NAME]:-}"
+  QUEUE_SNAPSHOT_EPOCH["$job_id"]="${job_ref[SNAPSHOT_EPOCH]:-0}"
+  QUEUE_SNAPSHOT_GUID["$job_id"]="${job_ref[SNAPSHOT_GUID]:-}"
+  QUEUE_SNAPSHOT_CREATETXG["$job_id"]="${job_ref[SNAPSHOT_CREATETXG]:-}"
+  QUEUE_DELETE_POOL["$job_id"]="${job_ref[DELETE_POOL]:-}"
+  QUEUE_ESTIMATED_RECLAIM_BYTES["$job_id"]="${job_ref[ESTIMATED_RECLAIM_BYTES]:-0}"
+  QUEUE_SEND_PROTECTED["$job_id"]="${job_ref[SEND_PROTECTED]:-0}"
+  QUEUE_DELETE_SCOPE["$job_id"]="${job_ref[DELETE_SCOPE]:-snapshot}"
+  QUEUE_SEND_SCHEDULE_JOB_ID["$job_id"]="${job_ref[SEND_SCHEDULE_JOB_ID]:-}"
+  QUEUE_WORKER_PID["$job_id"]="${job_ref[WORKER_PID]:-}"
+  daemon_mark_dirty
+  return 0
+}
+
+load_persisted_state() {
+  local line
+  local -A job=()
+
+  [[ -f "$DELETE_QUEUE_STATE_FILE" ]] || return 0
+
+  while IFS= read -r line; do
+    delete_queue_parse_state_line "$line" job || continue
+    if [[ "${job[STATE]:-queued}" == "running" ]]; then
+      job[STATE]="queued"
+      job[RETRY_AT]="0"
+      job[WORKER_PID]=""
+    fi
+    queue_add_job job || true
+  done < "$DELETE_QUEUE_STATE_FILE"
+}
+
+drain_inbox() {
+  local fd=9
+  local processing_file=""
+  local line
+  local -A job=()
+
+  : > "$DELETE_QUEUE_INBOX_LOCK_FILE" 2>/dev/null || true
+  exec {fd}>>"$DELETE_QUEUE_INBOX_LOCK_FILE" || return 1
+  flock "$fd" || {
+    eval "exec ${fd}>&-"
+    return 1
+  }
+
+  if [[ -s "$DELETE_QUEUE_INBOX_FILE" ]]; then
+    processing_file="${DELETE_QUEUE_INBOX_FILE}.processing.$$"
+    mv "$DELETE_QUEUE_INBOX_FILE" "$processing_file" 2>/dev/null || true
+  fi
+
+  flock -u "$fd" || true
+  eval "exec ${fd}>&-"
+
+  [[ -n "$processing_file" && -f "$processing_file" ]] || return 0
+
+  while IFS= read -r line; do
+    delete_queue_parse_enqueue_line "$line" job || continue
+    queue_add_job job || true
+  done < "$processing_file"
+
+  rm -f "$processing_file" >/dev/null 2>&1 || true
+}
+
+write_state_snapshot() {
+  local tmp now job_id
+  local -A job=()
+
+  now="$(date +%s)"
+  tmp="${DELETE_QUEUE_STATE_FILE}.tmp.$$"
+  {
+    printf 'META\t%s\t%s\n' "$$" "$now"
+    for job_id in "${QUEUE_IDS[@]}"; do
+      [[ -n "$job_id" ]] || continue
+      queue_job_exists "$job_id" || continue
+      queue_load_job_assoc "$job_id" job || continue
+      delete_queue_emit_state_line job
+    done
+  } > "$tmp"
+
+  if queue_has_items; then
+    mv "$tmp" "$DELETE_QUEUE_STATE_FILE"
+    chmod 0640 "$DELETE_QUEUE_STATE_FILE" >/dev/null 2>&1 || true
+    ops_apply_owner "$DELETE_QUEUE_STATE_FILE"
+  else
+    rm -f "$DELETE_QUEUE_STATE_FILE" >/dev/null 2>&1 || true
+    rm -f "$tmp" >/dev/null 2>&1 || true
+  fi
+
+  LAST_STATE_FLUSH_EPOCH="$now"
+  STATE_DIRTY=0
+}
+
+flush_state_if_needed() {
+  local force="${1:-0}"
+  local now
+
+  (( STATE_DIRTY == 1 )) || return 0
+  now="$(date +%s)"
+  if [[ "$force" == "1" || "$LAST_STATE_FLUSH_EPOCH" != "$now" ]]; then
+    write_state_snapshot
+  fi
 }
 
 complete_delete_job() {
   local message="$1"
-  job[STATE]="complete"
-  job[PHASE]="complete"
-  job[WORKER_PID]=""
-  job[LAST_ERROR]=""
-  job[LAST_MESSAGE]="$message"
-  set_job_success_purge_after job
-  persist_job
+  log "$message"
+  queue_remove_job "$CURRENT_JOB_ID"
 }
 
 skip_delete_job() {
   local message="$1"
-  job[STATE]="skipped"
-  job[PHASE]="complete"
-  job[WORKER_PID]=""
-  job[LAST_ERROR]=""
-  job[LAST_MESSAGE]="$message"
-  set_job_success_purge_after job
-  persist_job
+  log "$message"
+  queue_remove_job "$CURRENT_JOB_ID"
 }
 
 fail_delete_job() {
   local message="$1"
-  job[STATE]="failed"
-  job[PHASE]="failed"
-  job[WORKER_PID]=""
-  job[LAST_ERROR]="$message"
-  job[LAST_MESSAGE]="$message"
-  persist_job
+  log "$message"
+  queue_remove_job "$CURRENT_JOB_ID"
 }
 
 retry_delete_job() {
   local message="$1"
   local now_epoch delay
+  local -A job=()
+
   now_epoch="$(date +%s)"
   delay=60
+  queue_load_job_assoc "$CURRENT_JOB_ID" job || return 1
   job[STATE]="retry_wait"
-  job[PHASE]="retry_wait"
-  job[WORKER_PID]=""
   job[RETRY_AT]="$((now_epoch + delay))"
-  job[LAST_ERROR]="$message"
-  job[LAST_MESSAGE]="$message"
-  persist_job
+  job[WORKER_PID]=""
+  queue_store_job_assoc "$CURRENT_JOB_ID" job
+  log "$message"
 }
 
 verify_snapshot_identity() {
@@ -108,6 +352,9 @@ delete_single_snapshot() {
 
 process_send_checkpoint_delete() {
   local snapshot basename schedule_job_id newest_basename source_root dest_root prefix delete_scope
+  local -A job=()
+
+  queue_load_job_assoc "$CURRENT_JOB_ID" job || return 1
   snapshot="$(job_get job SNAPSHOT)"
   basename="${snapshot##*@}"
   schedule_job_id="$(job_get job SEND_SCHEDULE_JOB_ID)"
@@ -153,9 +400,11 @@ process_standard_delete() {
 }
 
 process_delete_job() {
-  local snapshot basename expect_epoch expect_guid expect_createtxg
+  local snapshot expect_epoch expect_guid expect_createtxg
+  local -A job=()
+
+  queue_load_job_assoc "$CURRENT_JOB_ID" job || return 1
   snapshot="$(job_get job SNAPSHOT)"
-  basename="${snapshot##*@}"
   expect_epoch="$(job_get job SNAPSHOT_EPOCH)"
   expect_guid="$(job_get job SNAPSHOT_GUID)"
   expect_createtxg="$(job_get job SNAPSHOT_CREATETXG)"
@@ -179,51 +428,114 @@ process_delete_job() {
   process_standard_delete "$snapshot"
 }
 
+next_ready_job_id() {
+  local result_var="$1"
+  local best_id=""
+  local best_sort=-1
+  local job_id state retry_at sort_key now_epoch
+
+  now_epoch="$(date +%s)"
+  printf -v "$result_var" ''
+
+  for job_id in "${QUEUE_IDS[@]}"; do
+    [[ -n "$job_id" ]] || continue
+    queue_job_exists "$job_id" || continue
+    state="${QUEUE_STATE[$job_id]}"
+    retry_at="${QUEUE_RETRY_AT[$job_id]:-0}"
+    job_is_retry_ready "$state" "$retry_at" "$now_epoch" || continue
+    sort_key="${QUEUE_QUEUE_SORT[$job_id]:-0}"
+    [[ "$sort_key" =~ ^[0-9]+$ ]] || sort_key=0
+    if (( best_sort == -1 || sort_key < best_sort )); then
+      best_sort="$sort_key"
+      best_id="$job_id"
+    fi
+  done
+
+  [[ -n "$best_id" ]] || return 1
+  printf -v "$result_var" '%s' "$best_id"
+  return 0
+}
+
+mark_job_running() {
+  local -A job=()
+
+  queue_load_job_assoc "$CURRENT_JOB_ID" job || return 1
+  job[STATE]="running"
+  job[WORKER_PID]="$$"
+  queue_store_job_assoc "$CURRENT_JOB_ID" job
+  flush_state_if_needed 1
+}
+
+cleanup() {
+  local exit_code="$?"
+
+  if [[ -n "$CURRENT_JOB_ID" ]] && queue_job_exists "$CURRENT_JOB_ID"; then
+    local -A job=()
+    queue_load_job_assoc "$CURRENT_JOB_ID" job || true
+    if [[ -n "${job[JOB_ID]:-}" ]]; then
+      job[STATE]="queued"
+      job[RETRY_AT]="0"
+      job[WORKER_PID]=""
+      queue_store_job_assoc "$CURRENT_JOB_ID" job || true
+    fi
+  fi
+
+  flush_state_if_needed 1 || true
+  rm -f "$DELETE_QUEUE_PID_FILE" >/dev/null 2>&1 || true
+  rm -rf "$WORKER_LOCK_DIR" >/dev/null 2>&1 || true
+  exit "$exit_code"
+}
+
 main() {
-  local candidate_path
+  local job_id now_epoch
+
   ensure_runtime_layout || exit 1
   load_send_config
   parse_send_jobs_config
 
   trap cleanup EXIT INT TERM
   mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
+  printf '%s\n' "$$" > "$DELETE_QUEUE_PID_FILE"
+  chmod 0640 "$DELETE_QUEUE_PID_FILE" >/dev/null 2>&1 || true
+  ops_apply_owner "$DELETE_QUEUE_PID_FILE"
 
   exec >> "$LOG_FILE" 2>&1
-  log "Delete worker $$ starting"
+  log "Delete daemon $$ starting"
+
+  load_persisted_state
+  drain_inbox
+  flush_state_if_needed 1
 
   while :; do
-    candidate_path=""
-    claim_next_delete_job candidate_path || break
-    [[ -n "$candidate_path" ]] || break
+    drain_inbox
 
-    # shellcheck disable=SC2034
-    declare -A job=()
-    job_load "$candidate_path" job || break
-    CURRENT_JOB_ID="$(job_get job JOB_ID)"
-    CURRENT_JOB_PATH="$candidate_path"
-
-    if ! acquire_job_claim "$CURRENT_JOB_ID"; then
+    if next_ready_job_id job_id; then
+      IDLE_SINCE_EPOCH=0
+      CURRENT_JOB_ID="$job_id"
+      mark_job_running
+      process_delete_job || true
       CURRENT_JOB_ID=""
-      CURRENT_JOB_PATH=""
+      flush_state_if_needed 1
       continue
     fi
 
-    job_load "$candidate_path" job || {
-      release_job_claim "$CURRENT_JOB_ID"
-      CURRENT_JOB_ID=""
-      CURRENT_JOB_PATH=""
-      continue
-    }
+    flush_state_if_needed 0
 
-    set_delete_running "Deleting $(job_get job SNAPSHOT)."
-    process_delete_job
+    if queue_has_items || [[ -s "$DELETE_QUEUE_INBOX_FILE" ]]; then
+      IDLE_SINCE_EPOCH=0
+    else
+      now_epoch="$(date +%s)"
+      if (( IDLE_SINCE_EPOCH == 0 )); then
+        IDLE_SINCE_EPOCH="$now_epoch"
+      elif (( now_epoch - IDLE_SINCE_EPOCH >= DELETE_QUEUE_IDLE_TIMEOUT_SECONDS )); then
+        break
+      fi
+    fi
 
-    release_job_claim "$CURRENT_JOB_ID"
-    CURRENT_JOB_ID=""
-    CURRENT_JOB_PATH=""
+    sleep 1
   done
 
-  log "Delete worker $$ finished"
+  log "Delete daemon $$ finished"
 }
 
 main "$@"

@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.17.01 (Testing Branch Only)
+
+- Replaced the old one-file-per-delete `ZFS Send` cleanup queue with a runtime delete daemon that keeps active delete work in memory, rebuilds from one lightweight runtime state snapshot when needed, and ingests new cleanup work through a single temp inbox instead of creating thousands of separate queue files.
+- Changed send-side retention, zero-change cleanup, low-space cleanup, and Snapshot Manager delete requests to feed that new delete daemon backend, which should stop huge cleanup passes from collapsing under tens of thousands of tiny queue files while still preserving the same delete protections and duplicate suppression.
+- Updated the WebUI queue helpers so pending-delete counts and Snapshot Manager “already queued” hiding now read the new runtime delete-daemon state and its intake buffer, instead of depending on old per-delete job files to exist.
+
 ### 2026.04.16.20 (Testing Branch Only)
 
 - Moved the hot `ZFS Send` queue out of `/boot` and into temp runtime storage so queue churn, retries, and bulk cleanup planning no longer hammer the Unraid flash device with thousands of tiny writes.
