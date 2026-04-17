@@ -421,34 +421,42 @@ retry_delete_job() {
   log "$message"
 }
 
-verify_snapshot_identity() {
+snapshot_delete_target_is_safe() {
   local snapshot="$1"
-  local expect_epoch="$2"
-  local expect_guid="$3"
-  local expect_createtxg="$4"
-  local -A props=()
 
-  snapshot_exists "$snapshot" || return 2
-  zfs_get_snapshot_props "$snapshot" props || return 1
+  [[ -n "$snapshot" && "$snapshot" == *@* ]] || return 1
+  snapshot_exists "$snapshot"
+}
 
-  if [[ -n "$expect_guid" && -n "${props[guid]:-}" && "${props[guid]}" != "$expect_guid" ]]; then
-    return 1
-  fi
+destroy_single_snapshot_with_retries() {
+  local snapshot="$1"
+  local max_attempts=3
+  local attempt=1
+  local output=""
 
-  if [[ -n "$expect_createtxg" && -n "${props[createtxg]:-}" && "${props[createtxg]}" != "$expect_createtxg" ]]; then
-    return 1
-  fi
+  while (( attempt <= max_attempts )); do
+    if output="$(zfs destroy "$snapshot" 2>&1)"; then
+      return 0
+    fi
 
-  if [[ -n "$expect_epoch" && -n "${props[creation]:-}" && "${props[creation]}" != "$expect_epoch" ]]; then
-    return 1
-  fi
+    if (( attempt >= max_attempts )); then
+      log "Delete attempt ${attempt}/${max_attempts} failed for ${snapshot}: ${output}"
+      return 1
+    fi
 
-  return 0
+    log "Delete attempt ${attempt}/${max_attempts} failed for ${snapshot}; retrying: ${output}"
+    sleep "$attempt"
+    attempt=$((attempt + 1))
+  done
+
+  return 1
 }
 
 delete_single_snapshot() {
   local snapshot="$1"
-  zfs destroy "$snapshot"
+
+  snapshot_delete_target_is_safe "$snapshot" || return 2
+  destroy_single_snapshot_with_retries "$snapshot"
 }
 
 process_send_checkpoint_delete() {
@@ -464,7 +472,7 @@ process_send_checkpoint_delete() {
   [[ -n "$schedule_job_id" ]] || schedule_job_id="$(parse_send_checkpoint_schedule_id "$basename" 2>/dev/null || true)"
   if [[ -z "$schedule_job_id" || -z "${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}" ]]; then
     log "Deleting send-managed snapshot ${snapshot}."
-    delete_single_snapshot "$snapshot"
+    delete_single_snapshot "$snapshot" || return $?
     complete_delete_job "Deleted send-managed snapshot ${snapshot}."
     return 0
   fi
@@ -493,44 +501,41 @@ process_send_checkpoint_delete() {
   fi
 
   log "Deleting snapshot ${snapshot}."
-  delete_single_snapshot "$snapshot"
+  delete_single_snapshot "$snapshot" || return $?
   complete_delete_job "Deleted snapshot ${snapshot}."
 }
 
 process_standard_delete() {
   local snapshot="$1"
   log "Deleting snapshot ${snapshot}."
-  delete_single_snapshot "$snapshot"
+  delete_single_snapshot "$snapshot" || return $?
   complete_delete_job "Deleted snapshot ${snapshot}."
 }
 
 process_delete_job() {
-  local snapshot expect_epoch expect_guid expect_createtxg
+  local snapshot
   local -A job=()
 
   queue_load_job_assoc "$CURRENT_JOB_ID" job || return 1
   snapshot="$(job_get job SNAPSHOT)"
-  expect_epoch="$(job_get job SNAPSHOT_EPOCH)"
-  expect_guid="$(job_get job SNAPSHOT_GUID)"
-  expect_createtxg="$(job_get job SNAPSHOT_CREATETXG)"
 
-  case "$(verify_snapshot_identity "$snapshot" "$expect_epoch" "$expect_guid" "$expect_createtxg"; echo $?)" in
-    2)
-      skip_delete_job "Snapshot ${snapshot} is already gone."
-      return 0
-      ;;
-    1)
-      fail_delete_job "Snapshot identity for ${snapshot} no longer matches the queued request. Refresh the dataset and try again."
-      return 0
-      ;;
-  esac
-
-  if [[ "$(job_get job SEND_PROTECTED 0)" == "1" ]]; then
-    process_send_checkpoint_delete
+  if ! snapshot_delete_target_is_safe "$snapshot"; then
+    skip_delete_job "Snapshot ${snapshot} is already gone or is no longer a safe snapshot target."
     return 0
   fi
 
-  process_standard_delete "$snapshot"
+  if [[ "$(job_get job SEND_PROTECTED 0)" == "1" ]]; then
+    process_send_checkpoint_delete || {
+      fail_delete_job "Snapshot delete failed for ${snapshot}. Review the send log for the exact destroy error."
+      return 0
+    }
+    return 0
+  fi
+
+  process_standard_delete "$snapshot" || {
+    fail_delete_job "Snapshot delete failed for ${snapshot}. Review the send log for the exact destroy error."
+    return 0
+  }
 }
 
 next_ready_job_id() {

@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.17.07 (Testing Branch Only)
+
+- Simplified the `ZFS Send` delete worker so it no longer re-reads full snapshot identity metadata before every queued delete. It now only checks that the target is still an exact snapshot path, runs `zfs destroy`, retries a couple of times on transient errors, and then logs and drops that queue item if the delete still fails.
+- This should remove a big chunk of the per-item pre-delete overhead on slow pools while still keeping the worker from ever turning a queued snapshot delete into a whole-dataset destroy.
+
 ### 2026.04.17.06 (Testing Branch Only)
 
 - Changed the `ZFS Send` delete daemon to process the runtime cleanup queue in plain arrival order instead of rescanning the full backlog looking for the smallest sort key on every pass, which should stop large pending-delete queues from wasting time on queue-order bookkeeping instead of actual snapshot destruction.
