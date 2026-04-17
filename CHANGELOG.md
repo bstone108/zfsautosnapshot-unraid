@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.17.09 (Testing Branch Only)
+
+- Fixed a `ZFS Send` delete-queue restart bug on upgraded systems where the queue kicker could miss a real backlog if the runtime delete state file was still in the older legacy `JOB` format. Upgraded boxes now recognize that legacy file as real pending work, start the delete daemon, and let the new worker import it into the lighter in-memory runtime model automatically.
+
 ### 2026.04.17.08 (Testing Branch Only)
 
 - Reworked the runtime `ZFS Send` delete queue so it no longer rewrites the full live queue snapshot during normal operation. The delete daemon now keeps the real queue in memory, writes only a tiny runtime status file for the WebUI, and only serializes the full backlog during controlled shutdown, reboot, or upgrade handoff.

@@ -442,6 +442,9 @@ delete_queue_has_backlog() {
   if [[ "$pending_count" =~ ^[0-9]+$ && "$running_count" =~ ^[0-9]+$ ]] && (( pending_count > 0 || running_count > 0 )); then
     return 0
   fi
+  if delete_queue_state_file_exists && grep -q $'^JOB\t' "$DELETE_QUEUE_STATE_FILE" 2>/dev/null; then
+    return 0
+  fi
   if delete_queue_persisted_file_exists && grep -q $'^JOB\t' "$PERSISTED_DELETE_QUEUE_FILE" 2>/dev/null; then
     return 0
   fi
