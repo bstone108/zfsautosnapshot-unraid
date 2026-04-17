@@ -1,9 +1,11 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.16.17" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.16.18" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.16.17 (2026-04-17)
-- Reworked `ZFS Send` cleanup planning so destination retention and low-space cleanup now batch snapshot metadata and active delete-job checks in memory instead of repeatedly rescanning ZFS and the queue for every candidate snapshot. This should make very large send-managed snapshot sets much less painful to process.
-- Reworked autosnapshot cleanup to cache per-dataset snapshot metadata during the run and reuse it across time-based and low-space cleanup decisions, while still invalidating the affected dataset cache after a real delete so follow-up reclaim decisions stay correct.
+### 2026.04.16.18 (2026-04-16)
+- Fixed a `ZFS Send` queue write race where worker startup could delete another process's in-flight `.tmp` job file, which could corrupt child queue items, strip their action fields, and cause repeated blank-action retries.
+- Fixed recursive `ZFS Send` source checkpoint cleanup so each child dataset now deletes its older source-side send checkpoints only after that exact child checkpoint has been verified on the destination, instead of advancing the whole source tree and breaking lagging children like `foundryvtt`.
+- Added automatic recovery for the broken-chain backup case: if a scheduled child send finds no common checkpoint but the destination dataset still has snapshots, the worker now preserves the log, purges that destination dataset for a clean reseed, and fails the current attempt so the normal retry path can rebuild the backup from scratch.
+- Hardened scheduled child-job handling so corrupted or legacy queue rows that are missing `JOB_ACTION` are inferred as child send items instead of being misread as a new prepare phase, which should stop cases like the repeated `element-web` blank-action failure loop.
 
   </CHANGES>
 
@@ -13,9 +15,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.16.17-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.16.17-noarch-1.txz</URL>
-    <MD5>832d1f44e83f5f5eceaab24ac7b1513e</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.16.18-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.04.16.18-noarch-1.txz</URL>
+    <MD5>9b7c783b9f513b268382f254c6af1fe0</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -23,10 +25,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.04.16.17-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.04.16.18-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="832d1f44e83f5f5eceaab24ac7b1513e"
+PKG_MD5="9b7c783b9f513b268382f254c6af1fe0"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then

@@ -118,6 +118,31 @@ clear_active_send_datasets() {
   fi
 }
 
+effective_job_action() {
+  local assoc_name="$1"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+  local action
+
+  action="${job_ref[JOB_ACTION]:-}"
+  if [[ -n "$action" ]]; then
+    printf '%s' "$action"
+    return 0
+  fi
+
+  if [[ "${job_ref[JOB_ID]:-}" == finalize-* ]]; then
+    printf 'finalize'
+    return 0
+  fi
+
+  if [[ -n "${job_ref[PARENT_RUN_ID]:-}" && -n "${job_ref[MEMBER_INDEX]:-}" ]]; then
+    printf 'send_member'
+    return 0
+  fi
+
+  printf 'prepare'
+}
+
 register_active_send_datasets_for_current_job() {
   local mode action source_root include_children dataset file tmp source_dataset
 
@@ -128,7 +153,7 @@ register_active_send_datasets_for_current_job() {
   : > "$tmp"
 
   mode="$(job_get job JOB_MODE)"
-  action="$(job_get job JOB_ACTION)"
+  action="$(effective_job_action job)"
   case "$mode:$action" in
     scheduled:send_member)
       dataset="$(job_get job SOURCE_ROOT)"
@@ -383,12 +408,15 @@ queue_child_send_jobs() {
 send_member_snapshot() {
   local member_index="$1"
   local member_count="$2"
-  local source_dataset destination snapshot basename latest_common description progress
+  local source_dataset destination snapshot basename latest_common description progress failure_message
+  local destination_parent source_exists=0 destination_exists=0 parent_exists=0
+  local source_type="" destination_type=""
 
   source_dataset="$(job_get job MEMBER_"${member_index}"_SOURCE)"
   destination="$(job_get job MEMBER_"${member_index}"_DESTINATION)"
   snapshot="$(job_get job MEMBER_"${member_index}"_SNAPSHOT)"
   basename="${snapshot##*@}"
+  destination_parent="${destination%/*}"
 
   is_valid_dataset_name "$source_dataset" || {
     fail_current_job_final "Source dataset '${source_dataset}' is invalid."
@@ -403,7 +431,24 @@ send_member_snapshot() {
     return 1
   }
 
-  ensure_destination_parent_exists "$destination" || return 1
+  if dataset_exists "$source_dataset"; then
+    source_exists=1
+    source_type="$(dataset_type "$source_dataset")"
+  fi
+  if dataset_exists "$destination"; then
+    destination_exists=1
+    destination_type="$(dataset_type "$destination")"
+  fi
+  if [[ -n "$destination_parent" ]] && dataset_exists "$destination_parent"; then
+    parent_exists=1
+  fi
+
+  log "Send preflight: source=${source_dataset} source_exists=${source_exists} source_type=${source_type:-unknown} destination=${destination} destination_exists=${destination_exists} destination_type=${destination_type:-missing} parent=${destination_parent} parent_exists=${parent_exists} snapshot=${snapshot} job_mode=$(job_get job JOB_MODE) job_action=$(effective_job_action job)"
+
+  if ! ensure_destination_parent_exists "$destination"; then
+    fail_current_job_final "Unable to ensure destination parent exists for '${destination}'."
+    return 1
+  fi
 
   if snapshot_exists "${destination}@${basename}"; then
     log "Destination already has ${destination}@${basename}; skipping receive for this member."
@@ -416,6 +461,7 @@ send_member_snapshot() {
   if [[ "$(job_get job JOB_MODE)" == "scheduled" ]]; then
     latest_common=""
     find_latest_common_basename_for_member "$source_dataset" "$destination" "$(job_get job SNAPSHOT_PREFIX)" latest_common
+    log "Scheduled send base selection: source=${source_dataset} destination=${destination} requested_snapshot=${basename} latest_common=${latest_common:-none}"
     if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
       is_valid_snapshot_basename "$latest_common" || {
         fail_current_job_final "Base snapshot '${latest_common}' is invalid."
@@ -424,12 +470,26 @@ send_member_snapshot() {
       description="Incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
       run_pipeline_with_status "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" || return 1
     else
+      if (( destination_exists == 1 )) && dataset_has_any_snapshots "$destination"; then
+        failure_message="No common send checkpoint remains between '${source_dataset}' and '${destination}'. The destination dataset was purged so the next retry can reseed this backup from scratch. Review the preserved send log for diagnostics."
+        log "$failure_message"
+        if purge_destination_for_reseed "$destination"; then
+          job[LAST_ERROR]="$failure_message"
+          job[LAST_MESSAGE]="$failure_message"
+          preserve_failed_send_log_for_job job || true
+          fail_current_job "$failure_message"
+          return 1
+        fi
+        fail_current_job_final "No common send checkpoint remains between '${source_dataset}' and '${destination}', and automatic destination purge for reseed failed."
+        return 1
+      fi
       description="Full send ${snapshot} -> ${destination}"
       run_pipeline_with_status "$description" "" "$snapshot" "$destination" || return 1
     fi
   else
     latest_common=""
     find_latest_common_snapshot_for_target "$source_dataset" "$destination" "$basename" latest_common
+    log "Manual send base selection: source=${source_dataset} destination=${destination} requested_snapshot=${basename} latest_common=${latest_common:-none}"
     if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
       is_valid_snapshot_basename "$latest_common" || {
         fail_current_job_final "Base snapshot '${latest_common}' is invalid."
@@ -438,6 +498,11 @@ send_member_snapshot() {
       description="Manual incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
       run_pipeline_with_status "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" || return 1
     else
+      if (( destination_exists == 1 )) && dataset_has_any_snapshots "$destination"; then
+        failure_message="No common snapshot remains between '${source_dataset}' and '${destination}', and a destructive automatic reseed is not available for this manual send. Review the send log and re-seed the destination manually."
+        fail_current_job_final "$failure_message"
+        return 1
+      fi
       description="Manual full send ${snapshot} -> ${destination}"
       run_pipeline_with_status "$description" "" "$snapshot" "$destination" || return 1
     fi
@@ -447,17 +512,17 @@ send_member_snapshot() {
   snapshot_exists "${destination}@${basename}"
 }
 
-cleanup_previous_scheduled_checkpoint() {
-  local schedule_job_id source_root current_basename snap_name snap_epoch snap_base
+cleanup_source_checkpoints_for_verified_member() {
+  local schedule_job_id source_dataset current_basename snap_name snap_epoch snap_base
   local -A old_basenames=()
 
   schedule_job_id="$(job_get job SCHEDULE_JOB_ID)"
   current_basename="$(job_get job SOURCE_SNAPSHOT_NAME)"
   [[ -n "$current_basename" ]] || return 0
 
-  source_root="$(job_get job SOURCE_ROOT)"
-  [[ -n "$schedule_job_id" && -n "$source_root" ]] || return 0
-  dataset_exists "$source_root" || return 0
+  source_dataset="$(job_get job SOURCE_ROOT)"
+  [[ -n "$schedule_job_id" && -n "$source_dataset" ]] || return 0
+  dataset_exists "$source_dataset" || return 0
 
   while IFS=$'\t' read -r snap_name snap_epoch; do
     [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
@@ -467,7 +532,7 @@ cleanup_previous_scheduled_checkpoint() {
       local schedule_count=0 candidate_job_id
       if [[ "$snap_base" == "${SEND_SNAPSHOT_PREFIX}"* ]]; then
         for candidate_job_id in "${SCHEDULE_JOB_IDS[@]}"; do
-          [[ "${SCHEDULE_SOURCE_ROOT[$candidate_job_id]:-}" == "$source_root" ]] || continue
+          [[ "${SCHEDULE_SOURCE_ROOT[$candidate_job_id]:-}" == "$source_dataset" ]] || continue
           schedule_count=$((schedule_count + 1))
         done
         (( schedule_count == 1 )) || continue
@@ -476,19 +541,29 @@ cleanup_previous_scheduled_checkpoint() {
       fi
     fi
     old_basenames["$snap_base"]=1
-  done < <(zfs list -H -p -r -t snapshot -o name,creation "$source_root" 2>/dev/null || true)
+  done < <(zfs list -H -p -t snapshot -o name,creation "$source_dataset" 2>/dev/null || true)
 
   ((${#old_basenames[@]} > 0)) || return 0
 
-  set_job_progress "cleanup" "95" "Removing older source send checkpoints now that ${current_basename} is verified on the destination."
+  set_job_progress "cleanup" "95" "Removing older source send checkpoints for ${source_dataset} now that ${current_basename} is verified on the destination."
   for snap_base in "${!old_basenames[@]}"; do
     while IFS=$'\t' read -r snap_name snap_epoch; do
       [[ -n "$snap_name" ]] || continue
       [[ "${snap_name##*@}" == "$snap_base" ]] || continue
       log "Deleting source send checkpoint: $snap_name"
       zfs destroy "$snap_name"
-    done < <(zfs list -H -p -r -t snapshot -o name,creation "$source_root" 2>/dev/null || true)
+    done < <(zfs list -H -p -t snapshot -o name,creation "$source_dataset" 2>/dev/null || true)
   done
+}
+
+purge_destination_for_reseed() {
+  local destination="$1"
+
+  is_valid_dataset_name "$destination" || return 1
+  dataset_exists "$destination" || return 0
+
+  log "Purging destination dataset for automatic reseed: ${destination}"
+  zfs destroy -r "$destination"
 }
 
 run_child_jobs_have_failed() {
@@ -502,7 +577,7 @@ run_child_jobs_have_failed() {
     [[ "$(job_get sibling_job JOB_TYPE)" == "send" ]] || continue
     [[ "$(job_get sibling_job JOB_MODE)" == "scheduled" ]] || continue
     [[ "$(job_get sibling_job PARENT_RUN_ID)" == "$parent_run_id" ]] || continue
-    action="$(job_get sibling_job JOB_ACTION)"
+    action="$(effective_job_action sibling_job)"
     [[ "$action" == "send_member" ]] || continue
     state="$(job_get sibling_job STATE)"
     if [[ "$state" == "failed" ]]; then
@@ -526,7 +601,7 @@ run_child_jobs_still_active() {
     [[ "$(job_get sibling_job PARENT_RUN_ID)" == "$parent_run_id" ]] || continue
     job_id="$(job_get sibling_job JOB_ID)"
     [[ "$job_id" != "$CURRENT_JOB_ID" ]] || continue
-    action="$(job_get sibling_job JOB_ACTION)"
+    action="$(effective_job_action sibling_job)"
     [[ "$action" == "send_member" ]] || continue
     state="$(job_get sibling_job STATE)"
     if ! job_state_is_success "$state"; then
@@ -596,8 +671,7 @@ process_finalize_job() {
     return 2
   fi
 
-  cleanup_previous_scheduled_checkpoint || return 1
-  complete_job "Recursive scheduled send finished and previous checkpoint cleanup completed."
+  complete_job "Recursive scheduled send finished successfully."
   return 0
 }
 
@@ -661,7 +735,7 @@ process_send_job() {
   local mode action member_count index
   clear_send_cleanup_caches
   mode="$(job_get job JOB_MODE)"
-  action="$(job_get job JOB_ACTION)"
+  action="$(effective_job_action job)"
 
   case "$mode:$action" in
     scheduled:finalize)
@@ -717,6 +791,7 @@ process_send_job() {
   for ((index = 0; index < member_count; index++)); do
     send_member_snapshot "$index" "$member_count" || return 1
     if [[ "$mode:$action" == "scheduled:send_member" ]]; then
+      cleanup_source_checkpoints_for_verified_member || return 1
       set_job_progress "cleanup" "$((90 + (index * 5 / (member_count == 0 ? 1 : member_count))))" "Queueing zero-change cleanup for $(job_get job MEMBER_${index}_DESTINATION)."
       queue_schedule_zero_change_cleanup_for_dataset "$(job_get job SCHEDULE_JOB_ID)" "$(job_get job MEMBER_${index}_DESTINATION)" "$(job_get job SOURCE_SNAPSHOT_NAME)" || true
     fi
@@ -786,7 +861,7 @@ main() {
       continue
     fi
 
-    log "Processing send job $(job_get job JOB_ID) ($(job_get job JOB_MODE):$(job_get job JOB_ACTION))"
+    log "Processing send job $(job_get job JOB_ID) ($(job_get job JOB_MODE):$(effective_job_action job))"
     job[STATE]="running"
     # shellcheck disable=SC2034
     job[WORKER_PID]="$$"

@@ -93,7 +93,9 @@ ensure_runtime_layout() {
   ops_ensure_dir "$OPS_STATUS_DIR" || return 1
   ops_ensure_dir "$FAILED_SEND_LOGS_DIR" || return 1
   mkdir -p "$RUNTIME_DIR" "$SEND_WORKER_RUNTIME_DIR" "$DELETE_WORKER_RUNTIME_DIR" "$PREP_LOCKS_DIR" "$JOB_LOCKS_DIR" "$ACTIVE_SEND_DATASETS_DIR" "$(dirname "$LOG_FILE")" >/dev/null 2>&1 || true
-  find "$OPS_JOBS_DIR" -maxdepth 1 -type f -name '*.tmp.*' -exec rm -f {} \; >/dev/null 2>&1 || true
+  # Only reap clearly stale temp files. Removing every *.tmp.* file at worker startup can
+  # delete another process's in-flight job write and corrupt queue items.
+  find "$OPS_JOBS_DIR" -maxdepth 1 -type f -name '*.tmp.*' -mmin +60 -exec rm -f {} \; >/dev/null 2>&1 || true
   return 0
 }
 
@@ -1087,6 +1089,9 @@ run_pipeline_with_status() {
   local base_snapshot="$2"
   local snapshot="$3"
   local destination="$4"
+  local pipeline_rc=0
+  local send_rc=0
+  local receive_rc=0
 
   is_valid_snapshot_name "$snapshot" || {
     log "Refusing pipeline for invalid snapshot name: $snapshot"
@@ -1105,11 +1110,21 @@ run_pipeline_with_status() {
 
   log "$description"
   if [[ -n "$base_snapshot" ]]; then
-    if ! zfs send -I "$base_snapshot" "$snapshot" | zfs receive -uF "$destination"; then
+    zfs send -I "$base_snapshot" "$snapshot" | zfs receive -uF "$destination"
+    pipeline_rc=$?
+    send_rc=${PIPESTATUS[0]:-0}
+    receive_rc=${PIPESTATUS[1]:-0}
+    if (( pipeline_rc != 0 )); then
+      log "Send pipeline failed: mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} receive_exit=${receive_rc}"
       return 1
     fi
   else
-    if ! zfs send "$snapshot" | zfs receive -uF "$destination"; then
+    zfs send "$snapshot" | zfs receive -uF "$destination"
+    pipeline_rc=$?
+    send_rc=${PIPESTATUS[0]:-0}
+    receive_rc=${PIPESTATUS[1]:-0}
+    if (( pipeline_rc != 0 )); then
+      log "Send pipeline failed: mode=full snapshot=${snapshot} destination=${destination} send_exit=${send_rc} receive_exit=${receive_rc}"
       return 1
     fi
   fi
@@ -1123,6 +1138,25 @@ snapshot_exists() {
 
 dataset_exists() {
   zfs list -H -o name "$1" >/dev/null 2>&1
+}
+
+dataset_type() {
+  local value
+  value="$(zfs list -H -o type "$1" 2>/dev/null || true)"
+  value="$(trim "$value")"
+  printf '%s' "$value"
+}
+
+dataset_has_any_snapshots() {
+  local dataset="$1"
+  local snapshot_name
+
+  while IFS= read -r snapshot_name; do
+    [[ "$snapshot_name" == "${dataset}@"* ]] || continue
+    return 0
+  done < <(zfs list -H -t snapshot -o name -r "$dataset" 2>/dev/null || true)
+
+  return 1
 }
 
 zfs_get_snapshot_props() {

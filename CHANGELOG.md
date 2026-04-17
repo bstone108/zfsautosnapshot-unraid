@@ -5,6 +5,13 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.16.18 (Testing Branch Only)
+
+- Fixed a `ZFS Send` queue write race where worker startup could delete another process's in-flight `.tmp` job file, which could corrupt child queue items, strip their action fields, and cause repeated blank-action retries.
+- Fixed recursive `ZFS Send` source checkpoint cleanup so each child dataset now deletes its older source-side send checkpoints only after that exact child checkpoint has been verified on the destination, instead of advancing the whole source tree and breaking lagging children like `foundryvtt`.
+- Added automatic recovery for the broken-chain backup case: if a scheduled child send finds no common checkpoint but the destination dataset still has snapshots, the worker now preserves the log, purges that destination dataset for a clean reseed, and fails the current attempt so the normal retry path can rebuild the backup from scratch.
+- Hardened scheduled child-job handling so corrupted or legacy queue rows that are missing `JOB_ACTION` are inferred as child send items instead of being misread as a new prepare phase, which should stop cases like the repeated `element-web` blank-action failure loop.
+
 ### 2026.04.16.17 (Testing Branch Only)
 
 - Reworked `ZFS Send` cleanup planning so destination retention and low-space cleanup now batch snapshot metadata and active delete-job checks in memory instead of repeatedly rescanning ZFS and the queue for every candidate snapshot. This should make very large send-managed snapshot sets much less painful to process.
