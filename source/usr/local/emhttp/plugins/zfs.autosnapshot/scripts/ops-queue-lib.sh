@@ -1,5 +1,14 @@
 #!/bin/bash
 
+ZFSAS_LOG_HELPER="/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/log-maintenance-lib.sh"
+if [[ -r "$ZFSAS_LOG_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$ZFSAS_LOG_HELPER"
+else
+  zfsas_log_sanitize_text() { printf '%s' "$1"; }
+  zfsas_log_prepare_for_append() { return 0; }
+fi
+
 PLUGIN_NAME="zfs.autosnapshot"
 CONFIG_DIR="/boot/config/plugins/${PLUGIN_NAME}"
 SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
@@ -24,6 +33,9 @@ ACTIVE_SEND_DATASETS_DIR="${RUNTIME_DIR}/active-send-datasets"
 AUTOSNAPSHOT_RUNTIME_DIR="/var/run/zfs-autosnapshot"
 AUTOSNAPSHOT_ACTIVE_FILE="${AUTOSNAPSHOT_RUNTIME_DIR}/zfs_autosnapshot.active"
 LOG_FILE="/var/log/zfs_autosnapshot_send.log"
+LOG_ARCHIVE_FILE="/var/log/zfs_autosnapshot_send.archive.log"
+SEND_LOG_MAX_BYTES="${SEND_LOG_MAX_BYTES:-2097152}"
+SEND_LOG_ARCHIVE_MAX_BYTES="${SEND_LOG_ARCHIVE_MAX_BYTES:-4194304}"
 
 DEFAULT_SEND_SNAPSHOT_PREFIX="zfs-send-"
 DEFAULT_SEND_MAX_PARALLEL="1"
@@ -73,7 +85,7 @@ declare -A SEND_EPOCH_DAY_KEY_CACHE=()
 declare -A SEND_EPOCH_WEEK_KEY_CACHE=()
 
 log() {
-  printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$*"
+  printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$(zfsas_log_sanitize_text "$*")"
 }
 
 find_mdcmd() {
@@ -1162,6 +1174,20 @@ send_worker_slot_available() {
 
 delete_worker_running() {
   delete_queue_daemon_running
+}
+
+shared_send_log_safe_to_compact() {
+  local count
+
+  count="$(send_worker_lock_count)"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  (( count == 0 )) || return 1
+  ! delete_worker_running
+}
+
+compact_shared_send_log_if_safe() {
+  shared_send_log_safe_to_compact || return 0
+  zfsas_log_prepare_for_append "$LOG_FILE" "$LOG_ARCHIVE_FILE" "$SEND_LOG_MAX_BYTES" 800 20 "$SEND_LOG_ARCHIVE_MAX_BYTES"
 }
 
 prep_lock_dir_for_pool() {

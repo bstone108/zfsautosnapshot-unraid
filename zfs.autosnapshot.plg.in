@@ -2,8 +2,8 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Simplified the `ZFS Send` delete worker so it no longer re-reads full snapshot identity metadata before every queued delete. It now only checks that the target is still an exact snapshot path, runs `zfs destroy`, retries a couple of times on transient errors, and then logs and drops that queue item if the delete still fails.
-- This should remove a big chunk of the per-item pre-delete overhead on slow pools while still keeping the worker from ever turning a queued snapshot delete into a whole-dataset destroy.
+- Reworked plugin logging so active logs stay detailed, older routine chatter is compacted into archived history, and busy tools no longer have to choose between “too little history” and “fill RAM forever.”
+- Moved the Recovery Tools and Dataset Migrator runtime logs into RAM-backed `/var/log`, expanded downloadable log history, and toned down delete-queue success spam so failures stand out more clearly on busy systems.
 
   </CHANGES>
 

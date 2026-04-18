@@ -2,12 +2,22 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
+ZFSAS_LOG_HELPER="/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/log-maintenance-lib.sh"
+if [[ -r "$ZFSAS_LOG_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$ZFSAS_LOG_HELPER"
+else
+  zfsas_log_sanitize_text() { printf '%s' "$1"; }
+  zfsas_log_prepare_for_append() { return 0; }
+fi
+
 PLUGIN_ROOT="/boot/config/plugins/zfs.autosnapshot/dataset_migrator"
 LOGS_DIR="${PLUGIN_ROOT}/logs"
 STATUS_FILE="${PLUGIN_ROOT}/status.env"
 FOLDERS_FILE="${PLUGIN_ROOT}/folders.tsv"
 CONTAINERS_FILE="${PLUGIN_ROOT}/containers.tsv"
-LOG_FILE="${PLUGIN_ROOT}/current.log"
+LOG_FILE="/var/log/zfs_autosnapshot_migrate_datasets.log"
+LOG_ARCHIVE_FILE="/var/log/zfs_autosnapshot_migrate_datasets.archive.log"
 LOCK_FILE="/var/run/zfs-autosnapshot-migrator/migrator.lock"
 SPACE_RECHECK_SECONDS=300
 RESTART_RETRY_DELAY=300
@@ -123,7 +133,7 @@ list_remove_word() {
 }
 
 log() {
-  printf '[%s] %s\n' "$(date '+%F %T')" "$*"
+  printf '[%s] %s\n' "$(date '+%F %T')" "$(zfsas_log_sanitize_text "$*")"
 }
 
 kv_escape() {
@@ -1301,9 +1311,7 @@ ACTIVE_DATASET="$DATASET"
 ensure_dir "$PLUGIN_ROOT"
 ensure_dir "$LOGS_DIR"
 ensure_dir "$(dirname "$LOCK_FILE")"
-: > "$LOG_FILE"
-chmod 0640 "$LOG_FILE" >/dev/null 2>&1 || true
-apply_owner "$LOG_FILE"
+zfsas_log_prepare_for_append "$LOG_FILE" "$LOG_ARCHIVE_FILE" 1048576 600 20 2097152 || true
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 exec 9>"$LOCK_FILE"

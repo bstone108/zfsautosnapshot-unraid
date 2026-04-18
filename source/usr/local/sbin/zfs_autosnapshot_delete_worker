@@ -19,6 +19,11 @@ QUEUE_ACTIVE_COUNT=0
 QUEUE_RUNNING_COUNT=0
 QUEUE_RETRY_WAIT_COUNT=0
 QUEUE_QUEUED_COUNT=0
+DELETE_SUCCESS_COUNT=0
+DELETE_PROGRESS_LOG_INTERVAL_ITEMS="${DELETE_PROGRESS_LOG_INTERVAL_ITEMS:-25}"
+DELETE_PROGRESS_LOG_INTERVAL_SECONDS="${DELETE_PROGRESS_LOG_INTERVAL_SECONDS:-15}"
+DELETE_LAST_PROGRESS_LOG_EPOCH=0
+DELETE_LAST_SUCCESS_MESSAGE=""
 declare -A QUEUE_INDEX_BY_ID=()
 declare -A QUEUE_STATE=()
 declare -A QUEUE_RETRY_AT=()
@@ -453,8 +458,10 @@ wait_for_unraid_array_to_be_actionable_for_delete_queue() {
 
 complete_delete_job() {
   local message="$1"
-  log "$message"
   queue_remove_job "$CURRENT_JOB_ID"
+  DELETE_SUCCESS_COUNT=$((DELETE_SUCCESS_COUNT + 1))
+  DELETE_LAST_SUCCESS_MESSAGE="$message"
+  log_delete_progress_if_needed
 }
 
 skip_delete_job() {
@@ -483,6 +490,21 @@ retry_delete_job() {
   queue_store_job_assoc "$CURRENT_JOB_ID" job
   queue_move_job_to_tail "$CURRENT_JOB_ID" || true
   log "$message"
+}
+
+log_delete_progress_if_needed() {
+  local now_epoch pending_count
+
+  now_epoch="$(date +%s)"
+  pending_count=$((QUEUE_QUEUED_COUNT + QUEUE_RETRY_WAIT_COUNT))
+
+  if (( DELETE_SUCCESS_COUNT == 1 )) \
+    || (( DELETE_PROGRESS_LOG_INTERVAL_ITEMS > 0 && DELETE_SUCCESS_COUNT % DELETE_PROGRESS_LOG_INTERVAL_ITEMS == 0 )) \
+    || (( DELETE_LAST_PROGRESS_LOG_EPOCH == 0 )) \
+    || (( now_epoch - DELETE_LAST_PROGRESS_LOG_EPOCH >= DELETE_PROGRESS_LOG_INTERVAL_SECONDS )); then
+    log "Delete queue progress: deleted=${DELETE_SUCCESS_COUNT} pending=${pending_count} retry_wait=${QUEUE_RETRY_WAIT_COUNT} running=${QUEUE_RUNNING_COUNT} last='${DELETE_LAST_SUCCESS_MESSAGE}'"
+    DELETE_LAST_PROGRESS_LOG_EPOCH="$now_epoch"
+  fi
 }
 
 snapshot_delete_target_is_safe() {
@@ -534,7 +556,6 @@ process_send_checkpoint_delete() {
 
   [[ -n "$schedule_job_id" ]] || schedule_job_id="$(parse_send_checkpoint_schedule_id "$basename" 2>/dev/null || true)"
   if [[ -z "$schedule_job_id" || -z "${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}" ]]; then
-    log "Deleting send-managed snapshot ${snapshot}."
     delete_single_snapshot "$snapshot" || return $?
     complete_delete_job "Deleted send-managed snapshot ${snapshot}."
     return 0
@@ -560,17 +581,16 @@ process_send_checkpoint_delete() {
     dataset_exists "$source_root" && delete_checkpoint_basename_across_tree "$source_root" "$basename" "$prefix" "source"
     dataset_exists "$dest_root" && delete_checkpoint_basename_across_tree "$dest_root" "$basename" "$prefix" "destination"
     complete_delete_job "Deleted scheduled-send checkpoint ${basename} across its source and destination trees."
+    log "Deleted scheduled-send checkpoint ${basename} across its source and destination trees."
     return 0
   fi
 
-  log "Deleting snapshot ${snapshot}."
   delete_single_snapshot "$snapshot" || return $?
   complete_delete_job "Deleted snapshot ${snapshot}."
 }
 
 process_standard_delete() {
   local snapshot="$1"
-  log "Deleting snapshot ${snapshot}."
   delete_single_snapshot "$snapshot" || return $?
   complete_delete_job "Deleted snapshot ${snapshot}."
 }
@@ -713,7 +733,7 @@ main() {
     sleep 1
   done
 
-  log "Delete daemon $$ finished"
+  log "Delete daemon $$ finished after processing ${DELETE_SUCCESS_COUNT} snapshot delete(s)"
 }
 
 main "$@"

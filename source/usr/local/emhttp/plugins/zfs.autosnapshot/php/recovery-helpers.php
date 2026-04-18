@@ -27,6 +27,11 @@ function zfsas_recovery_scans_dir()
     return zfsas_recovery_plugin_dir() . '/scans';
 }
 
+function zfsas_recovery_logs_dir()
+{
+    return '/var/log/zfs_autosnapshot_recovery';
+}
+
 function zfsas_recovery_apply_owner($path)
 {
     @chown($path, 'nobody');
@@ -46,7 +51,8 @@ function zfsas_recovery_ensure_dir($path)
 function zfsas_recovery_ensure_storage()
 {
     return zfsas_recovery_ensure_dir(zfsas_recovery_plugin_dir())
-        && zfsas_recovery_ensure_dir(zfsas_recovery_scans_dir());
+        && zfsas_recovery_ensure_dir(zfsas_recovery_scans_dir())
+        && zfsas_recovery_ensure_dir(zfsas_recovery_logs_dir());
 }
 
 function zfsas_recovery_dataset_key($dataset)
@@ -57,6 +63,11 @@ function zfsas_recovery_dataset_key($dataset)
 function zfsas_recovery_scan_status_path($dataset)
 {
     return zfsas_recovery_scans_dir() . '/' . zfsas_recovery_dataset_key($dataset) . '.json';
+}
+
+function zfsas_recovery_log_path($dataset)
+{
+    return zfsas_recovery_logs_dir() . '/' . zfsas_recovery_dataset_key($dataset) . '.log';
 }
 
 function zfsas_recovery_read_json_file($path)
@@ -290,7 +301,7 @@ function zfsas_recovery_start_scan($dataset, &$error = null)
         return false;
     }
 
-    $logPath = zfsas_recovery_scans_dir() . '/' . zfsas_recovery_dataset_key($dataset) . '.log';
+    $logPath = zfsas_recovery_log_path($dataset);
     $command = 'nohup ' . escapeshellarg($script)
         . ' --dataset ' . escapeshellarg($dataset)
         . ' >> ' . escapeshellarg($logPath)

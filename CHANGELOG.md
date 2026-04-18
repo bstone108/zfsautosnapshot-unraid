@@ -5,6 +5,14 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.18.01 (Testing Branch Only)
+
+- Reworked plugin logging so the main autosnapshot log, shared `ZFS Send` log, Snapshot Manager log, Recovery scan logs, and Dataset Migrator log now keep a detailed current window plus a condensed archived history instead of just growing forever or being bluntly thrown away.
+- Moved the Recovery scan and Dataset Migrator runtime logs out of the plugin config folder and into RAM-backed `/var/log`, which keeps busy diagnostic logging off the Unraid flash device while still letting the UI read the current log cleanly.
+- Improved `ZFS Send` delete-daemon logging so failures still log in detail, but large successful delete backlogs now report periodic progress instead of spamming one success line per snapshot.
+- Expanded log downloads so the autosnapshot export now includes the archived debug log, and the shared send log download includes the archived send log when there is no preserved per-failed-job log available.
+- Added sanitize-by-default shell log output for obvious secret-like fields such as passwords, tokens, secrets, API keys, bearer tokens, and similar key-value credentials, even though the plugin is not expected to log sensitive material during normal operation.
+
 ### 2026.04.17.09 (Testing Branch Only)
 
 - Fixed a `ZFS Send` delete-queue restart bug on upgraded systems where the queue kicker could miss a real backlog if the runtime delete state file was still in the older legacy `JOB` format. Upgraded boxes now recognize that legacy file as real pending work, start the delete daemon, and let the new worker import it into the lighter in-memory runtime model automatically.

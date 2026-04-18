@@ -91,6 +91,7 @@ function zfsas_send_log_stream_text($path)
 $jobId = trim((string) ($_GET['job_id'] ?? ''));
 $preservedPath = ($jobId !== '') ? zfsas_ops_failed_send_log_path($jobId) : '';
 $sharedPath = zfsas_ops_shared_send_log_path();
+$sharedArchivePath = zfsas_ops_shared_send_log_archive_path();
 
 $downloadName = 'zfs_autosnapshot_send.log';
 if ($jobId !== '') {
@@ -125,6 +126,12 @@ if ($jobId !== '' && is_file($preservedPath)) {
 
 if ($jobId !== '') {
     echo "No preserved failure log exists for this job yet. Falling back to the current shared send log.\n\n";
+}
+
+if (is_file($sharedArchivePath)) {
+    echo "===== Archived Shared Send Log =====\n";
+    zfsas_send_log_stream_text($sharedArchivePath);
+    echo "\n";
 }
 
 echo "===== Current Shared Send Log =====\n";

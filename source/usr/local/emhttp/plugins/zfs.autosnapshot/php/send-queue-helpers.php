@@ -57,6 +57,11 @@ function zfsas_ops_shared_send_log_path()
     return '/var/log/zfs_autosnapshot_send.log';
 }
 
+function zfsas_ops_shared_send_log_archive_path()
+{
+    return '/var/log/zfs_autosnapshot_send.archive.log';
+}
+
 function zfsas_ops_sanitize_job_id_for_path($jobId)
 {
     $jobId = (string) $jobId;

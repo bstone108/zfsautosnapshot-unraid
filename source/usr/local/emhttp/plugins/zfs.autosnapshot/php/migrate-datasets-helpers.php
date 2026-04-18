@@ -39,7 +39,12 @@ function zfsas_migrate_containers_file()
 
 function zfsas_migrate_log_file()
 {
-    return zfsas_migrate_plugin_dir() . '/current.log';
+    return '/var/log/zfs_autosnapshot_migrate_datasets.log';
+}
+
+function zfsas_migrate_log_archive_file()
+{
+    return '/var/log/zfs_autosnapshot_migrate_datasets.archive.log';
 }
 
 function zfsas_migrate_worker_script()

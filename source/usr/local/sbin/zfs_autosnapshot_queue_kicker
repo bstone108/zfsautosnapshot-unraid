@@ -74,6 +74,7 @@ main() {
   require_numeric_in_range "SEND_MAX_PARALLEL" "$SEND_MAX_PARALLEL" 1 8 || SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
   parse_send_jobs_config
 
+  compact_shared_send_log_if_safe || true
   exec >> "$LOG_FILE" 2>&1
   log "Queue kicker $$ starting"
 
