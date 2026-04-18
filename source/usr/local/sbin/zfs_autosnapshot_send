@@ -1,0 +1,15 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+KICKER="/usr/local/sbin/zfs_autosnapshot_queue_kicker"
+LOG_FILE="/var/log/zfs_autosnapshot_send.log"
+
+if [[ ! -x "$KICKER" ]]; then
+  echo "Queue kicker is missing or not executable: $KICKER" >&2
+  exit 1
+fi
+
+exec >> "$LOG_FILE" 2>&1
+
+echo "$(date +'%Y-%m-%d %H:%M:%S %Z') Compatibility wrapper invoked for zfs_autosnapshot_send; forwarding to queue kicker."
+exec "$KICKER" --manual-now "$@"

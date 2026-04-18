@@ -1,0 +1,252 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+ZFSAS_LOG_HELPER="/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/log-maintenance-lib.sh"
+if [[ -r "$ZFSAS_LOG_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$ZFSAS_LOG_HELPER"
+else
+  zfsas_log_sanitize_text() { printf '%s' "$1"; }
+  zfsas_log_prepare_for_append() { return 0; }
+fi
+
+PLUGIN_ROOT="/boot/config/plugins/zfs.autosnapshot/recovery_tools"
+SCANS_DIR="${PLUGIN_ROOT}/scans"
+LOGS_DIR="/var/log/zfs_autosnapshot_recovery"
+DATASET=""
+STATUS_FILE=""
+RESULTS_FILE=""
+LOG_FILE=""
+LOG_ARCHIVE_FILE=""
+STOP_FILE=""
+STATE="queued"
+STARTED_EPOCH="$(date +%s)"
+MOUNTPOINT=""
+TOTAL_FILES=0
+SCANNED_FILES=0
+UNREADABLE_COUNT=0
+LAST_PATH=""
+LAST_ERROR=""
+PID="$$"
+COMPLETED=0
+CURRENT_DD_PID=""
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+apply_owner() {
+  local path="$1"
+  chown nobody "$path" >/dev/null 2>&1 || true
+  chgrp users "$path" >/dev/null 2>&1 || true
+}
+
+log_message() {
+  printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$(zfsas_log_sanitize_text "$*")"
+}
+
+ensure_dir() {
+  local path="$1"
+  mkdir -p "$path"
+  chmod 0775 "$path" >/dev/null 2>&1 || true
+  apply_owner "$path"
+}
+
+status_path_for_dataset() {
+  local dataset="$1"
+  local key
+  key="$(dataset_key "$dataset")"
+  printf '%s/%s.json' "$SCANS_DIR" "$key"
+}
+
+results_path_for_dataset() {
+  local dataset="$1"
+  local key
+  key="$(dataset_key "$dataset")"
+  printf '%s/%s-results.txt' "$SCANS_DIR" "$key"
+}
+
+log_path_for_dataset() {
+  local dataset="$1"
+  local key
+  key="$(dataset_key "$dataset")"
+  printf '%s/%s.log' "$LOGS_DIR" "$key"
+}
+
+log_archive_path_for_dataset() {
+  local dataset="$1"
+  local key
+  key="$(dataset_key "$dataset")"
+  printf '%s/%s.archive.log' "$LOGS_DIR" "$key"
+}
+
+stop_path_for_dataset() {
+  local dataset="$1"
+  local key
+  key="$(dataset_key "$dataset")"
+  printf '%s/%s.stop' "$SCANS_DIR" "$key"
+}
+
+dataset_key() {
+  local dataset="$1"
+  if command -v sha1sum >/dev/null 2>&1; then
+    printf '%s' "$dataset" | sha1sum | awk '{print substr($1,1,16)}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$dataset" | shasum | awk '{print substr($1,1,16)}'
+    return 0
+  fi
+  printf '%s' "$dataset" | md5sum | awk '{print substr($1,1,16)}'
+}
+
+write_status() {
+  local state="$1"
+  local now_epoch ended_field="null"
+  now_epoch="$(date +%s)"
+  if [[ "$state" == "complete" || "$state" == "failed" ]]; then
+    ended_field="$now_epoch"
+  fi
+
+  cat > "$STATUS_FILE" <<JSON
+{
+  "dataset": "$(json_escape "$DATASET")",
+  "mountpoint": "$(json_escape "$MOUNTPOINT")",
+  "state": "$(json_escape "$state")",
+  "pid": $PID,
+  "startedEpoch": $STARTED_EPOCH,
+  "updatedEpoch": $now_epoch,
+  "endedEpoch": $ended_field,
+  "totalFiles": $TOTAL_FILES,
+  "scannedFiles": $SCANNED_FILES,
+  "unreadableCount": $UNREADABLE_COUNT,
+  "lastPath": "$(json_escape "$LAST_PATH")",
+  "lastError": "$(json_escape "$LAST_ERROR")",
+  "stopRequested": $([[ -f "$STOP_FILE" ]] && echo true || echo false),
+  "resultsFile": "$(json_escape "$RESULTS_FILE")",
+  "logFile": "$(json_escape "$LOG_FILE")"
+}
+JSON
+  chmod 0640 "$STATUS_FILE" >/dev/null 2>&1 || true
+  apply_owner "$STATUS_FILE"
+}
+
+fail_with() {
+  LAST_ERROR="$1"
+  STATE="failed"
+  write_status "$STATE"
+  echo "$LAST_ERROR" >&2
+  exit 1
+}
+
+cleanup() {
+  local exit_code="$?"
+  if [[ -n "${CURRENT_DD_PID:-}" ]]; then
+    kill "$CURRENT_DD_PID" >/dev/null 2>&1 || true
+    wait "$CURRENT_DD_PID" >/dev/null 2>&1 || true
+    CURRENT_DD_PID=""
+  fi
+  rm -f "$STOP_FILE" >/dev/null 2>&1 || true
+  if (( COMPLETED == 1 )); then
+    exit 0
+  fi
+
+  if (( exit_code == 0 )) && [[ "$STATE" != "failed" ]]; then
+    STATE="complete"
+    write_status "$STATE"
+    COMPLETED=1
+    exit 0
+  fi
+
+  if [[ "$STATE" != "failed" ]]; then
+    LAST_ERROR="Recovery diagnostic scan stopped unexpectedly."
+    STATE="failed"
+    write_status "$STATE"
+  fi
+  exit "$exit_code"
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --dataset)
+      shift
+      DATASET="$(trim "${1:-}")"
+      ;;
+    *)
+      ;;
+  esac
+  shift || true
+done
+
+[[ -n "$DATASET" ]] || {
+  echo "Dataset is required." >&2
+  exit 1
+}
+
+ensure_dir "$PLUGIN_ROOT"
+ensure_dir "$SCANS_DIR"
+ensure_dir "$LOGS_DIR"
+STATUS_FILE="$(status_path_for_dataset "$DATASET")"
+RESULTS_FILE="$(results_path_for_dataset "$DATASET")"
+LOG_FILE="$(log_path_for_dataset "$DATASET")"
+LOG_ARCHIVE_FILE="$(log_archive_path_for_dataset "$DATASET")"
+STOP_FILE="$(stop_path_for_dataset "$DATASET")"
+zfsas_log_prepare_for_append "$LOG_FILE" "$LOG_ARCHIVE_FILE" 524288 400 20 1048576 || true
+: > "$RESULTS_FILE"
+chmod 0640 "$RESULTS_FILE" >/dev/null 2>&1 || true
+apply_owner "$RESULTS_FILE"
+rm -f "$STOP_FILE" >/dev/null 2>&1 || true
+
+trap cleanup EXIT INT TERM
+
+MOUNTPOINT="$(zfs get -H -o value mountpoint "$DATASET" 2>/dev/null | head -n 1 || true)"
+[[ -n "$MOUNTPOINT" && "$MOUNTPOINT" != "legacy" && "$MOUNTPOINT" != "none" ]] || fail_with "Dataset $DATASET does not have a readable mounted filesystem path for diagnostic scanning."
+[[ -d "$MOUNTPOINT" ]] || fail_with "Mountpoint $MOUNTPOINT does not exist or is not a directory."
+
+STATE="running"
+TOTAL_FILES="$(find "$MOUNTPOINT" -xdev -type f 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$TOTAL_FILES" =~ ^[0-9]+$ ]] || TOTAL_FILES=0
+write_status "$STATE"
+
+log_message "Starting recovery readability scan for $DATASET at $MOUNTPOINT"
+
+while IFS= read -r -d '' file_path; do
+  if [[ -f "$STOP_FILE" ]]; then
+    log_message "Stop requested for $DATASET; ending recovery readability scan."
+    break
+  fi
+
+  LAST_PATH="$file_path"
+  SCANNED_FILES=$((SCANNED_FILES + 1))
+
+  dd if="$file_path" of=/dev/null bs=1M status=none 2>> "$LOG_FILE" &
+  CURRENT_DD_PID="$!"
+  if ! wait "$CURRENT_DD_PID"; then
+    UNREADABLE_COUNT=$((UNREADABLE_COUNT + 1))
+    printf '%s\n' "$file_path" >> "$RESULTS_FILE"
+  fi
+  CURRENT_DD_PID=""
+
+  if (( SCANNED_FILES == 1 || SCANNED_FILES % 25 == 0 )); then
+    write_status "$STATE"
+  fi
+done < <(find "$MOUNTPOINT" -xdev -type f -print0 2>> "$LOG_FILE")
+
+STATE="complete"
+write_status "$STATE"
+COMPLETED=1
+
+log_message "Recovery readability scan finished for $DATASET. scanned=$SCANNED_FILES unreadable=$UNREADABLE_COUNT"

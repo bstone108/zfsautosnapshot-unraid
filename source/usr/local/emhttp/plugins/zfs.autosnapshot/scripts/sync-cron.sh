@@ -4,8 +4,10 @@ set -euo pipefail
 PLUGIN_NAME="zfs.autosnapshot"
 CONFIG_DIR="/boot/config/plugins/${PLUGIN_NAME}"
 CONFIG_FILE="${CONFIG_DIR}/zfs_autosnapshot.conf"
+SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
 CRON_FILE="/etc/cron.d/zfs_autosnapshot"
 RUN_CMD="/usr/local/sbin/zfs_autosnapshot"
+QUEUE_KICKER_CMD="/usr/local/sbin/zfs_autosnapshot_queue_kicker"
 
 SCHEDULE_MODE="disabled"
 SCHEDULE_EVERY_MINUTES="15"
@@ -248,33 +250,44 @@ build_cron_schedule() {
 mkdir -p "$CONFIG_DIR"
 
 load_config_file "$CONFIG_FILE"
+load_config_file "$SEND_CONFIG_FILE"
 
 CRON_SCHEDULE_EFFECTIVE="$(build_cron_schedule)" || exit 1
 
-if [[ -z "$CRON_SCHEDULE_EFFECTIVE" ]]; then
-	rm -f "$CRON_FILE"
-	refresh_cron_runtime
-	echo "Cron schedule disabled."
-	exit 0
+if [[ -n "$CRON_SCHEDULE_EFFECTIVE" ]]; then
+	if ! validate_cron_5_fields "$CRON_SCHEDULE_EFFECTIVE"; then
+		echo "Invalid cron schedule '$CRON_SCHEDULE_EFFECTIVE' (expected 5 fields)." >&2
+		exit 1
+	fi
+
+	if ! validate_cron_safe_chars "$CRON_SCHEDULE_EFFECTIVE"; then
+		echo "Invalid cron schedule '$CRON_SCHEDULE_EFFECTIVE' (contains unsupported characters)." >&2
+		exit 1
+	fi
 fi
 
-if ! validate_cron_5_fields "$CRON_SCHEDULE_EFFECTIVE"; then
-	echo "Invalid cron schedule '$CRON_SCHEDULE_EFFECTIVE' (expected 5 fields)." >&2
-	exit 1
-fi
-
-if ! validate_cron_safe_chars "$CRON_SCHEDULE_EFFECTIVE"; then
-	echo "Invalid cron schedule '$CRON_SCHEDULE_EFFECTIVE' (contains unsupported characters)." >&2
-	exit 1
-fi
+CRON_FILE_TMP="$(mktemp "${CRON_FILE}.tmp.XXXXXX")"
+cleanup_cron_tmp() {
+	rm -f "$CRON_FILE_TMP" >/dev/null 2>&1 || true
+}
+trap cleanup_cron_tmp EXIT
 
 {
 	echo "# Managed by ${PLUGIN_NAME}; edit ${CONFIG_FILE}"
 	# Unraid uses BusyBox crond format in /etc/cron.d: no username column.
-	echo "${CRON_SCHEDULE_EFFECTIVE} ${RUN_CMD} >> /var/log/zfs_autosnapshot.log 2>&1"
-} >"$CRON_FILE"
+	if [[ -n "$CRON_SCHEDULE_EFFECTIVE" ]]; then
+		echo "${CRON_SCHEDULE_EFFECTIVE} ${RUN_CMD} >> /var/log/zfs_autosnapshot.log 2>&1"
+	fi
+	echo "* * * * * ${QUEUE_KICKER_CMD} >> /var/log/zfs_autosnapshot_send.log 2>&1"
+} >"$CRON_FILE_TMP"
 
-chmod 0644 "$CRON_FILE"
+chmod 0644 "$CRON_FILE_TMP"
+mv "$CRON_FILE_TMP" "$CRON_FILE"
+trap - EXIT
 refresh_cron_runtime
 
-echo "Cron schedule applied: $CRON_SCHEDULE_EFFECTIVE"
+if [[ -n "$CRON_SCHEDULE_EFFECTIVE" ]]; then
+	echo "Cron schedule applied: $CRON_SCHEDULE_EFFECTIVE (queue kicker runs every minute)"
+else
+	echo "Main autosnapshot schedule disabled; queue kicker still runs every minute for send/delete queue processing."
+fi

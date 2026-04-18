@@ -1,0 +1,994 @@
+#!/bin/bash
+set -Eeuo pipefail
+# shellcheck disable=SC2034
+
+# shellcheck source=/dev/null
+source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
+
+WORKER_LOCK_DIR="${SEND_WORKER_RUNTIME_DIR}/worker-$$.lockdir"
+CURRENT_JOB_ID=""
+CURRENT_JOB_PATH=""
+CURRENT_ACTIVE_DATASETS_FILE=""
+CURRENT_PREP_POOL=""
+
+cleanup() {
+  local exit_code="$?"
+  if [[ -n "$CURRENT_JOB_ID" ]]; then
+    release_job_claim "$CURRENT_JOB_ID"
+  fi
+  if [[ -n "$CURRENT_PREP_POOL" ]]; then
+    release_pool_prep_lock "$CURRENT_PREP_POOL"
+    CURRENT_PREP_POOL=""
+  fi
+  clear_active_send_datasets
+  rm -rf "$WORKER_LOCK_DIR" >/dev/null 2>&1 || true
+  exit "$exit_code"
+}
+
+persist_job() {
+  job_write "$CURRENT_JOB_PATH" job
+}
+
+set_job_progress() {
+  local phase="$1"
+  local percent="$2"
+  local message="$3"
+  job[STATE]="running"
+  job[PHASE]="$phase"
+  job[PROGRESS_PERCENT]="$percent"
+  job[LAST_MESSAGE]="$message"
+  job[WORKER_PID]="$$"
+  persist_job
+}
+
+complete_job() {
+  local message="$1"
+  job[STATE]="complete"
+  job[PHASE]="complete"
+  job[PROGRESS_PERCENT]="100"
+  job[LAST_MESSAGE]="$message"
+  job[LAST_ERROR]=""
+  job[WORKER_PID]=""
+  if [[ "$(job_get job JOB_MODE)" == "scheduled" ]] && job_completes_schedule_window job; then
+    record_completed_schedule_window "$(job_get job SCHEDULE_JOB_ID)" "$(job_get job WINDOW_KEY)" || true
+  fi
+  set_job_success_purge_after job
+  delete_preserved_failed_send_log "$(job_get job JOB_ID)" >/dev/null 2>&1 || true
+  persist_job
+}
+
+skip_job() {
+  local message="$1"
+  job[STATE]="skipped"
+  job[PHASE]="complete"
+  job[PROGRESS_PERCENT]="100"
+  job[LAST_MESSAGE]="$message"
+  job[LAST_ERROR]=""
+  job[WORKER_PID]=""
+  set_job_success_purge_after job
+  delete_preserved_failed_send_log "$(job_get job JOB_ID)" >/dev/null 2>&1 || true
+  persist_job
+}
+
+fail_current_job() {
+  local message="$1"
+  local now_epoch
+  now_epoch="$(date +%s)"
+  mark_job_failed_or_retry job "$message" "$now_epoch"
+  persist_job || true
+}
+
+fail_current_job_final() {
+  local message="$1"
+  job[STATE]="failed"
+  job[PHASE]="failed"
+  job[RETRY_AT]="0"
+  job[PROGRESS_PERCENT]="100"
+  job[WORKER_PID]=""
+  job[LAST_ERROR]="$message"
+  job[LAST_MESSAGE]="$message"
+  preserve_failed_send_log_for_job job || true
+  persist_job || true
+}
+
+defer_current_job() {
+  local message="$1"
+  local delay="${2:-15}"
+  local now_epoch
+  now_epoch="$(date +%s)"
+  job[STATE]="retry_wait"
+  job[PHASE]="retry_wait"
+  job[RETRY_AT]="$((now_epoch + delay))"
+  job[WORKER_PID]=""
+  job[LAST_MESSAGE]="$message"
+  persist_job
+}
+
+release_current_prep_pool_lock() {
+  if [[ -n "$CURRENT_PREP_POOL" ]]; then
+    release_pool_prep_lock "$CURRENT_PREP_POOL"
+    CURRENT_PREP_POOL=""
+  fi
+}
+
+clear_active_send_datasets() {
+  if [[ -n "$CURRENT_ACTIVE_DATASETS_FILE" ]]; then
+    rm -f "$CURRENT_ACTIVE_DATASETS_FILE" >/dev/null 2>&1 || true
+    CURRENT_ACTIVE_DATASETS_FILE=""
+  fi
+}
+
+effective_job_action() {
+  local assoc_name="$1"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+  local action
+
+  action="${job_ref[JOB_ACTION]:-}"
+  if [[ -n "$action" ]]; then
+    printf '%s' "$action"
+    return 0
+  fi
+
+  if [[ "${job_ref[JOB_ID]:-}" == finalize-* ]]; then
+    printf 'finalize'
+    return 0
+  fi
+
+  if [[ -n "${job_ref[PARENT_RUN_ID]:-}" && -n "${job_ref[MEMBER_INDEX]:-}" ]]; then
+    printf 'send_member'
+    return 0
+  fi
+
+  printf 'prepare'
+}
+
+register_active_send_datasets_for_current_job() {
+  local mode action source_root include_children dataset file tmp source_dataset
+
+  clear_active_send_datasets
+  mkdir -p "$ACTIVE_SEND_DATASETS_DIR" >/dev/null 2>&1 || true
+  file="${ACTIVE_SEND_DATASETS_DIR}/worker-$$-$(printf '%s' "$CURRENT_JOB_ID" | tr -c 'A-Za-z0-9._-' '_').datasets"
+  tmp="${file}.tmp"
+  : > "$tmp"
+
+  mode="$(job_get job JOB_MODE)"
+  action="$(effective_job_action job)"
+  case "$mode:$action" in
+    scheduled:send_member)
+      dataset="$(job_get job SOURCE_ROOT)"
+      [[ -n "$dataset" ]] && printf '%s\n' "$dataset" >> "$tmp"
+      ;;
+    scheduled:prepare|scheduled:single_send|scheduled:)
+      source_root="$(job_get job SOURCE_ROOT)"
+      include_children="$(job_get job INCLUDE_CHILDREN 0)"
+      while IFS= read -r source_dataset; do
+        [[ -n "$source_dataset" ]] || continue
+        printf '%s\n' "$source_dataset" >> "$tmp"
+      done < <(list_tree_datasets "$source_root" "$include_children")
+      ;;
+    manual_snapshot:*)
+      dataset="$(job_get job DATASET)"
+      [[ -n "$dataset" ]] && printf '%s\n' "$dataset" >> "$tmp"
+      ;;
+  esac
+
+  chmod 0600 "$tmp" >/dev/null 2>&1 || true
+  mv -f "$tmp" "$file"
+  CURRENT_ACTIVE_DATASETS_FILE="$file"
+}
+
+wait_for_autosnapshot_to_finish() {
+  local mode message
+
+  mode="$(job_get job JOB_MODE)"
+  message="Waiting for the regular autosnapshot run to finish before starting this send job."
+  if [[ "$mode" == "manual_snapshot" ]]; then
+    message="Waiting for the regular autosnapshot run to finish before starting this manual send."
+  fi
+
+  while autosnapshot_run_active; do
+    set_job_progress "preparing" "10" "$message"
+    sleep 5
+  done
+}
+
+wait_for_unraid_array_to_be_actionable_for_current_job() {
+  local mode suffix current_message last_message=""
+
+  mode="$(job_get job JOB_MODE)"
+  suffix="Waiting before starting this send job."
+  if [[ "$mode" == "manual_snapshot" ]]; then
+    suffix="Waiting before starting this manual send."
+  fi
+
+  while ! unraid_array_actionable; do
+    current_message="$(unraid_array_action_message). ${suffix}"
+    if [[ "$current_message" != "$last_message" ]]; then
+      log "$current_message"
+      last_message="$current_message"
+    fi
+    set_job_progress "preparing" "5" "$current_message"
+    sleep 5
+  done
+}
+
+wait_for_unraid_array_to_be_actionable_for_send_queue() {
+  local current_message last_message=""
+
+  while ! unraid_array_actionable; do
+    current_message="$(unraid_array_action_message). Send queue is paused."
+    if [[ "$current_message" != "$last_message" ]]; then
+      log "$current_message"
+      last_message="$current_message"
+    fi
+    sleep 5
+  done
+}
+
+schedule_run_base_sort() {
+  local requested_epoch="$1"
+  [[ "$requested_epoch" =~ ^[0-9]+$ ]] || requested_epoch=0
+  printf '%s' $(( requested_epoch * 100000 ))
+}
+
+send_member_sort_key() {
+  local base_sort="$1"
+  local index="$2"
+  printf '%s' $(( base_sort + 100 + (index * 10) ))
+}
+
+finalize_sort_key() {
+  local base_sort="$1"
+  printf '%s' $(( base_sort + 90000 ))
+}
+
+find_existing_job_path_by_id() {
+  local job_id="$1"
+  local result_var="$2"
+  local file
+  # shellcheck disable=SC2034
+  local -A existing_job=()
+
+  printf -v "$result_var" ''
+  while IFS= read -r file; do
+    job_load "$file" existing_job || continue
+    if [[ "$(job_get existing_job JOB_ID)" == "$job_id" ]]; then
+      printf -v "$result_var" '%s' "$file"
+      return 0
+    fi
+  done < <(list_job_files)
+
+  return 1
+}
+
+ensure_send_job_file() {
+  local assoc_name="$1"
+  local requested_epoch="$2"
+  # shellcheck disable=SC2034
+  local path existing_path job_id
+  # shellcheck disable=SC2178
+  local -n payload_ref="$assoc_name"
+
+  job_id="${payload_ref[JOB_ID]:-}"
+  [[ -n "$job_id" ]] || return 1
+
+  if find_existing_job_path_by_id "$job_id" existing_path; then
+    return 0
+  fi
+
+  path="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "$job_id")"
+  job_write "$path" payload_ref
+}
+
+prepare_scheduled_job_snapshot() {
+  local basename source_root include_children create_cmd previous_basename=""
+
+  source_root="$(job_get job SOURCE_ROOT)"
+  include_children="$(job_get job INCLUDE_CHILDREN 0)"
+
+  if [[ -n "$(job_get job SOURCE_SNAPSHOT)" ]]; then
+    if ! snapshot_exists "$(job_get job SOURCE_SNAPSHOT)"; then
+      fail_current_job_final "Scheduled send snapshot '$(job_get job SOURCE_SNAPSHOT)' is no longer available."
+      return 1
+    fi
+    build_members_for_job job "$(job_get job SOURCE_SNAPSHOT_NAME)"
+    persist_job
+    return 0
+  fi
+
+  latest_checkpoint_basename_for_schedule "$(job_get job SCHEDULE_JOB_ID)" previous_basename
+  job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
+
+  basename="$(job_get job SNAPSHOT_PREFIX)$(date +%Y-%m-%d_%H-%M-%S)"
+  if [[ "$include_children" == "1" ]]; then
+    create_cmd=(zfs snapshot -r "${source_root}@${basename}")
+  else
+    create_cmd=(zfs snapshot "${source_root}@${basename}")
+  fi
+
+  log "Creating scheduled send checkpoint ${source_root}@${basename}"
+  "${create_cmd[@]}"
+
+  job[SOURCE_SNAPSHOT]="${source_root}@${basename}"
+  job[SOURCE_SNAPSHOT_NAME]="$basename"
+  job[SOURCE_SNAPSHOT_EPOCH]="$(date +%s)"
+  build_members_for_job job "$basename"
+  persist_job
+  return 0
+}
+
+prepare_manual_snapshot_job() {
+  local snapshot dataset destination
+  snapshot="$(job_get job SOURCE_SNAPSHOT)"
+  dataset="$(job_get job DATASET)"
+  destination="$(job_get job DESTINATION_ROOT)"
+
+  if ! snapshot_exists "$snapshot"; then
+    fail_current_job_final "Snapshot '${snapshot}' is no longer available for manual send."
+    return 1
+  fi
+
+  job[SOURCE_ROOT]="$dataset"
+  job[DESTINATION_ROOT]="$destination"
+  job[INCLUDE_CHILDREN]="0"
+  job[MEMBER_COUNT]="1"
+  job[MEMBER_0_SOURCE]="$dataset"
+  job[MEMBER_0_DESTINATION]="$destination"
+  job[MEMBER_0_SNAPSHOT]="$snapshot"
+  persist_job
+  return 0
+}
+
+build_resume_members_for_current_job() {
+  local source_root dest_root include_children basename source_dataset destination_dataset relative
+  local member_index=0
+  local needs_resume=0
+
+  source_root="$(job_get job SOURCE_ROOT)"
+  dest_root="$(job_get job DESTINATION_ROOT)"
+  include_children="$(job_get job INCLUDE_CHILDREN 0)"
+  basename="$(job_get job SOURCE_SNAPSHOT_NAME)"
+
+  [[ -n "$source_root" && -n "$dest_root" && -n "$basename" ]] || return 1
+  source_snapshot_exists_for_basename "$source_root" "$basename" || return 1
+
+  while IFS= read -r source_dataset; do
+    [[ -n "$source_dataset" ]] || continue
+    if [[ "$source_dataset" == "$source_root" ]]; then
+      destination_dataset="$dest_root"
+    else
+      relative="${source_dataset#"${source_root}"/}"
+      destination_dataset="${dest_root}/${relative}"
+    fi
+
+    if dataset_has_snapshot_basename "$destination_dataset" "$basename"; then
+      continue
+    fi
+
+    source_snapshot_exists_for_basename "$source_dataset" "$basename" || return 1
+
+    job[MEMBER_${member_index}_SOURCE]="$source_dataset"
+    job[MEMBER_${member_index}_DESTINATION]="$destination_dataset"
+    job[MEMBER_${member_index}_SNAPSHOT]="${source_dataset}@${basename}"
+    member_index=$((member_index + 1))
+    needs_resume=1
+  done < <(list_tree_datasets "$source_root" "$include_children")
+
+  job[MEMBER_COUNT]="$member_index"
+  if (( needs_resume == 0 )); then
+    job[LAST_MESSAGE]="Recovered scheduled send state. All child datasets already have ${basename}; queueing finalize only."
+  else
+    job[LAST_MESSAGE]="Recovered scheduled send state. Queueing only child datasets still missing ${basename}."
+  fi
+  persist_job
+  return 0
+}
+
+queue_child_send_jobs() {
+  local member_count requested_epoch base_sort snapshot_basename schedule_job_id prefix previous_basename run_root_id
+  local index source_dataset destination_dataset snapshot sort_key child_job_id finalize_job_id
+  # shellcheck disable=SC2034
+  local -A queued_job=()
+  local resume_only=0
+
+  member_count="$(job_get job MEMBER_COUNT 0)"
+  [[ "$member_count" =~ ^[0-9]+$ ]] || member_count=0
+  resume_only="$(job_get job RESUME_ONLY 0)"
+  [[ "$resume_only" == "1" ]] || resume_only=0
+  if (( member_count <= 0 )) && (( resume_only == 0 )); then
+    return 1
+  fi
+
+  requested_epoch="$(job_get job REQUESTED_EPOCH 0)"
+  [[ "$requested_epoch" =~ ^[0-9]+$ ]] || requested_epoch="$(date +%s)"
+  base_sort="$(schedule_run_base_sort "$requested_epoch")"
+  snapshot_basename="$(job_get job SOURCE_SNAPSHOT_NAME)"
+  schedule_job_id="$(job_get job SCHEDULE_JOB_ID)"
+  prefix="$(job_get job SNAPSHOT_PREFIX)"
+  previous_basename="$(job_get job PREVIOUS_SNAPSHOT_NAME)"
+  run_root_id="$(job_get job JOB_ID)"
+
+  for ((index = 0; index < member_count; index++)); do
+    source_dataset="$(job_get job MEMBER_${index}_SOURCE)"
+    destination_dataset="$(job_get job MEMBER_${index}_DESTINATION)"
+    snapshot="$(job_get job MEMBER_${index}_SNAPSHOT)"
+    [[ -n "$source_dataset" && -n "$destination_dataset" && -n "$snapshot" ]] || continue
+
+    sort_key="$(send_member_sort_key "$base_sort" "$index")"
+    child_job_id="send-child-${run_root_id}-${index}"
+    queued_job=()
+    queued_job[JOB_ID]="$child_job_id"
+    queued_job[JOB_TYPE]="send"
+    queued_job[JOB_MODE]="scheduled"
+    queued_job[JOB_ACTION]="send_member"
+    queued_job[STATE]="queued"
+    queued_job[PHASE]="queued"
+    queued_job[REQUESTED_EPOCH]="$requested_epoch"
+    queued_job[REQUESTED_AT]="$(job_get job REQUESTED_AT)"
+    queued_job[QUEUE_SORT]="$sort_key"
+    queued_job[WINDOW_KEY]="$(job_get job WINDOW_KEY)"
+    queued_job[SCHEDULE_JOB_ID]="$schedule_job_id"
+    queued_job[PARENT_RUN_ID]="$run_root_id"
+    queued_job[MEMBER_INDEX]="$index"
+    queued_job[SOURCE_ROOT]="$source_dataset"
+    queued_job[DESTINATION_ROOT]="$destination_dataset"
+    queued_job[INCLUDE_CHILDREN]="0"
+    queued_job[FREQUENCY]="$(job_get job FREQUENCY)"
+    queued_job[THRESHOLD]="$(job_get job THRESHOLD)"
+    queued_job[THRESHOLD_BYTES]="$(job_get job THRESHOLD_BYTES)"
+    queued_job[SNAPSHOT_PREFIX_BASE]="$(job_get job SNAPSHOT_PREFIX_BASE)"
+    queued_job[SNAPSHOT_PREFIX]="$prefix"
+    queued_job[SOURCE_SNAPSHOT]="$snapshot"
+    queued_job[SOURCE_SNAPSHOT_NAME]="$snapshot_basename"
+    queued_job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
+    queued_job[ATTEMPT_COUNT]="0"
+    queued_job[RETRY_AT]="0"
+    queued_job[LAST_ERROR]=""
+    if (( resume_only == 1 )); then
+      queued_job[LAST_MESSAGE]="Queued as part of recovered scheduled send fan-out."
+    else
+      queued_job[LAST_MESSAGE]="Queued as part of recursive scheduled send fan-out."
+    fi
+    queued_job[WORKER_PID]=""
+    queued_job[PROGRESS_PERCENT]="5"
+    queued_job[MEMBER_COUNT]="1"
+    queued_job[MEMBER_0_SOURCE]="$source_dataset"
+    queued_job[MEMBER_0_DESTINATION]="$destination_dataset"
+    queued_job[MEMBER_0_SNAPSHOT]="$snapshot"
+    queued_job[COMPLETES_SCHEDULE_WINDOW]="0"
+    ensure_send_job_file queued_job "$requested_epoch" || return 1
+  done
+
+  finalize_job_id="finalize-${run_root_id}"
+  queued_job=()
+  queued_job[JOB_ID]="$finalize_job_id"
+  queued_job[JOB_TYPE]="send"
+  queued_job[JOB_MODE]="scheduled"
+  queued_job[JOB_ACTION]="finalize"
+  queued_job[STATE]="queued"
+  queued_job[PHASE]="queued"
+  queued_job[REQUESTED_EPOCH]="$requested_epoch"
+  queued_job[REQUESTED_AT]="$(job_get job REQUESTED_AT)"
+  queued_job[QUEUE_SORT]="$(finalize_sort_key "$base_sort")"
+  queued_job[WINDOW_KEY]="$(job_get job WINDOW_KEY)"
+  queued_job[SCHEDULE_JOB_ID]="$schedule_job_id"
+  queued_job[PARENT_RUN_ID]="$run_root_id"
+  queued_job[SOURCE_ROOT]="$(job_get job SOURCE_ROOT)"
+  queued_job[DESTINATION_ROOT]="$(job_get job DESTINATION_ROOT)"
+  queued_job[SNAPSHOT_PREFIX]="$prefix"
+  queued_job[SOURCE_SNAPSHOT_NAME]="$snapshot_basename"
+  queued_job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
+  queued_job[ATTEMPT_COUNT]="0"
+  queued_job[RETRY_AT]="0"
+  queued_job[LAST_ERROR]=""
+  if (( resume_only == 1 )); then
+    queued_job[LAST_MESSAGE]="Queued final checkpoint cleanup for recovered scheduled send."
+  else
+    queued_job[LAST_MESSAGE]="Queued final checkpoint cleanup for recursive scheduled send."
+  fi
+  queued_job[WORKER_PID]=""
+  queued_job[PROGRESS_PERCENT]="5"
+  # shellcheck disable=SC2034
+  queued_job[COMPLETES_SCHEDULE_WINDOW]="$(job_get job COMPLETES_SCHEDULE_WINDOW 1)"
+  ensure_send_job_file queued_job "$requested_epoch" || return 1
+
+  return 0
+}
+
+send_member_snapshot() {
+  local member_index="$1"
+  local member_count="$2"
+  local source_dataset destination snapshot basename latest_common description progress failure_message
+  local destination_parent source_exists=0 destination_exists=0 parent_exists=0
+  local source_type="" destination_type=""
+
+  source_dataset="$(job_get job MEMBER_"${member_index}"_SOURCE)"
+  destination="$(job_get job MEMBER_"${member_index}"_DESTINATION)"
+  snapshot="$(job_get job MEMBER_"${member_index}"_SNAPSHOT)"
+  basename="${snapshot##*@}"
+  destination_parent="${destination%/*}"
+
+  is_valid_dataset_name "$source_dataset" || {
+    fail_current_job_final "Source dataset '${source_dataset}' is invalid."
+    return 1
+  }
+  is_valid_dataset_name "$destination" || {
+    fail_current_job_final "Destination dataset '${destination}' is invalid."
+    return 1
+  }
+  is_valid_snapshot_name "$snapshot" || {
+    fail_current_job_final "Snapshot '${snapshot}' is invalid."
+    return 1
+  }
+
+  if dataset_exists "$source_dataset"; then
+    source_exists=1
+    source_type="$(dataset_type "$source_dataset")"
+  fi
+  if dataset_exists "$destination"; then
+    destination_exists=1
+    destination_type="$(dataset_type "$destination")"
+  fi
+  if [[ -n "$destination_parent" ]] && dataset_exists "$destination_parent"; then
+    parent_exists=1
+  fi
+
+  log "Send preflight: source=${source_dataset} source_exists=${source_exists} source_type=${source_type:-unknown} destination=${destination} destination_exists=${destination_exists} destination_type=${destination_type:-missing} parent=${destination_parent} parent_exists=${parent_exists} snapshot=${snapshot} job_mode=$(job_get job JOB_MODE) job_action=$(effective_job_action job)"
+
+  if ! ensure_destination_parent_exists "$destination"; then
+    fail_current_job_final "Unable to ensure destination parent exists for '${destination}'."
+    return 1
+  fi
+
+  if snapshot_exists "${destination}@${basename}"; then
+    log "Destination already has ${destination}@${basename}; skipping receive for this member."
+    return 0
+  fi
+
+  progress=$((30 + (member_index * 40 / (member_count == 0 ? 1 : member_count))))
+  set_job_progress "sending" "$progress" "Sending ${source_dataset}@${basename} to ${destination}."
+
+  if [[ "$(job_get job JOB_MODE)" == "scheduled" ]]; then
+    latest_common=""
+    find_latest_common_basename_for_member "$source_dataset" "$destination" "$(job_get job SNAPSHOT_PREFIX)" latest_common
+    log "Scheduled send base selection: source=${source_dataset} destination=${destination} requested_snapshot=${basename} latest_common=${latest_common:-none}"
+    if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
+      is_valid_snapshot_basename "$latest_common" || {
+        fail_current_job_final "Base snapshot '${latest_common}' is invalid."
+        return 1
+      }
+      description="Incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
+      run_pipeline_with_status "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" || return 1
+    else
+      if (( destination_exists == 1 )) && dataset_has_any_snapshots "$destination"; then
+        failure_message="No common send checkpoint remains between '${source_dataset}' and '${destination}'. The destination dataset was purged so the next retry can reseed this backup from scratch. Review the preserved send log for diagnostics."
+        log "$failure_message"
+        if purge_destination_for_reseed "$destination"; then
+          job[LAST_ERROR]="$failure_message"
+          job[LAST_MESSAGE]="$failure_message"
+          preserve_failed_send_log_for_job job || true
+          fail_current_job "$failure_message"
+          return 1
+        fi
+        fail_current_job_final "No common send checkpoint remains between '${source_dataset}' and '${destination}', and automatic destination purge for reseed failed."
+        return 1
+      fi
+      description="Full send ${snapshot} -> ${destination}"
+      run_pipeline_with_status "$description" "" "$snapshot" "$destination" || return 1
+    fi
+  else
+    latest_common=""
+    find_latest_common_snapshot_for_target "$source_dataset" "$destination" "$basename" latest_common
+    log "Manual send base selection: source=${source_dataset} destination=${destination} requested_snapshot=${basename} latest_common=${latest_common:-none}"
+    if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
+      is_valid_snapshot_basename "$latest_common" || {
+        fail_current_job_final "Base snapshot '${latest_common}' is invalid."
+        return 1
+      }
+      description="Manual incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
+      run_pipeline_with_status "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" || return 1
+    else
+      if (( destination_exists == 1 )) && dataset_has_any_snapshots "$destination"; then
+        failure_message="No common snapshot remains between '${source_dataset}' and '${destination}', and a destructive automatic reseed is not available for this manual send. Review the send log and re-seed the destination manually."
+        fail_current_job_final "$failure_message"
+        return 1
+      fi
+      description="Manual full send ${snapshot} -> ${destination}"
+      run_pipeline_with_status "$description" "" "$snapshot" "$destination" || return 1
+    fi
+  fi
+
+  set_job_progress "verifying" "$((progress + 15))" "Verifying ${destination}@${basename}."
+  snapshot_exists "${destination}@${basename}"
+}
+
+cleanup_source_checkpoints_for_verified_member() {
+  local schedule_job_id source_dataset current_basename snap_name snap_epoch snap_base
+  local -A old_basenames=()
+
+  schedule_job_id="$(job_get job SCHEDULE_JOB_ID)"
+  current_basename="$(job_get job SOURCE_SNAPSHOT_NAME)"
+  [[ -n "$current_basename" ]] || return 0
+
+  source_dataset="$(job_get job SOURCE_ROOT)"
+  [[ -n "$schedule_job_id" && -n "$source_dataset" ]] || return 0
+  dataset_exists "$source_dataset" || return 0
+
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+    snap_base="${snap_name##*@}"
+    [[ "$snap_base" == "$current_basename" ]] && continue
+    if ! send_basename_matches_schedule "$snap_base" "$schedule_job_id"; then
+      local schedule_count=0 candidate_job_id
+      if [[ "$snap_base" == "${SEND_SNAPSHOT_PREFIX}"* ]]; then
+        for candidate_job_id in "${SCHEDULE_JOB_IDS[@]}"; do
+          [[ "${SCHEDULE_SOURCE_ROOT[$candidate_job_id]:-}" == "$source_dataset" ]] || continue
+          schedule_count=$((schedule_count + 1))
+        done
+        (( schedule_count == 1 )) || continue
+      else
+        continue
+      fi
+    fi
+    old_basenames["$snap_base"]=1
+  done < <(zfs list -H -p -t snapshot -o name,creation "$source_dataset" 2>/dev/null || true)
+
+  ((${#old_basenames[@]} > 0)) || return 0
+
+  set_job_progress "cleanup" "95" "Removing older source send checkpoints for ${source_dataset} now that ${current_basename} is verified on the destination."
+  for snap_base in "${!old_basenames[@]}"; do
+    while IFS=$'\t' read -r snap_name snap_epoch; do
+      [[ -n "$snap_name" ]] || continue
+      [[ "${snap_name##*@}" == "$snap_base" ]] || continue
+      log "Deleting source send checkpoint: $snap_name"
+      zfs destroy "$snap_name"
+    done < <(zfs list -H -p -t snapshot -o name,creation "$source_dataset" 2>/dev/null || true)
+  done
+}
+
+purge_destination_for_reseed() {
+  local destination="$1"
+
+  is_valid_dataset_name "$destination" || return 1
+  dataset_exists "$destination" || return 0
+
+  log "Purging destination dataset for automatic reseed: ${destination}"
+  zfs destroy -r "$destination"
+}
+
+run_child_jobs_have_failed() {
+  local parent_run_id="$1"
+  local file state action
+  # shellcheck disable=SC2034
+  local -A sibling_job=()
+
+  while IFS= read -r file; do
+    job_load "$file" sibling_job || continue
+    [[ "$(job_get sibling_job JOB_TYPE)" == "send" ]] || continue
+    [[ "$(job_get sibling_job JOB_MODE)" == "scheduled" ]] || continue
+    [[ "$(job_get sibling_job PARENT_RUN_ID)" == "$parent_run_id" ]] || continue
+    action="$(effective_job_action sibling_job)"
+    [[ "$action" == "send_member" ]] || continue
+    state="$(job_get sibling_job STATE)"
+    if [[ "$state" == "failed" ]]; then
+      return 0
+    fi
+  done < <(list_job_files)
+
+  return 1
+}
+
+run_child_jobs_still_active() {
+  local parent_run_id="$1"
+  local file state action job_id
+  # shellcheck disable=SC2034
+  local -A sibling_job=()
+
+  while IFS= read -r file; do
+    job_load "$file" sibling_job || continue
+    [[ "$(job_get sibling_job JOB_TYPE)" == "send" ]] || continue
+    [[ "$(job_get sibling_job JOB_MODE)" == "scheduled" ]] || continue
+    [[ "$(job_get sibling_job PARENT_RUN_ID)" == "$parent_run_id" ]] || continue
+    job_id="$(job_get sibling_job JOB_ID)"
+    [[ "$job_id" != "$CURRENT_JOB_ID" ]] || continue
+    action="$(effective_job_action sibling_job)"
+    [[ "$action" == "send_member" ]] || continue
+    state="$(job_get sibling_job STATE)"
+    if ! job_state_is_success "$state"; then
+      return 0
+    fi
+  done < <(list_job_files)
+
+  return 1
+}
+
+linked_job_state() {
+  local wait_job_id="$1"
+  local result_var="$2"
+  local file
+  # shellcheck disable=SC2034
+  local -A linked_job=()
+
+  printf -v "$result_var" ''
+  [[ -n "$wait_job_id" ]] || return 1
+  while IFS= read -r file; do
+    job_load "$file" linked_job || continue
+    if [[ "$(job_get linked_job JOB_ID)" == "$wait_job_id" ]]; then
+      printf -v "$result_var" '%s' "$(job_get linked_job STATE)"
+      return 0
+    fi
+  done < <(list_job_files)
+  return 1
+}
+
+process_cleanup_member_job() {
+  local wait_job_id wait_state destination_dataset snapshot_basename
+
+  wait_job_id="$(job_get job WAIT_FOR_JOB_ID)"
+  destination_dataset="$(job_get job DESTINATION_ROOT)"
+  snapshot_basename="$(job_get job SOURCE_SNAPSHOT_NAME)"
+
+  if linked_job_state "$wait_job_id" wait_state; then
+    case "$wait_state" in
+      queued|running|retry_wait)
+        defer_current_job "Waiting for the matching child send to finish before running zero-change cleanup." 15
+        return 2
+        ;;
+      failed)
+        skip_job "Skipped zero-change cleanup because the matching child send failed."
+        return 0
+        ;;
+    esac
+  fi
+
+  set_job_progress "cleanup" "92" "Queueing zero-change cleanup for ${destination_dataset}."
+  queue_schedule_zero_change_cleanup_for_dataset "$(job_get job SCHEDULE_JOB_ID)" "$destination_dataset" "$snapshot_basename" || true
+  complete_job "Queued zero-change cleanup for ${destination_dataset}."
+  return 0
+}
+
+process_finalize_job() {
+  local parent_run_id
+  parent_run_id="$(job_get job PARENT_RUN_ID)"
+
+  if run_child_jobs_have_failed "$parent_run_id"; then
+    skip_job "Skipping previous checkpoint cleanup because one or more child send jobs failed."
+    return 0
+  fi
+
+  if run_child_jobs_still_active "$parent_run_id"; then
+    defer_current_job "Waiting for child send and cleanup jobs to finish before removing the previous checkpoint." 15
+    return 2
+  fi
+
+  complete_job "Recursive scheduled send finished successfully."
+  return 0
+}
+
+run_scheduled_prepare_phase() {
+  local schedule_job_id dest_root dest_pool capacity_dataset planned_effective threshold
+  # shellcheck disable=SC2034
+  local -A planned_reclaim=()
+
+  schedule_job_id="$(job_get job SCHEDULE_JOB_ID)"
+  dest_root="$(job_get job DESTINATION_ROOT)"
+  threshold="$(job_get job THRESHOLD_BYTES)"
+  dest_pool="${dest_root%%/*}"
+  [[ -n "$schedule_job_id" && -n "$dest_root" && "$threshold" =~ ^[0-9]+$ ]] || return 1
+
+  if ! acquire_pool_prep_lock "$dest_pool"; then
+    defer_current_job "Waiting for another ZFS send prep already working on pool ${dest_pool}." 15
+    return 2
+  fi
+  CURRENT_PREP_POOL="$dest_pool"
+
+  if pool_has_active_delete_jobs "$dest_pool"; then
+    release_current_prep_pool_lock
+    defer_current_job "Waiting for pending snapshot deletes on pool ${dest_pool} to finish before send prep can continue." 15
+    return 2
+  fi
+
+  capacity_dataset="$(nearest_existing_dataset_ancestor "$dest_root")"
+  [[ -n "$capacity_dataset" ]] || return 1
+
+  set_job_progress "preparing" "18" "Queueing retention cleanup for ZFS Send datasets on pool ${dest_pool}."
+  queue_pool_retention_cleanup "$dest_pool" "$capacity_dataset" planned_reclaim || true
+
+  if ! queue_pool_free_space_cleanup_for_schedule "$schedule_job_id" "$capacity_dataset" planned_reclaim; then
+    planned_effective="$(get_dataset_effective_avail "$capacity_dataset" planned_reclaim || true)"
+    if [[ "$planned_effective" =~ ^[0-9]+$ ]] && (( planned_effective < threshold )); then
+      set_job_progress "preparing" "20" "Unable to free enough destination space on pool ${dest_pool} using queued snapshot cleanup."
+      release_current_prep_pool_lock
+      return 1
+    fi
+  fi
+
+  if pool_has_active_delete_jobs "$dest_pool"; then
+    release_current_prep_pool_lock
+    defer_current_job "Waiting for queued snapshot deletes on pool ${dest_pool} to finish before starting ZFS send transfers." 15
+    return 2
+  fi
+
+  planned_effective="$(get_dataset_effective_avail "$capacity_dataset" NO_CONSTRAINT_RECLAIM || true)"
+  [[ "$planned_effective" =~ ^[0-9]+$ ]] || planned_effective=0
+  if (( planned_effective < threshold )); then
+    release_current_prep_pool_lock
+    defer_current_job "Destination pool ${dest_pool} is still below its free-space target after cleanup planning. Waiting for deletes to settle before retrying prep." 15
+    return 2
+  fi
+
+  set_job_progress "preparing" "24" "Destination prep for pool ${dest_pool} is complete."
+  return 0
+}
+
+process_send_job() {
+  local mode action member_count index
+  clear_send_cleanup_caches
+  mode="$(job_get job JOB_MODE)"
+  action="$(effective_job_action job)"
+
+  case "$mode:$action" in
+    scheduled:finalize)
+      process_finalize_job
+      return $?
+      ;;
+  esac
+
+  set_job_progress "preparing" "5" "Preparing send job."
+  wait_for_unraid_array_to_be_actionable_for_current_job
+  wait_for_autosnapshot_to_finish
+  set_job_progress "preparing" "15" "Preparing send job."
+
+  case "$mode:$action" in
+    scheduled:prepare|scheduled:)
+      if jobs_are_same_pool_overlap "$(job_get job SOURCE_ROOT)" "$(job_get job DESTINATION_ROOT)"; then
+        fail_current_job_final "Source and destination overlap on the same pool. Choose a destination dataset outside the source tree."
+        return 1
+      fi
+      if [[ "$(job_get job RESUME_ONLY 0)" == "1" ]]; then
+        build_resume_members_for_current_job || {
+          fail_current_job_final "Unable to rebuild the scheduled send resume state for this window. A fresh scheduled run will be needed."
+          return 1
+        }
+        set_job_progress "snapshot_created" "28" "Recovered scheduled send state. Queueing missing child send jobs."
+        queue_child_send_jobs || return 1
+        job[COMPLETES_SCHEDULE_WINDOW]="0"
+        complete_job "Recovered scheduled send state and queued the remaining transfer jobs."
+        return 0
+      fi
+      run_scheduled_prepare_phase || return $?
+      prepare_scheduled_job_snapshot || return 1
+      set_job_progress "snapshot_created" "28" "Initial preparation complete. Queueing send and cleanup jobs."
+      queue_child_send_jobs || return 1
+      job[COMPLETES_SCHEDULE_WINDOW]="0"
+      complete_job "Initial scheduled send preparation completed. Transfer jobs were queued."
+      release_current_prep_pool_lock
+      return 0
+      ;;
+    scheduled:send_member)
+      if jobs_are_same_pool_overlap "$(job_get job SOURCE_ROOT)" "$(job_get job DESTINATION_ROOT)"; then
+        fail_current_job_final "Source and destination overlap on the same pool. Choose a destination dataset outside the source tree."
+        return 1
+      fi
+      register_active_send_datasets_for_current_job
+      ;;
+    manual_snapshot:*)
+      if jobs_are_same_pool_overlap "$(job_get job DATASET)" "$(job_get job DESTINATION_ROOT)"; then
+        fail_current_job_final "Source and destination overlap on the same pool. Choose a destination dataset outside the source tree."
+        return 1
+      fi
+      register_active_send_datasets_for_current_job
+      prepare_manual_snapshot_job || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  set_job_progress "snapshot_created" "30" "Snapshot ready. Starting transfer."
+
+  member_count="$(job_get job MEMBER_COUNT 0)"
+  [[ "$member_count" =~ ^[0-9]+$ ]] || member_count=0
+  (( member_count > 0 )) || return 1
+
+  for ((index = 0; index < member_count; index++)); do
+    send_member_snapshot "$index" "$member_count" || return 1
+    if [[ "$mode:$action" == "scheduled:send_member" ]]; then
+      cleanup_source_checkpoints_for_verified_member || return 1
+      set_job_progress "cleanup" "$((90 + (index * 5 / (member_count == 0 ? 1 : member_count))))" "Queueing zero-change cleanup for $(job_get job MEMBER_${index}_DESTINATION)."
+      queue_schedule_zero_change_cleanup_for_dataset "$(job_get job SCHEDULE_JOB_ID)" "$(job_get job MEMBER_${index}_DESTINATION)" "$(job_get job SOURCE_SNAPSHOT_NAME)" || true
+    fi
+  done
+
+  if [[ "$mode:$action" == "scheduled:send_member" ]]; then
+    complete_job "Child send completed successfully."
+    return 0
+  fi
+
+  complete_job "Send job completed successfully."
+  return 0
+}
+
+main() {
+  local now_epoch candidate_path result=0
+  ensure_runtime_layout || exit 1
+  load_send_config
+  load_schedule_state
+  require_numeric_in_range "SEND_MAX_PARALLEL" "$SEND_MAX_PARALLEL" 1 8 || SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
+  require_numeric_in_range "SEND_KEEP_ALL_FOR_DAYS" "$SEND_KEEP_ALL_FOR_DAYS" 1 36500 || SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
+  require_numeric_in_range "SEND_KEEP_DAILY_UNTIL_DAYS" "$SEND_KEEP_DAILY_UNTIL_DAYS" 2 36500 || SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
+  require_numeric_in_range "SEND_KEEP_WEEKLY_UNTIL_DAYS" "$SEND_KEEP_WEEKLY_UNTIL_DAYS" 3 36500 || SEND_KEEP_WEEKLY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS"
+  if (( SEND_KEEP_ALL_FOR_DAYS >= SEND_KEEP_DAILY_UNTIL_DAYS || SEND_KEEP_DAILY_UNTIL_DAYS >= SEND_KEEP_WEEKLY_UNTIL_DAYS )); then
+    SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
+    SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
+    SEND_KEEP_WEEKLY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS"
+  fi
+  parse_send_jobs_config
+
+  trap cleanup EXIT INT TERM
+  mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
+
+  exec >> "$LOG_FILE" 2>&1
+  log "Send worker $$ starting"
+
+  while :; do
+    wait_for_unraid_array_to_be_actionable_for_send_queue
+    now_epoch="$(date +%s)"
+    candidate_path=""
+    claim_next_send_job "$now_epoch" candidate_path || break
+    [[ -n "$candidate_path" ]] || break
+
+    # shellcheck disable=SC2034
+    # shellcheck disable=SC2034
+    declare -A job=()
+    job_load "$candidate_path" job || break
+    CURRENT_JOB_ID="$(job_get job JOB_ID)"
+    CURRENT_JOB_PATH="$candidate_path"
+
+    if ! acquire_job_claim "$CURRENT_JOB_ID"; then
+      CURRENT_JOB_ID=""
+      CURRENT_JOB_PATH=""
+      continue
+    fi
+
+    job_load "$candidate_path" job || {
+      release_job_claim "$CURRENT_JOB_ID"
+      CURRENT_JOB_ID=""
+      CURRENT_JOB_PATH=""
+      continue
+    }
+
+    if ! job_is_retry_ready "$(job_get job STATE)" "$(job_get job RETRY_AT 0)" "$now_epoch"; then
+      release_job_claim "$CURRENT_JOB_ID"
+      CURRENT_JOB_ID=""
+      CURRENT_JOB_PATH=""
+      continue
+    fi
+
+    log "Processing send job $(job_get job JOB_ID) ($(job_get job JOB_MODE):$(effective_job_action job))"
+    job[STATE]="running"
+    # shellcheck disable=SC2034
+    job[WORKER_PID]="$$"
+    persist_job
+
+    if process_send_job; then
+      result=0
+    else
+      result="$?"
+      if (( result != 2 )) && [[ "$(job_get job STATE)" == "running" ]]; then
+        fail_current_job "Send job failed during phase '$(job_get job PHASE)'. Review the send log and retry if needed."
+      fi
+    fi
+
+    release_current_prep_pool_lock
+    clear_active_send_datasets
+    release_job_claim "$CURRENT_JOB_ID"
+    CURRENT_JOB_ID=""
+    CURRENT_JOB_PATH=""
+  done
+
+  log "Send worker $$ finished"
+}
+
+main "$@"

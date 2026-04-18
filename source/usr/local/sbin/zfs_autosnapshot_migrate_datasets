@@ -1,0 +1,1398 @@
+#!/bin/bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+ZFSAS_LOG_HELPER="/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/log-maintenance-lib.sh"
+if [[ -r "$ZFSAS_LOG_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$ZFSAS_LOG_HELPER"
+else
+  zfsas_log_sanitize_text() { printf '%s' "$1"; }
+  zfsas_log_prepare_for_append() { return 0; }
+fi
+
+PLUGIN_ROOT="/boot/config/plugins/zfs.autosnapshot/dataset_migrator"
+LOGS_DIR="${PLUGIN_ROOT}/logs"
+STATUS_FILE="${PLUGIN_ROOT}/status.env"
+FOLDERS_FILE="${PLUGIN_ROOT}/folders.tsv"
+CONTAINERS_FILE="${PLUGIN_ROOT}/containers.tsv"
+LOG_FILE="/var/log/zfs_autosnapshot_migrate_datasets.log"
+LOG_ARCHIVE_FILE="/var/log/zfs_autosnapshot_migrate_datasets.archive.log"
+LOCK_FILE="/var/run/zfs-autosnapshot-migrator/migrator.lock"
+SPACE_RECHECK_SECONDS=300
+RESTART_RETRY_DELAY=300
+ABSOLUTE_SAFETY_MARGIN=$((1024 * 1024 * 1024))
+PERCENT_SAFETY_MARGIN=10
+CURRENT_FOLDER_INDEX=-1
+ACTIVE_DATASET=""
+ACTIVE_MOUNTPOINT=""
+ACTIVE_MOUNTPOINT_REAL=""
+STATE="preparing"
+MESSAGE="Preparing dataset migration."
+CURRENT_STEP="preparing"
+CURRENT_FOLDER=""
+CURRENT_FOLDER_PERCENT=0
+OVERALL_PERCENT=0
+WAITING_FOR_SPACE=0
+WAITING_LABEL=""
+WAITING_REQUIRED_BYTES=0
+WAITING_AVAILABLE_BYTES=0
+STARTED_EPOCH="$(date +%s)"
+UPDATED_EPOCH="$STARTED_EPOCH"
+ENDED_EPOCH=""
+PID="$$"
+LAST_ERROR=""
+EXIT_CODE=0
+MIGRATION_COMPLETE=0
+NEEDS_CONTAINER_RECOVERY=0
+
+TOTAL_FOLDERS=0
+COMPLETED_FOLDERS=0
+
+DATASET=""
+CURRENT_BATCH_FOLDERS=""
+CURRENT_BATCH_CONTAINERS=""
+
+# Folder state arrays
+FOLDER_NAMES=()
+FOLDER_SOURCE_PATHS=()
+FOLDER_TARGET_DATASETS=()
+FOLDER_SIZE_BYTES=()
+FOLDER_STATES=()
+FOLDER_PROGRESS=()
+FOLDER_MESSAGES=()
+FOLDER_CONTAINER_INDEXES=()
+
+# Container state arrays
+CONTAINER_IDS=()
+CONTAINER_NAMES=()
+CONTAINER_RESTART_NAMES=()
+CONTAINER_RESTART_MAXS=()
+CONTAINER_NETWORK_MODES=()
+CONTAINER_FOLDER_INDEXES=()
+CONTAINER_DEPENDENCY_REFS=()
+CONTAINER_DEPENDENCY_INDEXES=()
+CONTAINER_WAS_RUNNING=()
+CONTAINER_CURRENTLY_RUNNING=()
+CONTAINER_POLICY_DISABLED=()
+CONTAINER_START_STATES=()
+CONTAINER_LAST_ERRORS=()
+
+declare -A FOLDER_INDEX_BY_NAME=()
+declare -A CONTAINER_INDEX_BY_NAME=()
+declare -A CONTAINER_INDEX_BY_ID=()
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+list_has_word() {
+  local list="$1"
+  local value="$2"
+  local item
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    [[ "$item" == "$value" ]] && return 0
+  done <<< "$list"
+  return 1
+}
+
+list_append_unique() {
+  local list="$1"
+  local value="$2"
+  if [[ -z "$value" ]]; then
+    printf '%s' "$list"
+    return 0
+  fi
+  if list_has_word "$list" "$value"; then
+    printf '%s' "$list"
+    return 0
+  fi
+  if [[ -n "$list" ]]; then
+    printf '%s\n%s' "$list" "$value"
+    return 0
+  fi
+  printf '%s' "$value"
+}
+
+list_remove_word() {
+  local list="$1"
+  local value="$2"
+  local item result=""
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    if [[ "$item" == "$value" ]]; then
+      continue
+    fi
+    result="$(list_append_unique "$result" "$item")"
+  done <<< "$list"
+  printf '%s' "$result"
+}
+
+log() {
+  printf '[%s] %s\n' "$(date '+%F %T')" "$(zfsas_log_sanitize_text "$*")"
+}
+
+kv_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
+sanitize_tsv() {
+  local value="$1"
+  value="${value//$'\t'/\\t}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/}"
+  printf '%s' "$value"
+}
+
+apply_owner() {
+  local path="$1"
+  chown nobody "$path" >/dev/null 2>&1 || true
+  chgrp users "$path" >/dev/null 2>&1 || true
+}
+
+ensure_dir() {
+  local path="$1"
+  mkdir -p "$path"
+  chmod 0775 "$path" >/dev/null 2>&1 || true
+  apply_owner "$path"
+}
+
+write_containers_file() {
+  : > "$CONTAINERS_FILE"
+  local index
+  for index in "${!CONTAINER_IDS[@]}"; do
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$(sanitize_tsv "${CONTAINER_IDS[$index]}")" \
+      "$(sanitize_tsv "${CONTAINER_NAMES[$index]}")" \
+      "$(sanitize_tsv "${CONTAINER_RESTART_NAMES[$index]}")" \
+      "$(sanitize_tsv "${CONTAINER_RESTART_MAXS[$index]}")" \
+      "$(sanitize_tsv "${CONTAINER_WAS_RUNNING[$index]}")" \
+      "$(sanitize_tsv "${CONTAINER_POLICY_DISABLED[$index]}")" \
+      "$(sanitize_tsv "${CONTAINER_START_STATES[$index]}")" \
+      "$(sanitize_tsv "${CONTAINER_LAST_ERRORS[$index]}")" \
+      >> "$CONTAINERS_FILE"
+  done
+  chmod 0640 "$CONTAINERS_FILE" >/dev/null 2>&1 || true
+  apply_owner "$CONTAINERS_FILE"
+}
+
+write_folders_file() {
+  : > "$FOLDERS_FILE"
+  local index
+  for index in "${!FOLDER_NAMES[@]}"; do
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$(sanitize_tsv "${FOLDER_NAMES[$index]}")" \
+      "$(sanitize_tsv "${FOLDER_SOURCE_PATHS[$index]}")" \
+      "$(sanitize_tsv "${FOLDER_TARGET_DATASETS[$index]}")" \
+      "$(sanitize_tsv "${FOLDER_SIZE_BYTES[$index]}")" \
+      "$(sanitize_tsv "${FOLDER_STATES[$index]}")" \
+      "$(sanitize_tsv "${FOLDER_PROGRESS[$index]}")" \
+      "$(sanitize_tsv "${FOLDER_MESSAGES[$index]}")" \
+      >> "$FOLDERS_FILE"
+  done
+  chmod 0640 "$FOLDERS_FILE" >/dev/null 2>&1 || true
+  apply_owner "$FOLDERS_FILE"
+}
+
+recalculate_overall_percent() {
+  if (( TOTAL_FOLDERS <= 0 )); then
+    OVERALL_PERCENT=0
+    return
+  fi
+
+  local percent="$COMPLETED_FOLDERS"
+  local current_fraction=0
+  if (( CURRENT_FOLDER_INDEX >= 0 )) && [[ "${FOLDER_PROGRESS[$CURRENT_FOLDER_INDEX]:-0}" =~ ^[0-9]+$ ]]; then
+    current_fraction="${FOLDER_PROGRESS[$CURRENT_FOLDER_INDEX]}"
+  fi
+
+  OVERALL_PERCENT=$(( ((COMPLETED_FOLDERS * 100) + current_fraction) / TOTAL_FOLDERS ))
+  if (( OVERALL_PERCENT > 100 )); then
+    OVERALL_PERCENT=100
+  fi
+}
+
+write_status_file() {
+  UPDATED_EPOCH="$(date +%s)"
+  recalculate_overall_percent
+  cat > "$STATUS_FILE" <<EOF
+DATASET="$(kv_escape "$ACTIVE_DATASET")"
+MOUNTPOINT="$(kv_escape "$ACTIVE_MOUNTPOINT")"
+STATE="$(kv_escape "$STATE")"
+MESSAGE="$(kv_escape "$MESSAGE")"
+CURRENT_STEP="$(kv_escape "$CURRENT_STEP")"
+CURRENT_FOLDER="$(kv_escape "$CURRENT_FOLDER")"
+CURRENT_FOLDER_PERCENT="$(kv_escape "$CURRENT_FOLDER_PERCENT")"
+OVERALL_PERCENT="$(kv_escape "$OVERALL_PERCENT")"
+TOTAL_FOLDERS="$(kv_escape "$TOTAL_FOLDERS")"
+COMPLETED_FOLDERS="$(kv_escape "$COMPLETED_FOLDERS")"
+WAITING_FOR_SPACE="$(kv_escape "$WAITING_FOR_SPACE")"
+WAITING_LABEL="$(kv_escape "$WAITING_LABEL")"
+WAITING_REQUIRED_BYTES="$(kv_escape "$WAITING_REQUIRED_BYTES")"
+WAITING_AVAILABLE_BYTES="$(kv_escape "$WAITING_AVAILABLE_BYTES")"
+PID="$(kv_escape "$PID")"
+STARTED_EPOCH="$(kv_escape "$STARTED_EPOCH")"
+UPDATED_EPOCH="$(kv_escape "$UPDATED_EPOCH")"
+ENDED_EPOCH="$(kv_escape "$ENDED_EPOCH")"
+LAST_ERROR="$(kv_escape "$LAST_ERROR")"
+LOG_FILE="$(kv_escape "$LOG_FILE")"
+EOF
+  chmod 0640 "$STATUS_FILE" >/dev/null 2>&1 || true
+  apply_owner "$STATUS_FILE"
+  write_folders_file
+  write_containers_file
+}
+
+set_status() {
+  STATE="$1"
+  CURRENT_STEP="$2"
+  MESSAGE="$3"
+  write_status_file
+}
+
+set_waiting_for_space() {
+  WAITING_FOR_SPACE=1
+  WAITING_LABEL="$1"
+  WAITING_REQUIRED_BYTES="$2"
+  WAITING_AVAILABLE_BYTES="$3"
+  STATE="waiting_for_space"
+  CURRENT_STEP="waiting_for_space"
+  MESSAGE="Free space is too low for ${WAITING_LABEL}. Free up space and the migration will continue automatically."
+  write_status_file
+}
+
+clear_waiting_for_space() {
+  WAITING_FOR_SPACE=0
+  WAITING_LABEL=""
+  WAITING_REQUIRED_BYTES=0
+  WAITING_AVAILABLE_BYTES=0
+}
+
+folder_set() {
+  local index="$1"
+  local state="$2"
+  local progress="$3"
+  local message="$4"
+  FOLDER_STATES[index]="$state"
+  FOLDER_PROGRESS[index]="$progress"
+  FOLDER_MESSAGES[index]="$message"
+  if (( index == CURRENT_FOLDER_INDEX )); then
+    CURRENT_FOLDER="${FOLDER_NAMES[index]}"
+    CURRENT_FOLDER_PERCENT="$progress"
+  fi
+  write_status_file
+}
+
+die() {
+  LAST_ERROR="$1"
+  log "FATAL: $LAST_ERROR"
+  EXIT_CODE=1
+  return 1
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+for cmd in zfs rsync find sha256sum sort cmp awk sed flock sync mv rm readlink stat du wc grep sleep date dirname basename touch docker shutdown cat chown chmod ps dd; do
+  require_cmd "$cmd"
+done
+
+[[ "$(id -u)" -eq 0 ]] || die "Must be run as root"
+
+find_mdcmd() {
+  if command -v mdcmd >/dev/null 2>&1; then
+    command -v mdcmd
+    return 0
+  fi
+  [[ -x /root/mdcmd ]] || return 1
+  printf '/root/mdcmd\n'
+}
+
+extract_status_value() {
+  local key="$1"
+  awk -F= -v key="$key" '$1 == key { print $2; exit }'
+}
+
+get_unraid_array_status() {
+  local mdcmd_bin
+  if mdcmd_bin="$(find_mdcmd 2>/dev/null)"; then
+    "$mdcmd_bin" status
+    return 0
+  fi
+  if [[ -r /proc/mdcmd ]]; then
+    cat /proc/mdcmd
+    return 0
+  fi
+  if [[ -r /var/local/emhttp/var.ini ]]; then
+    cat /var/local/emhttp/var.ini
+    return 0
+  fi
+  return 1
+}
+
+parity_sync_in_progress() {
+  local status_text mdresync mdaction mdstat_line
+  status_text="$(get_unraid_array_status 2>/dev/null || true)"
+  if [[ -n "$status_text" ]]; then
+    mdresync="$(printf '%s\n' "$status_text" | extract_status_value "mdResync")"
+    mdaction="$(printf '%s\n' "$status_text" | extract_status_value "mdResyncAction")"
+    if [[ "$mdresync" =~ ^[0-9]+$ ]] && (( mdresync > 0 )); then
+      log "Detected array sync activity: mdResync=$mdresync mdResyncAction='${mdaction:-unknown}'"
+      return 0
+    fi
+    return 1
+  fi
+  mdstat_line="$(grep -m 1 -E '(^|[[:space:]])(resync|recovery|reshape|check)[[:space:]]*=' /proc/mdstat 2>/dev/null || true)"
+  if [[ -n "$mdstat_line" ]]; then
+    log "Detected array sync activity from /proc/mdstat fallback: $mdstat_line"
+    return 0
+  fi
+  return 1
+}
+
+mover_process_matches() {
+  local args="$1"
+  [[ "$args" == *"/usr/local/sbin/mover"* ]] || [[ "$args" == *"/usr/local/bin/mover"* ]]
+}
+
+mover_is_running() {
+  local pidfile="/var/run/mover.pid"
+  local pid args line
+  if [[ -r "$pidfile" ]]; then
+    pid="$(<"$pidfile")"
+    pid="${pid//[[:space:]]/}"
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+      args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+      if [[ -n "$args" ]] && mover_process_matches "$args"; then
+        log "Detected running mover via $pidfile: pid=$pid args=$args"
+        return 0
+      fi
+    fi
+  fi
+  while IFS= read -r line; do
+    IFS=' ' read -r pid args <<< "$line"
+    if [[ -n "$args" ]] && mover_process_matches "$args"; then
+      log "Detected running mover via process list: pid=$pid args=$args"
+      return 0
+    fi
+  done < <(ps -eo pid=,args= 2>/dev/null)
+  return 1
+}
+
+dataset_exists() {
+  local ds="$1"
+  zfs list -H -o name "$ds" >/dev/null 2>&1
+}
+
+dataset_mounted_at_path() {
+  local path="$1"
+  zfs list -H -t filesystem -o name,mountpoint 2>/dev/null | awk -F '\t' -v target="$path" '$2 == target { print $1; exit }'
+}
+
+get_pool_name() {
+  printf '%s\n' "${ACTIVE_DATASET%%/*}"
+}
+
+get_pool_available_bytes() {
+  zfs list -H -p -o avail "$(get_pool_name)" | awk 'NR==1 {print $1}'
+}
+
+get_directory_used_bytes() {
+  local dir="$1"
+  du -skx -- "$dir" | awk '{print $1 * 1024}'
+}
+
+calculate_required_free_bytes() {
+  local source_bytes="$1"
+  local percent_margin safety_margin
+  percent_margin=$(( source_bytes * PERCENT_SAFETY_MARGIN / 100 ))
+  if (( percent_margin >= ABSOLUTE_SAFETY_MARGIN )); then
+    safety_margin="$percent_margin"
+  else
+    safety_margin="$ABSOLUTE_SAFETY_MARGIN"
+  fi
+  echo $(( source_bytes + safety_margin ))
+}
+
+wait_for_free_space() {
+  local required_bytes="$1"
+  local label="$2"
+  local folder_index="$3"
+  local avail attempt=0
+
+  while true; do
+    avail="$(get_pool_available_bytes)"
+    [[ "$avail" =~ ^[0-9]+$ ]] || die "Unable to read available space from ZFS pool $(get_pool_name)"
+    if (( avail >= required_bytes )); then
+      clear_waiting_for_space
+      return 0
+    fi
+    attempt=$(( attempt + 1 ))
+    if (( folder_index >= 0 )); then
+      folder_set "$folder_index" "waiting_for_space" "${FOLDER_PROGRESS[$folder_index]:-0}" "Waiting for free space before continuing."
+    fi
+    set_waiting_for_space "$label" "$required_bytes" "$avail"
+    log "Insufficient free space for '$label' (attempt $attempt): required=${required_bytes} avail=${avail}"
+    sleep "$SPACE_RECHECK_SECONDS"
+  done
+}
+
+wait_for_resume_space() {
+  local label="$1"
+  local folder_index="$2"
+  local avail
+  while true; do
+    avail="$(get_pool_available_bytes)"
+    [[ "$avail" =~ ^[0-9]+$ ]] || die "Unable to read available space from ZFS pool $(get_pool_name)"
+    if (( avail >= ABSOLUTE_SAFETY_MARGIN )); then
+      clear_waiting_for_space
+      return 0
+    fi
+    if (( folder_index >= 0 )); then
+      folder_set "$folder_index" "waiting_for_space" "${FOLDER_PROGRESS[$folder_index]:-0}" "Copy paused because the pool ran out of free space."
+    fi
+    set_waiting_for_space "$label" "$ABSOLUTE_SAFETY_MARGIN" "$avail"
+    log "Copy paused for low free space on '$label': need at least ${ABSOLUTE_SAFETY_MARGIN} bytes free to retry, avail=${avail}"
+    sleep "$SPACE_RECHECK_SECONDS"
+  done
+}
+
+socket_path_is_active() {
+  local socket_path="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -xanH 2>/dev/null | awk -v target="$socket_path" '$NF == target { found=1 } END { exit found ? 0 : 1 }'
+    return $?
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -xan 2>/dev/null | awk -v target="$socket_path" '$NF == target { found=1 } END { exit found ? 0 : 1 }'
+    return $?
+  fi
+  return 1
+}
+
+prepare_sockets_for_migration() {
+  local dir="$1"
+  local socket_path active_found=0 removed_any=0
+  while IFS= read -r -d '' socket_path; do
+    if socket_path_is_active "$socket_path"; then
+      if (( active_found == 0 )); then
+        log "Active socket files are still present under '$dir':"
+        active_found=1
+      fi
+      log "$socket_path"
+      continue
+    fi
+    log "Removing stale socket file: $socket_path"
+    rm -f -- "$socket_path"
+    removed_any=1
+  done < <(find "$dir" -xdev -type s -print0 2>/dev/null)
+
+  if (( removed_any == 1 )); then
+    log "Removed stale socket files under '$dir'."
+  fi
+
+  if (( active_found == 1 )); then
+    return 1
+  fi
+  return 0
+}
+
+assert_no_nested_mounts() {
+  local dir="$1"
+  local root_dev offender
+  root_dev="$(stat -c '%d' "$dir")"
+  offender="$({ find "$dir" -mindepth 1 -type d -exec stat --printf '%d\t%n\0' -- {} + 2>/dev/null || true; } | awk -v RS='\0' -F '\t' -v root_dev="$root_dev" '$1 != root_dev { print $2; exit }')"
+  if [[ -n "$offender" ]]; then
+    die "Nested mount or child dataset detected under '$dir': $offender"
+  fi
+}
+
+assert_path_is_mountpoint_for_dataset() {
+  local ds="$1"
+  local expected_path="$2"
+  local actual_mountpoint mounted
+  actual_mountpoint="$(zfs get -H -o value mountpoint "$ds")"
+  [[ "$actual_mountpoint" == "$expected_path" ]] || die "Dataset '$ds' mountpoint mismatch. Expected '$expected_path', got '$actual_mountpoint'"
+  [[ -d "$expected_path" ]] || die "Mountpoint directory missing for dataset '$ds': $expected_path"
+  mounted="$(zfs get -H -o value mounted "$ds")"
+  [[ "$mounted" == "yes" ]] || die "Dataset '$ds' has correct mountpoint property but is not currently mounted."
+}
+
+verify_destination_is_empty() {
+  local path="$1"
+  if find "$path" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    die "Destination path is not empty: $path"
+  fi
+}
+
+generate_file_manifest() {
+  local root="$1"
+  (
+    cd "$root"
+    find . -xdev -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+      sha256sum -z -- "$f"
+    done
+  )
+}
+
+generate_symlink_manifest() {
+  local root="$1"
+  (
+    cd "$root"
+    find . -xdev -type l -print0 | sort -z | while IFS= read -r -d '' lnk; do
+      printf '%s\0%s\0' "$lnk" "$(readlink -- "$lnk")"
+    done
+  )
+}
+
+compare_manifests() {
+  local src="$1"
+  local dst="$2"
+  cmp -s <(generate_file_manifest "$src") <(generate_file_manifest "$dst") || die "Regular file SHA-256 manifest mismatch between '$src' and '$dst'"
+  cmp -s <(generate_symlink_manifest "$src") <(generate_symlink_manifest "$dst") || die "Symlink manifest mismatch between '$src' and '$dst'"
+}
+
+compare_counts() {
+  local src="$1"
+  local dst="$2"
+  local src_files dst_files src_dirs dst_dirs src_links dst_links
+  src_files="$(find "$src" -xdev -type f | wc -l)"
+  dst_files="$(find "$dst" -xdev -type f | wc -l)"
+  [[ "$src_files" == "$dst_files" ]] || die "Regular file count mismatch: source=$src_files dest=$dst_files"
+  src_dirs="$(find "$src" -xdev -type d | wc -l)"
+  dst_dirs="$(find "$dst" -xdev -type d | wc -l)"
+  [[ "$src_dirs" == "$dst_dirs" ]] || die "Directory count mismatch: source=$src_dirs dest=$dst_dirs"
+  src_links="$(find "$src" -xdev -type l | wc -l)"
+  dst_links="$(find "$dst" -xdev -type l | wc -l)"
+  [[ "$src_links" == "$dst_links" ]] || die "Symlink count mismatch: source=$src_links dest=$dst_links"
+}
+
+rsync_copy_with_progress() {
+  local src="$1"
+  local dst="$2"
+  local folder_index="$3"
+  local line rsync_status=0 percent=0 last_error=""
+
+  while true; do
+    rsync_status=0
+    last_error=""
+    while IFS= read -r line; do
+      if [[ "$line" == __RSYNC_EXIT_STATUS__:* ]]; then
+        rsync_status="${line#__RSYNC_EXIT_STATUS__:}"
+        continue
+      fi
+
+      printf '%s\n' "$line"
+      last_error="$line"
+      if [[ "$line" =~ ([0-9]{1,3})% ]]; then
+        percent="${BASH_REMATCH[1]}"
+        if (( percent > 100 )); then
+          percent=100
+        fi
+        folder_set "$folder_index" "copying" "$(( percent * 80 / 100 ))" "Copying data (${percent}%)."
+      fi
+    done < <(
+      rsync -aHAXx --numeric-ids --human-readable --info=progress2 "$src"/ "$dst"/ 2>&1
+      printf '__RSYNC_EXIT_STATUS__:%s\n' "$?"
+    )
+
+    [[ "$rsync_status" =~ ^[0-9]+$ ]] || rsync_status=1
+    if (( rsync_status == 0 )); then
+      folder_set "$folder_index" "copy_complete" 80 "Copy finished. Starting verification."
+      return 0
+    fi
+
+    if (( rsync_status == 11 )) || [[ "$last_error" == *"No space left on device"* ]]; then
+      log "Copy hit low space for '${FOLDER_NAMES[$folder_index]}'. Waiting for more free space before retrying."
+      wait_for_resume_space "${FOLDER_NAMES[$folder_index]}" "$folder_index"
+      folder_set "$folder_index" "copying" "${FOLDER_PROGRESS[$folder_index]:-0}" "Free space recovered. Retrying copy."
+      continue
+    fi
+
+    die "Rsync copy failed for '${FOLDER_NAMES[$folder_index]}' with exit status $rsync_status. ${last_error}"
+    return 1
+  done
+}
+
+rsync_verify() {
+  local src="$1"
+  local dst="$2"
+  local line had_differences=0 rsync_status=
+  while IFS= read -r line; do
+    if [[ "$line" == __RSYNC_EXIT_STATUS__:* ]]; then
+      rsync_status="${line#__RSYNC_EXIT_STATUS__:}"
+      continue
+    fi
+    if (( had_differences == 0 )); then
+      log "Rsync verification reported differences:"
+      had_differences=1
+    fi
+    printf '%s\n' "$line"
+  done < <(
+    rsync -aHAXcnx --delete --numeric-ids --itemize-changes "$src"/ "$dst"/ 2>&1
+    printf '__RSYNC_EXIT_STATUS__:%s\n' "$?"
+  )
+  [[ "$rsync_status" =~ ^[0-9]+$ ]] || die "Unable to determine rsync verification exit status"
+  (( rsync_status == 0 )) || die "Rsync checksum verification failed with exit status $rsync_status"
+  if (( had_differences == 1 )); then
+    die "Rsync checksum verification reported differences between '$src' and '$dst'"
+  fi
+}
+
+docker_daemon_is_running() {
+  docker info >/dev/null 2>&1
+}
+
+container_inspect_line() {
+  local container_id="$1"
+  docker inspect -f '{{.Id}}|{{.Name}}|{{.HostConfig.RestartPolicy.Name}}|{{.HostConfig.RestartPolicy.MaximumRetryCount}}|{{.HostConfig.NetworkMode}}|{{range $i, $v := .HostConfig.VolumesFrom}}{{if $i}},{{end}}{{$v}}{{end}}|{{index .Config.Labels "com.docker.compose.depends_on"}}' "$container_id" 2>/dev/null || true
+}
+
+container_mount_sources() {
+  local container_id="$1"
+  docker inspect -f '{{range .Mounts}}{{println .Source}}{{end}}' "$container_id" 2>/dev/null || true
+}
+
+container_is_running_by_id() {
+  local container_id="$1"
+  [[ "$(docker inspect -f '{{.State.Running}}' "$container_id" 2>/dev/null || printf 'false')" == "true" ]]
+}
+
+normalize_container_ref() {
+  local ref
+  ref="$(trim "$1")"
+  ref="${ref#/}"
+  if [[ "$ref" == "<no value>" || "$ref" == "null" ]]; then
+    printf ''
+    return 0
+  fi
+  ref="${ref%%:*}"
+  printf '%s' "$ref"
+}
+
+canonicalize_host_path() {
+  local path="$1"
+  path="$(trim "$path")"
+  [[ -n "$path" ]] || {
+    printf ''
+    return 0
+  }
+  readlink -f -- "$path" 2>/dev/null || printf '%s' "$path"
+}
+
+parse_container_dependency_refs() {
+  local network_mode="$1"
+  local volumes_from="$2"
+  local depends_label="$3"
+  local refs="" item ref
+
+  if [[ "$network_mode" == container:* ]]; then
+    ref="$(normalize_container_ref "${network_mode#container:}")"
+    refs="$(list_append_unique "$refs" "$ref")"
+  fi
+
+  IFS=',' read -r -a _volumes_from_parts <<< "$volumes_from"
+  for item in "${_volumes_from_parts[@]}"; do
+    ref="$(normalize_container_ref "$item")"
+    refs="$(list_append_unique "$refs" "$ref")"
+  done
+
+  depends_label="${depends_label//,/ }"
+  depends_label="${depends_label//[/ }"
+  depends_label="${depends_label//]/ }"
+  depends_label="${depends_label//\"/ }"
+  depends_label="${depends_label//;/ }"
+  depends_label="${depends_label//=/ }"
+  for item in $depends_label; do
+    ref="$(normalize_container_ref "$item")"
+    refs="$(list_append_unique "$refs" "$ref")"
+  done
+
+  printf '%s' "$refs"
+}
+
+folder_indexes_for_mount_source() {
+  local source="$1"
+  local rest folder_name list="" folder_index
+
+  source="$(canonicalize_host_path "$source")"
+  [[ -n "$source" ]] || {
+    printf ''
+    return 0
+  }
+
+  if [[ "$source" == "$ACTIVE_MOUNTPOINT_REAL" ]]; then
+    for folder_index in "${!FOLDER_NAMES[@]}"; do
+      list="$(list_append_unique "$list" "$folder_index")"
+    done
+    printf '%s' "$list"
+    return 0
+  fi
+
+  case "$source" in
+    "$ACTIVE_MOUNTPOINT_REAL"/*)
+      rest="${source#"$ACTIVE_MOUNTPOINT_REAL"/}"
+      folder_name="${rest%%/*}"
+      if [[ -n "${FOLDER_INDEX_BY_NAME[$folder_name]+x}" ]]; then
+        list="$(list_append_unique "$list" "${FOLDER_INDEX_BY_NAME[$folder_name]}")"
+      fi
+      ;;
+  esac
+
+  printf '%s' "$list"
+}
+
+container_folder_indexes_from_mounts() {
+  local container_id="$1"
+  local source list="" folder_indexes folder_index
+  while IFS= read -r source; do
+    folder_indexes="$(folder_indexes_for_mount_source "$source")"
+    for folder_index in $folder_indexes; do
+      list="$(list_append_unique "$list" "$folder_index")"
+    done
+  done < <(container_mount_sources "$container_id")
+  printf '%s' "$list"
+}
+
+container_has_pending_folders() {
+  local container_index="$1"
+  local folder_index
+  for folder_index in ${CONTAINER_FOLDER_INDEXES[$container_index]}; do
+    if [[ "${FOLDER_STATES[$folder_index]}" != "complete" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_container_dependencies() {
+  local container_index ref dependency_index dependencies
+  for container_index in "${!CONTAINER_IDS[@]}"; do
+    dependencies=""
+    for ref in ${CONTAINER_DEPENDENCY_REFS[$container_index]}; do
+      dependency_index=""
+      if [[ -n "${CONTAINER_INDEX_BY_ID[$ref]+x}" ]]; then
+        dependency_index="${CONTAINER_INDEX_BY_ID[$ref]}"
+      elif [[ -n "${CONTAINER_INDEX_BY_NAME[$ref]+x}" ]]; then
+        dependency_index="${CONTAINER_INDEX_BY_NAME[$ref]}"
+      fi
+
+      if [[ -n "$dependency_index" && "$dependency_index" != "$container_index" ]]; then
+        dependencies="$(list_append_unique "$dependencies" "$dependency_index")"
+      fi
+    done
+    CONTAINER_DEPENDENCY_INDEXES[container_index]="$dependencies"
+  done
+}
+
+record_running_containers() {
+  local running_ids=() id inspect name policy max_retry network_mode volumes_from depends_label folder_indexes dependency_refs
+  local container_index folder_index
+  mapfile -t running_ids < <(docker ps -q 2>/dev/null || true)
+  for id in "${running_ids[@]}"; do
+    [[ -n "$id" ]] || continue
+    inspect="$(container_inspect_line "$id")"
+    [[ -n "$inspect" ]] || continue
+    IFS='|' read -r id name policy max_retry network_mode volumes_from depends_label <<< "$inspect"
+
+    folder_indexes="$(container_folder_indexes_from_mounts "$id")"
+    [[ -n "$folder_indexes" ]] || continue
+
+    dependency_refs="$(parse_container_dependency_refs "$network_mode" "$volumes_from" "$depends_label")"
+    container_index="${#CONTAINER_IDS[@]}"
+    CONTAINER_IDS+=("$id")
+    CONTAINER_NAMES+=("${name#/}")
+    CONTAINER_RESTART_NAMES+=("${policy:-no}")
+    CONTAINER_RESTART_MAXS+=("${max_retry:-0}")
+    CONTAINER_NETWORK_MODES+=("${network_mode:-default}")
+    CONTAINER_FOLDER_INDEXES+=("$folder_indexes")
+    CONTAINER_DEPENDENCY_REFS+=("$dependency_refs")
+    CONTAINER_DEPENDENCY_INDEXES+=("")
+    CONTAINER_WAS_RUNNING+=("1")
+    CONTAINER_CURRENTLY_RUNNING+=("1")
+    CONTAINER_POLICY_DISABLED+=("0")
+    CONTAINER_START_STATES+=("running")
+    CONTAINER_LAST_ERRORS+=("")
+    CONTAINER_INDEX_BY_NAME["${name#/}"]="$container_index"
+    CONTAINER_INDEX_BY_ID["$id"]="$container_index"
+
+    for folder_index in $folder_indexes; do
+      FOLDER_CONTAINER_INDEXES[folder_index]="$(list_append_unique "${FOLDER_CONTAINER_INDEXES[$folder_index]}" "$container_index")"
+    done
+  done
+
+  resolve_container_dependencies
+  write_status_file
+}
+
+container_related_pending_indexes() {
+  local container_index="$1"
+  local related="" dependency_index other_index
+
+  for dependency_index in ${CONTAINER_DEPENDENCY_INDEXES[$container_index]}; do
+    if container_has_pending_folders "$dependency_index"; then
+      related="$(list_append_unique "$related" "$dependency_index")"
+    fi
+  done
+
+  for other_index in "${!CONTAINER_IDS[@]}"; do
+    for dependency_index in ${CONTAINER_DEPENDENCY_INDEXES[$other_index]}; do
+      if [[ "$dependency_index" == "$container_index" ]] && container_has_pending_folders "$other_index"; then
+        related="$(list_append_unique "$related" "$other_index")"
+      fi
+    done
+  done
+
+  printf '%s' "$related"
+}
+
+select_batch_for_folder() {
+  local start_folder_index="$1"
+  local batch_folders="$start_folder_index"
+  local batch_containers=""
+  local changed=1
+  local folder_index container_index related_index related_containers
+
+  while (( changed == 1 )); do
+    changed=0
+
+    for folder_index in $batch_folders; do
+      for container_index in ${FOLDER_CONTAINER_INDEXES[$folder_index]}; do
+        if container_has_pending_folders "$container_index" && ! list_has_word "$batch_containers" "$container_index"; then
+          batch_containers="$(list_append_unique "$batch_containers" "$container_index")"
+          changed=1
+        fi
+      done
+    done
+
+    for container_index in $batch_containers; do
+      for folder_index in ${CONTAINER_FOLDER_INDEXES[$container_index]}; do
+        if [[ "${FOLDER_STATES[$folder_index]}" != "complete" ]] && ! list_has_word "$batch_folders" "$folder_index"; then
+          batch_folders="$(list_append_unique "$batch_folders" "$folder_index")"
+          changed=1
+        fi
+      done
+
+      related_containers="$(container_related_pending_indexes "$container_index")"
+      for related_index in $related_containers; do
+        if ! list_has_word "$batch_containers" "$related_index"; then
+          batch_containers="$(list_append_unique "$batch_containers" "$related_index")"
+          changed=1
+        fi
+      done
+    done
+  done
+
+  CURRENT_BATCH_FOLDERS="$batch_folders"
+  CURRENT_BATCH_CONTAINERS="$batch_containers"
+}
+
+restart_policy_spec() {
+  local name="$1"
+  local max_retry="$2"
+  if [[ "$name" == "on-failure" && "$max_retry" =~ ^[0-9]+$ ]] && (( max_retry > 0 )); then
+    printf '%s:%s' "$name" "$max_retry"
+    return 0
+  fi
+  printf '%s' "$name"
+}
+
+next_pending_folder_index() {
+  local folder_index
+  for folder_index in "${!FOLDER_NAMES[@]}"; do
+    if [[ "${FOLDER_STATES[$folder_index]}" != "complete" ]]; then
+      printf '%s' "$folder_index"
+      return 0
+    fi
+  done
+  return 1
+}
+
+build_container_start_order() {
+  local remaining="$1"
+  local order="" progress container_index dependency_index unresolved snapshot
+
+  while [[ -n "$remaining" ]]; do
+    progress=0
+    snapshot="$remaining"
+    for container_index in $snapshot; do
+      unresolved=0
+      for dependency_index in ${CONTAINER_DEPENDENCY_INDEXES[$container_index]}; do
+        if list_has_word "$remaining" "$dependency_index"; then
+          unresolved=1
+          break
+        fi
+      done
+      if (( unresolved == 0 )); then
+        order="$(list_append_unique "$order" "$container_index")"
+        remaining="$(list_remove_word "$remaining" "$container_index")"
+        progress=1
+      fi
+    done
+
+    if (( progress == 0 )); then
+      for container_index in $remaining; do
+        order="$(list_append_unique "$order" "$container_index")"
+      done
+      break
+    fi
+  done
+
+  printf '%s' "$order"
+}
+
+reverse_index_list() {
+  local input="$1"
+  local -a indexes=()
+  local i output=""
+  mapfile -t indexes <<< "$input"
+  for (( i=${#indexes[@]} - 1; i>=0; i-- )); do
+    output="$(list_append_unique "$output" "${indexes[$i]}")"
+  done
+  printf '%s' "$output"
+}
+
+build_folder_batch_order() {
+  local batch_folders="$1"
+  local batch_containers="$2"
+  local folder_order="" container_order container_index folder_index
+
+  container_order="$(build_container_start_order "$batch_containers")"
+  for container_index in $container_order; do
+    for folder_index in ${CONTAINER_FOLDER_INDEXES[$container_index]}; do
+      if list_has_word "$batch_folders" "$folder_index" && [[ "${FOLDER_STATES[$folder_index]}" != "complete" ]]; then
+        folder_order="$(list_append_unique "$folder_order" "$folder_index")"
+      fi
+    done
+  done
+
+  for folder_index in $batch_folders; do
+    if [[ "${FOLDER_STATES[$folder_index]}" != "complete" ]]; then
+      folder_order="$(list_append_unique "$folder_order" "$folder_index")"
+    fi
+  done
+
+  printf '%s' "$folder_order"
+}
+
+temporarily_disable_restart_policies() {
+  local target_indexes="$1"
+  local index spec
+  for index in $target_indexes; do
+    if [[ "${CONTAINER_RESTART_NAMES[$index]}" == "no" || "${CONTAINER_POLICY_DISABLED[$index]}" == "1" ]]; then
+      continue
+    fi
+    spec="$(restart_policy_spec "${CONTAINER_RESTART_NAMES[$index]}" "${CONTAINER_RESTART_MAXS[$index]}")"
+    log "Temporarily disabling restart policy for ${CONTAINER_NAMES[$index]} (was ${spec})"
+    if docker update --restart=no "${CONTAINER_IDS[$index]}" >/dev/null 2>&1; then
+      CONTAINER_POLICY_DISABLED[index]="1"
+      CONTAINER_START_STATES[index]="restart_policy_disabled"
+    else
+      CONTAINER_LAST_ERRORS[index]="Unable to disable restart policy before stop."
+    fi
+  done
+  write_status_file
+}
+
+stop_container_batch() {
+  local target_indexes="$1"
+  local start_order stop_order index
+  if ! docker_daemon_is_running; then
+    log "Docker daemon is not running. No containers need to be stopped."
+    return 0
+  fi
+
+  if [[ -z "$target_indexes" ]]; then
+    return 0
+  fi
+
+  temporarily_disable_restart_policies "$target_indexes"
+  set_status "stopping_containers" "stopping_containers" "Stopping only the containers used by the current migration batch."
+  NEEDS_CONTAINER_RECOVERY=1
+
+  start_order="$(build_container_start_order "$target_indexes")"
+  stop_order="$(reverse_index_list "$start_order")"
+
+  for index in $stop_order; do
+    if [[ "${CONTAINER_CURRENTLY_RUNNING[$index]}" != "1" ]]; then
+      continue
+    fi
+
+    log "Stopping container ${CONTAINER_NAMES[$index]}"
+    docker stop "${CONTAINER_IDS[$index]}" >/dev/null 2>&1 || true
+
+    while container_is_running_by_id "${CONTAINER_IDS[$index]}"; do
+      MESSAGE="Waiting for ${CONTAINER_NAMES[$index]} to stop."
+      write_status_file
+      sleep 2
+    done
+
+    CONTAINER_CURRENTLY_RUNNING[index]="0"
+    CONTAINER_START_STATES[index]="stopped"
+    CONTAINER_LAST_ERRORS[index]=""
+    write_status_file
+  done
+
+  ensure_batch_containers_stopped "$target_indexes"
+}
+
+ensure_batch_containers_stopped() {
+  local target_indexes="$1"
+  local index names=""
+  if ! docker_daemon_is_running; then
+    return 0
+  fi
+
+  for index in $target_indexes; do
+    if container_is_running_by_id "${CONTAINER_IDS[$index]}"; then
+      names+="${CONTAINER_NAMES[$index]}, "
+    fi
+  done
+
+  [[ -z "$names" ]] && return 0
+  die "A Docker container restarted during migration (${names%, }). Stop watchdogs and automatic relaunch tools before trying again."
+}
+
+restore_restart_policies() {
+  local target_indexes="${1:-}"
+  local index spec
+  if [[ -z "$target_indexes" ]]; then
+    target_indexes="$(printf '%s\n' "${!CONTAINER_IDS[@]}")"
+  fi
+  for index in $target_indexes; do
+    if [[ "${CONTAINER_POLICY_DISABLED[$index]}" != "1" ]]; then
+      continue
+    fi
+    spec="$(restart_policy_spec "${CONTAINER_RESTART_NAMES[$index]}" "${CONTAINER_RESTART_MAXS[$index]}")"
+    if docker update --restart="$spec" "${CONTAINER_IDS[$index]}" >/dev/null 2>&1; then
+      CONTAINER_POLICY_DISABLED[index]="0"
+    else
+      CONTAINER_LAST_ERRORS[index]="Unable to restore restart policy ${spec}."
+    fi
+  done
+  write_status_file
+}
+
+start_selected_containers() {
+  local target_indexes="${1:-}"
+  local retry_indexes=() index start_order
+  if [[ -z "$target_indexes" ]]; then
+    target_indexes=""
+    for index in "${!CONTAINER_IDS[@]}"; do
+      if [[ "${CONTAINER_WAS_RUNNING[$index]}" == "1" && "${CONTAINER_CURRENTLY_RUNNING[$index]}" != "1" ]]; then
+        target_indexes="$(list_append_unique "$target_indexes" "$index")"
+      fi
+    done
+  fi
+  if [[ -z "$target_indexes" ]]; then
+    restore_restart_policies "$target_indexes"
+    return 0
+  fi
+
+  set_status "restarting_containers" "restarting_containers" "Starting containers for the current migration batch."
+  start_order="$(build_container_start_order "$target_indexes")"
+
+  for index in $start_order; do
+    if [[ "${CONTAINER_WAS_RUNNING[$index]}" != "1" || "${CONTAINER_CURRENTLY_RUNNING[$index]}" == "1" ]]; then
+      continue
+    fi
+    if docker start "${CONTAINER_IDS[$index]}" >/dev/null 2>&1; then
+      CONTAINER_CURRENTLY_RUNNING[index]="1"
+      CONTAINER_START_STATES[index]="started"
+      CONTAINER_LAST_ERRORS[index]=""
+    else
+      CONTAINER_START_STATES[index]="retry_pending"
+      CONTAINER_LAST_ERRORS[index]="First container start attempt failed."
+      retry_indexes+=("$index")
+    fi
+    write_status_file
+  done
+
+  if (( ${#retry_indexes[@]} > 0 )); then
+    set_status "retrying_container_start" "retrying_container_start" "Some containers failed to start. Waiting 5 minutes before retrying those containers once."
+    sleep "$RESTART_RETRY_DELAY"
+    for index in "${retry_indexes[@]}"; do
+      if docker start "${CONTAINER_IDS[$index]}" >/dev/null 2>&1; then
+        CONTAINER_CURRENTLY_RUNNING[index]="1"
+        CONTAINER_START_STATES[index]="started_on_retry"
+        CONTAINER_LAST_ERRORS[index]=""
+      else
+        CONTAINER_START_STATES[index]="retry_failed"
+        CONTAINER_LAST_ERRORS[index]="Container still failed after the delayed retry."
+      fi
+      write_status_file
+    done
+  fi
+
+  restore_restart_policies "$target_indexes"
+  NEEDS_CONTAINER_RECOVERY=0
+  for index in "${!CONTAINER_IDS[@]}"; do
+    if [[ "${CONTAINER_WAS_RUNNING[$index]}" == "1" && "${CONTAINER_CURRENTLY_RUNNING[$index]}" != "1" ]]; then
+      NEEDS_CONTAINER_RECOVERY=1
+      break
+    fi
+  done
+}
+
+rollback_failed_folder() {
+  local original_path="$1"
+  local temp_path="$2"
+  local target_dataset="$3"
+  if dataset_exists "$target_dataset"; then
+    log "Destroying incomplete dataset after failure: $target_dataset"
+    zfs destroy -r "$target_dataset" >/dev/null 2>&1 || log "WARNING: Failed to destroy incomplete dataset: $target_dataset"
+  fi
+  if [[ -n "$temp_path" && -d "$temp_path" && ! -e "$original_path" ]]; then
+    log "Restoring original folder name after failure: $original_path"
+    mv -- "$temp_path" "$original_path" >/dev/null 2>&1 || log "WARNING: Failed to restore original folder name from '$temp_path' to '$original_path'"
+  fi
+}
+
+migrate_one_directory() {
+  local folder_index="$1"
+  local protected_container_indexes="${2:-}"
+  local entry_path="${FOLDER_SOURCE_PATHS[$folder_index]}"
+  local name="${FOLDER_NAMES[$folder_index]}"
+  local child_ds="${FOLDER_TARGET_DATASETS[$folder_index]}"
+  local parent_path temp_name temp_path new_path mounted_dataset source_bytes required_bytes
+
+  CURRENT_FOLDER_INDEX="$folder_index"
+  CURRENT_FOLDER="$name"
+  CURRENT_FOLDER_PERCENT=0
+  parent_path="$(dirname "$entry_path")"
+  new_path="$entry_path"
+  temp_path=""
+
+  folder_set "$folder_index" "preparing" 2 "Preparing folder for migration."
+  ensure_batch_containers_stopped "$protected_container_indexes" || return 1
+
+  prepare_sockets_for_migration "$entry_path" || { die "Active socket files are still present under '$entry_path'. Make sure every container and watchdog is stopped before migrating."; return 1; }
+  assert_no_nested_mounts "$entry_path" || return 1
+
+  source_bytes="$(get_directory_used_bytes "$entry_path")"
+  [[ "$source_bytes" =~ ^[0-9]+$ ]] || { die "Could not determine source size for '$entry_path'"; return 1; }
+  required_bytes="$(calculate_required_free_bytes "$source_bytes")"
+  wait_for_free_space "$required_bytes" "$name" "$folder_index" || return 1
+  set_status "migrating" "renaming_source" "Preparing $name for child dataset creation."
+
+  temp_name="${name}.__migration_tmp__.$(date +%s).$$.$RANDOM"
+  temp_path="${parent_path}/${temp_name}"
+  [[ ! -e "$temp_path" ]] || { die "Temporary path already exists: $temp_path"; return 1; }
+
+  mv -- "$entry_path" "$temp_path" || { die "Failed to rename '$entry_path' to temporary path '$temp_path'"; return 1; }
+
+  wait_for_free_space "$required_bytes" "$name" "$folder_index" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
+
+  log "Creating dataset: $child_ds"
+  zfs create "$child_ds" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; die "Dataset creation failed: $child_ds"; return 1; }
+
+  assert_path_is_mountpoint_for_dataset "$child_ds" "$new_path" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
+  verify_destination_is_empty "$new_path" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
+
+  chown --reference="$temp_path" "$new_path"
+  chmod --reference="$temp_path" "$new_path"
+  touch --reference="$temp_path" "$new_path"
+
+  folder_set "$folder_index" "copying" 5 "Copying data into the new dataset."
+  rsync_copy_with_progress "$temp_path" "$new_path" "$folder_index" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
+  ensure_batch_containers_stopped "$protected_container_indexes" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
+  sync
+
+  folder_set "$folder_index" "verifying" 86 "Running rsync checksum verification."
+  rsync_verify "$temp_path" "$new_path" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
+
+  folder_set "$folder_index" "verifying" 92 "Comparing file and symlink manifests."
+  compare_manifests "$temp_path" "$new_path" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
+
+  folder_set "$folder_index" "verifying" 96 "Comparing file, directory, and symlink counts."
+  compare_counts "$temp_path" "$new_path" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
+
+  rm -rf --one-file-system -- "$temp_path" || { die "Failed to remove temporary source directory '$temp_path' after successful verification."; return 1; }
+  COMPLETED_FOLDERS=$((COMPLETED_FOLDERS + 1))
+  folder_set "$folder_index" "complete" 100 "Migration complete."
+  return 0
+}
+
+build_folder_plan() {
+  local parent_path child name target_ds mounted_dataset size_bytes folder_index
+  ACTIVE_MOUNTPOINT="$(zfs get -H -o value mountpoint "$ACTIVE_DATASET" 2>/dev/null | head -n 1 || true)"
+  [[ -n "$ACTIVE_MOUNTPOINT" && "$ACTIVE_MOUNTPOINT" != "legacy" && "$ACTIVE_MOUNTPOINT" != "none" ]] || die "Dataset $ACTIVE_DATASET does not have a readable mounted filesystem path."
+  [[ -d "$ACTIVE_MOUNTPOINT" ]] || die "Mountpoint $ACTIVE_MOUNTPOINT does not exist or is not a directory."
+  ACTIVE_MOUNTPOINT_REAL="$(canonicalize_host_path "$ACTIVE_MOUNTPOINT")"
+  [[ -n "$ACTIVE_MOUNTPOINT_REAL" && -d "$ACTIVE_MOUNTPOINT_REAL" ]] || die "Could not resolve a usable canonical mountpoint path for $ACTIVE_DATASET."
+
+  while IFS= read -r -d '' child; do
+    name="$(basename "$child")"
+    [[ "$name" == *".__migration_tmp__."* ]] && continue
+    [[ "$name" == "." || "$name" == ".." ]] && continue
+    [[ "$name" =~ ^[A-Za-z0-9._:+\-]+$ ]] || continue
+
+    target_ds="${ACTIVE_DATASET}/${name}"
+    dataset_exists "$target_ds" && continue
+
+    mounted_dataset="$(dataset_mounted_at_path "$child")"
+    if [[ -n "$mounted_dataset" ]]; then
+      continue
+    fi
+
+    size_bytes="$(get_directory_used_bytes "$child" 2>/dev/null || true)"
+    [[ "$size_bytes" =~ ^[0-9]+$ ]] || size_bytes=0
+
+    folder_index="${#FOLDER_NAMES[@]}"
+    FOLDER_NAMES+=("$name")
+    FOLDER_SOURCE_PATHS+=("$child")
+    FOLDER_TARGET_DATASETS+=("$target_ds")
+    FOLDER_SIZE_BYTES+=("$size_bytes")
+    FOLDER_STATES+=("queued")
+    FOLDER_PROGRESS+=("0")
+    FOLDER_MESSAGES+=("Queued for migration.")
+    FOLDER_CONTAINER_INDEXES+=("")
+    FOLDER_INDEX_BY_NAME["$name"]="$folder_index"
+  done < <(find "$ACTIVE_MOUNTPOINT" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+
+  TOTAL_FOLDERS="${#FOLDER_NAMES[@]}"
+  write_status_file
+  if (( TOTAL_FOLDERS == 0 )); then
+    die "No eligible top-level folders were found under $ACTIVE_DATASET."
+    return 1
+  fi
+}
+
+# shellcheck disable=SC2329
+cleanup() {
+  local exit_code="$?"
+  if (( EXIT_CODE == 0 )) && (( exit_code != 0 )); then
+    EXIT_CODE="$exit_code"
+  fi
+
+  if (( MIGRATION_COMPLETE == 0 )) && [[ "$EXIT_CODE" -ne 0 ]]; then
+    LAST_ERROR="${LAST_ERROR:-Dataset migration stopped before completion.}"
+    if (( NEEDS_CONTAINER_RECOVERY == 1 )); then
+      log "Migration did not finish cleanly. Attempting to restart previously running containers before exiting."
+      start_selected_containers || true
+    fi
+    STATE="failed"
+    CURRENT_STEP="failed"
+    MESSAGE="$LAST_ERROR"
+    ENDED_EPOCH="$(date +%s)"
+    write_status_file
+    exit "$EXIT_CODE"
+  fi
+
+  if (( MIGRATION_COMPLETE == 1 )); then
+    exit 0
+  fi
+
+  exit "$EXIT_CODE"
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --dataset)
+      shift
+      DATASET="$(trim "${1:-}")"
+      ;;
+  esac
+  shift || true
+done
+
+[[ -n "$DATASET" ]] || die "Dataset is required."
+[[ "$DATASET" =~ ^[A-Za-z0-9._/:+\-]+$ ]] || die "Dataset name is invalid."
+ACTIVE_DATASET="$DATASET"
+
+ensure_dir "$PLUGIN_ROOT"
+ensure_dir "$LOGS_DIR"
+ensure_dir "$(dirname "$LOCK_FILE")"
+zfsas_log_prepare_for_append "$LOG_FILE" "$LOG_ARCHIVE_FILE" 1048576 600 20 2097152 || true
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  die "Another dataset migration appears to already be running."
+  write_status_file
+  exit 1
+fi
+chmod 0640 "$LOCK_FILE" >/dev/null 2>&1 || true
+apply_owner "$LOCK_FILE"
+
+trap cleanup EXIT INT TERM
+
+if parity_sync_in_progress; then
+  die "A parity check or sync is currently running. Stop it before proceeding."
+  write_status_file
+  exit 1
+fi
+
+if mover_is_running; then
+  die "The Unraid mover is currently running. Wait for it to finish or disable the mover schedule before proceeding."
+  write_status_file
+  exit 1
+fi
+
+if ! dataset_exists "$ACTIVE_DATASET"; then
+  die "Dataset does not exist: $ACTIVE_DATASET"
+  write_status_file
+  exit 1
+fi
+
+set_status "preparing" "planning" "Scanning the selected dataset for eligible top-level folders."
+build_folder_plan || exit 1
+
+record_running_containers
+set_status "migrating" "migrating" "Starting folder-by-folder migration."
+
+while CURRENT_FOLDER_INDEX="$(next_pending_folder_index)"; do
+  select_batch_for_folder "$CURRENT_FOLDER_INDEX"
+  if [[ -n "$CURRENT_BATCH_CONTAINERS" ]]; then
+    stop_container_batch "$CURRENT_BATCH_CONTAINERS" || exit 1
+  fi
+
+  for CURRENT_FOLDER_INDEX in $(build_folder_batch_order "$CURRENT_BATCH_FOLDERS" "$CURRENT_BATCH_CONTAINERS"); do
+    CURRENT_FOLDER="${FOLDER_NAMES[$CURRENT_FOLDER_INDEX]}"
+    CURRENT_FOLDER_PERCENT="${FOLDER_PROGRESS[$CURRENT_FOLDER_INDEX]:-0}"
+    if ! migrate_one_directory "$CURRENT_FOLDER_INDEX" "$CURRENT_BATCH_CONTAINERS"; then
+      exit 1
+    fi
+  done
+
+  if [[ -n "$CURRENT_BATCH_CONTAINERS" ]]; then
+    set_status "restarting_containers" "restarting_containers" "Starting containers back up after the current migration batch."
+    start_selected_containers "$CURRENT_BATCH_CONTAINERS" || true
+  fi
+done
+
+if (( NEEDS_CONTAINER_RECOVERY == 1 )); then
+  set_status "restarting_containers" "restarting_containers" "Starting any remaining containers back up."
+  start_selected_containers || true
+fi
+
+if [[ -n "${CURRENT_BATCH_CONTAINERS:-}" ]]; then
+  CURRENT_BATCH_CONTAINERS=""
+fi
+if [[ -n "${CURRENT_BATCH_FOLDERS:-}" ]]; then
+  CURRENT_BATCH_FOLDERS=""
+fi
+
+if (( COMPLETED_FOLDERS < TOTAL_FOLDERS )); then
+  die "Dataset migration stopped before all planned folders completed."
+  exit 1
+fi
+
+STATE="complete"
+CURRENT_STEP="complete"
+MESSAGE="Dataset migration finished."
+CURRENT_FOLDER=""
+CURRENT_FOLDER_PERCENT=100
+ENDED_EPOCH="$(date +%s)"
+MIGRATION_COMPLETE=1
+write_status_file
+log "Dataset migration finished successfully for $ACTIVE_DATASET"
+exit 0

@@ -1,0 +1,445 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+ZFSAS_LOG_HELPER="/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/log-maintenance-lib.sh"
+if [[ -r "$ZFSAS_LOG_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$ZFSAS_LOG_HELPER"
+else
+  zfsas_log_sanitize_text() { printf '%s' "$1"; }
+  zfsas_log_prepare_for_append() { return 0; }
+fi
+
+CONFIG_ROOT="/boot/config/plugins/zfs.autosnapshot/snapshot_manager"
+QUEUE_ROOT="${CONFIG_ROOT}/queues"
+STATUS_ROOT="${CONFIG_ROOT}/status"
+RUNTIME_DIR="/var/run/zfs-autosnapshot-manager"
+LOCKS_DIR="${RUNTIME_DIR}/locks"
+LOG_FILE="/var/log/zfs_autosnapshot_snapshot_manager.log"
+LOG_ARCHIVE_FILE="/var/log/zfs_autosnapshot_snapshot_manager.archive.log"
+HOLD_TAG="zfsas-manual"
+
+DATASET=""
+DATASET_KEY=""
+QUEUE_DIR=""
+STATUS_FILE=""
+LOCK_DIR=""
+LAST_MESSAGE=""
+LAST_ERROR=""
+ACTIVE_OP_FILE=""
+CURRENT_ACTION=""
+CURRENT_ACTION_LABEL=""
+CURRENT_SNAPSHOT=""
+CURRENT_DESTINATION=""
+
+log() {
+  printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$(zfsas_log_sanitize_text "$*")"
+}
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+write_status() {
+  local busy="$1"
+  local pending_count="$2"
+  mkdir -p "$STATUS_ROOT" >/dev/null 2>&1 || true
+  cat > "$STATUS_FILE" <<EOF
+{
+  "dataset": "$(json_escape "$DATASET")",
+  "busy": $([[ "$busy" == "1" ]] && echo true || echo false),
+  "pending_count": ${pending_count},
+  "current_action": "$(json_escape "$CURRENT_ACTION")",
+  "current_action_label": "$(json_escape "$CURRENT_ACTION_LABEL")",
+  "current_snapshot": "$(json_escape "$CURRENT_SNAPSHOT")",
+  "current_destination": "$(json_escape "$CURRENT_DESTINATION")",
+  "last_message": "$(json_escape "$LAST_MESSAGE")",
+  "last_error": "$(json_escape "$LAST_ERROR")",
+  "updated_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+}
+EOF
+  chmod 0640 "$STATUS_FILE" >/dev/null 2>&1 || true
+  chown nobody "$STATUS_FILE" >/dev/null 2>&1 || true
+  chgrp users "$STATUS_FILE" >/dev/null 2>&1 || true
+}
+
+# shellcheck disable=SC2329  # Invoked by EXIT/INT/TERM trap.
+cleanup() {
+  local exit_code="$?"
+  CURRENT_ACTION=""
+  CURRENT_ACTION_LABEL=""
+  CURRENT_SNAPSHOT=""
+  CURRENT_DESTINATION=""
+  write_status 0 "$(queue_count)"
+  rm -rf "$LOCK_DIR" >/dev/null 2>&1 || true
+  exit "$exit_code"
+}
+
+parse_config_value() {
+  local raw="$1"
+  local value
+
+  value="${raw#"${raw%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  [[ -n "$value" ]] || {
+    printf ''
+    return 0
+  }
+
+  if [[ "$value" == \"*\" && "$value" == *\" && ${#value} -ge 2 ]]; then
+    value="${value:1:${#value}-2}"
+    value="${value//\\\\/\\}"
+    value="${value//\\\"/\"}"
+    printf '%s' "$value"
+    return 0
+  fi
+
+  printf '%s' "$value"
+}
+
+queue_count() {
+  if [[ ! -d "$QUEUE_DIR" ]]; then
+    echo 0
+    return 0
+  fi
+  find "$QUEUE_DIR" -maxdepth 1 -type f -name '*.op' | wc -l | tr -d ' '
+}
+
+load_op_file() {
+  local path="$1"
+  local line key raw value
+
+  ACTION=""
+  ACTION_LABEL=""
+  OP_DATASET=""
+  SNAPSHOT=""
+  SNAPSHOT_NAME=""
+  DESTINATION=""
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+
+    if [[ "$line" =~ ^[[:space:]]*([A-Z0-9_]+)[[:space:]]*=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      raw="${BASH_REMATCH[2]}"
+      value="$(parse_config_value "$raw")"
+      case "$key" in
+        ACTION) ACTION="$value" ;;
+        ACTION_LABEL) ACTION_LABEL="$value" ;;
+        DATASET) OP_DATASET="$value" ;;
+        SNAPSHOT) SNAPSHOT="$value" ;;
+        SNAPSHOT_NAME) SNAPSHOT_NAME="$value" ;;
+        SNAPSHOT_EPOCH) : ;;
+        DESTINATION) DESTINATION="$value" ;;
+        REQUESTED_AT) : ;;
+        REQUESTED_EPOCH) : ;;
+      esac
+    fi
+  done < "$path"
+}
+
+is_valid_dataset() {
+  [[ "$1" =~ ^[A-Za-z0-9._/:+\-]+$ ]]
+}
+
+is_valid_snapshot_name() {
+  [[ "$1" =~ ^[A-Za-z0-9._:+\-]+$ ]]
+}
+
+snapshot_exists() {
+  zfs list -H -o name -t snapshot "$1" >/dev/null 2>&1
+}
+
+dataset_exists() {
+  zfs list -H -o name "$1" >/dev/null 2>&1
+}
+
+ensure_destination_parent_exists() {
+  local dest="$1"
+  local parent="${dest%/*}"
+  local pool="${dest%%/*}"
+
+  dataset_exists "$pool" || {
+    LAST_ERROR="Destination pool '$pool' does not exist."
+    return 1
+  }
+
+  if [[ "$parent" != "$pool" ]] && ! dataset_exists "$parent"; then
+    log "Creating snapshot-manager destination parent dataset: $parent"
+    zfs create -p "$parent"
+  fi
+}
+
+find_latest_common_snapshot_for_target() {
+  local source_dataset="$1"
+  local dest_dataset="$2"
+  local target_basename="$3"
+  local result_basename_var="$4"
+  local snap_name snap_epoch snap_base
+  local -A dest_map=()
+  local latest_common=""
+
+  printf -v "$result_basename_var" ''
+
+  if ! dataset_exists "$dest_dataset"; then
+    return 0
+  fi
+
+  while IFS=$'\t' read -r snap_name _; do
+    [[ -n "$snap_name" ]] || continue
+    snap_base="${snap_name##*@}"
+    dest_map["$snap_base"]=1
+  done < <(zfs list -H -p -s creation -t snapshot -o name,creation -d 1 "$dest_dataset" 2>/dev/null || true)
+
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+    snap_base="${snap_name##*@}"
+    if [[ -n "${dest_map[$snap_base]:-}" ]]; then
+      latest_common="$snap_base"
+    fi
+    if [[ "$snap_base" == "$target_basename" ]]; then
+      break
+    fi
+  done < <(zfs list -H -p -s creation -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null || true)
+
+  printf -v "$result_basename_var" '%s' "$latest_common"
+}
+
+release_snapshot_holds() {
+  local snapshot="$1"
+  local tag
+  while IFS=$'\t' read -r _ tag _; do
+    [[ -n "$tag" ]] || continue
+    [[ "$tag" == "$HOLD_TAG" ]] || continue
+    zfs release "$tag" "$snapshot"
+  done < <(zfs holds -H "$snapshot" 2>/dev/null || true)
+
+  return 0
+}
+
+process_take_snapshot() {
+  is_valid_snapshot_name "$SNAPSHOT_NAME" || {
+    LAST_ERROR="Snapshot name '$SNAPSHOT_NAME' is invalid."
+    return 1
+  }
+  local full_snapshot="${DATASET}@${SNAPSHOT_NAME}"
+  if snapshot_exists "$full_snapshot"; then
+    LAST_ERROR="Snapshot '$SNAPSHOT_NAME' already exists on $DATASET."
+    return 1
+  fi
+  zfs snapshot "$full_snapshot"
+  LAST_MESSAGE="Snapshot '$SNAPSHOT_NAME' created on $DATASET."
+}
+
+process_delete() {
+  snapshot_exists "$SNAPSHOT" || {
+    LAST_MESSAGE="Snapshot '$SNAPSHOT_NAME' was already gone."
+    return 0
+  }
+  zfs destroy "$SNAPSHOT"
+  LAST_MESSAGE="Deleted snapshot '$SNAPSHOT_NAME'."
+}
+
+process_hold() {
+  snapshot_exists "$SNAPSHOT" || {
+    LAST_ERROR="Snapshot '$SNAPSHOT_NAME' no longer exists."
+    return 1
+  }
+  zfs hold "$HOLD_TAG" "$SNAPSHOT"
+  LAST_MESSAGE="Held snapshot '$SNAPSHOT_NAME'."
+}
+
+process_release() {
+  snapshot_exists "$SNAPSHOT" || {
+    LAST_ERROR="Snapshot '$SNAPSHOT_NAME' no longer exists."
+    return 1
+  }
+  release_snapshot_holds "$SNAPSHOT"
+  LAST_MESSAGE="Released holds on snapshot '$SNAPSHOT_NAME'."
+}
+
+process_rollback() {
+  snapshot_exists "$SNAPSHOT" || {
+    LAST_ERROR="Snapshot '$SNAPSHOT_NAME' no longer exists."
+    return 1
+  }
+  log "EXECUTING IRREVERSIBLE rollback -r for dataset ${DATASET} to snapshot ${SNAPSHOT_NAME}"
+  zfs rollback -r "$SNAPSHOT"
+  LAST_MESSAGE="Rolled back $DATASET to '$SNAPSHOT_NAME'."
+}
+
+process_send() {
+  local latest_common=""
+  local source_dataset="$DATASET"
+  local target_basename="$SNAPSHOT_NAME"
+
+  snapshot_exists "$SNAPSHOT" || {
+    LAST_ERROR="Snapshot '$SNAPSHOT_NAME' no longer exists."
+    return 1
+  }
+
+  is_valid_dataset "$DESTINATION" || {
+    LAST_ERROR="Destination dataset '$DESTINATION' is invalid."
+    return 1
+  }
+
+  [[ "$DESTINATION" != "$DATASET" ]] || {
+    LAST_ERROR="Destination dataset must be different from the source dataset."
+    return 1
+  }
+
+  ensure_destination_parent_exists "$DESTINATION" || return 1
+
+  if snapshot_exists "${DESTINATION}@${target_basename}"; then
+    LAST_MESSAGE="Snapshot '$SNAPSHOT_NAME' already exists on $DESTINATION."
+    return 0
+  fi
+
+  find_latest_common_snapshot_for_target "$source_dataset" "$DESTINATION" "$target_basename" latest_common
+
+  if [[ -n "$latest_common" && "$latest_common" == "$target_basename" ]]; then
+    LAST_MESSAGE="Snapshot '$SNAPSHOT_NAME' is already the newest common checkpoint on $DESTINATION."
+    return 0
+  fi
+
+  if [[ -n "$latest_common" ]]; then
+    log "Snapshot Manager send incremental: ${source_dataset}@${latest_common} -> ${SNAPSHOT} -> ${DESTINATION}"
+    is_valid_snapshot_name "$latest_common" || {
+      LAST_ERROR="Base snapshot '$latest_common' is invalid."
+      return 1
+    }
+    if ! zfs send -I "${source_dataset}@${latest_common}" "$SNAPSHOT" | zfs receive -uF "$DESTINATION"; then
+      LAST_ERROR="Snapshot send to '$DESTINATION' failed."
+      return 1
+    fi
+  else
+    log "Snapshot Manager send full: ${SNAPSHOT} -> ${DESTINATION}"
+    if ! zfs send "$SNAPSHOT" | zfs receive -uF "$DESTINATION"; then
+      LAST_ERROR="Snapshot send to '$DESTINATION' failed."
+      return 1
+    fi
+  fi
+  LAST_MESSAGE="Sent snapshot '$SNAPSHOT_NAME' to $DESTINATION."
+}
+
+process_current_operation() {
+  is_valid_dataset "$DATASET" || {
+    LAST_ERROR="Dataset '$DATASET' is invalid."
+    return 1
+  }
+  if [[ -n "$SNAPSHOT_NAME" ]] && ! is_valid_snapshot_name "$SNAPSHOT_NAME"; then
+    LAST_ERROR="Snapshot name '$SNAPSHOT_NAME' is invalid."
+    return 1
+  fi
+  if [[ -n "$DESTINATION" ]] && ! is_valid_dataset "$DESTINATION"; then
+    LAST_ERROR="Destination dataset '$DESTINATION' is invalid."
+    return 1
+  fi
+
+  case "$ACTION" in
+    take_snapshot) process_take_snapshot ;;
+    delete) process_delete ;;
+    hold) process_hold ;;
+    release) process_release ;;
+    rollback) process_rollback ;;
+    send) process_send ;;
+    *)
+      LAST_ERROR="Unknown queued action '$ACTION'."
+      return 1
+      ;;
+  esac
+}
+
+usage() {
+  echo "Usage: $0 --dataset <dataset>" >&2
+  exit 1
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --dataset)
+      shift
+      DATASET="${1:-}"
+      ;;
+    *)
+      usage
+      ;;
+  esac
+  shift || true
+done
+
+[[ -n "$DATASET" ]] || usage
+is_valid_dataset "$DATASET" || {
+  echo "Invalid dataset '$DATASET'." >&2
+  exit 1
+}
+
+if command -v sha1sum >/dev/null 2>&1; then
+  DATASET_KEY="$(printf '%s' "$DATASET" | sha1sum | awk '{print $1}' | cut -c1-16)"
+else
+  DATASET_KEY="$(printf '%s' "$DATASET" | shasum | awk '{print $1}' | cut -c1-16)"
+fi
+QUEUE_DIR="${QUEUE_ROOT}/${DATASET_KEY}"
+STATUS_FILE="${STATUS_ROOT}/${DATASET_KEY}.json"
+LOCK_DIR="${LOCKS_DIR}/${DATASET_KEY}.lockdir"
+
+mkdir -p "$QUEUE_ROOT" "$STATUS_ROOT" "$LOCKS_DIR" "$(dirname "$LOG_FILE")"
+mkdir -p "$QUEUE_DIR"
+
+zfsas_log_prepare_for_append "$LOG_FILE" "$LOG_ARCHIVE_FILE" 524288 400 20 1048576 || true
+exec >> "$LOG_FILE" 2>&1
+log "Snapshot Manager worker starting for dataset: $DATASET"
+
+trap cleanup EXIT INT TERM
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  log "Dataset $DATASET already has an active snapshot-manager worker. Exiting."
+  exit 0
+fi
+
+while :; do
+  ACTIVE_OP_FILE="$(find "$QUEUE_DIR" -maxdepth 1 -type f -name '*.op' | sort | head -n 1)"
+  if [[ -z "$ACTIVE_OP_FILE" ]]; then
+    LAST_MESSAGE="Snapshot manager queue is idle for $DATASET."
+    LAST_ERROR=""
+    break
+  fi
+
+  load_op_file "$ACTIVE_OP_FILE"
+  if [[ "$OP_DATASET" != "$DATASET" ]]; then
+    LAST_ERROR="Queued operation dataset mismatch for $ACTIVE_OP_FILE."
+    rm -f "$ACTIVE_OP_FILE"
+    continue
+  fi
+
+  CURRENT_ACTION="$ACTION"
+  CURRENT_ACTION_LABEL="${ACTION_LABEL:-$ACTION}"
+  CURRENT_SNAPSHOT="$SNAPSHOT"
+  CURRENT_DESTINATION="$DESTINATION"
+  LAST_ERROR=""
+  write_status 1 "$(queue_count)"
+
+  log "Processing snapshot-manager action '$ACTION' for dataset '$DATASET'"
+  if process_current_operation; then
+    log "$LAST_MESSAGE"
+  else
+    log "ERROR: $LAST_ERROR"
+  fi
+
+  rm -f "$ACTIVE_OP_FILE"
+  CURRENT_ACTION=""
+  CURRENT_ACTION_LABEL=""
+  CURRENT_SNAPSHOT=""
+  CURRENT_DESTINATION=""
+  write_status 1 "$(queue_count)"
+done
+
+log "Snapshot Manager worker finished for dataset: $DATASET"
+exit 0

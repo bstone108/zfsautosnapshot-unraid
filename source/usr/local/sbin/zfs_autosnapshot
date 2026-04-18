@@ -2,6 +2,15 @@
 set -Eeuo pipefail
 umask 077
 
+ZFSAS_LOG_HELPER="/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/log-maintenance-lib.sh"
+if [[ -r "$ZFSAS_LOG_HELPER" ]]; then
+	# shellcheck source=/dev/null
+	source "$ZFSAS_LOG_HELPER"
+else
+	zfsas_log_sanitize_text() { printf '%s' "$1"; }
+	zfsas_log_prepare_for_append() { return 0; }
+fi
+
 # =============================================================================
 # ZFS Automatic Snapshot Script for Unraid
 #
@@ -19,6 +28,8 @@ CONFIG_DIR="/boot/config/plugins/zfs.autosnapshot"
 CONFIG_FILE="${CONFIG_FILE:-$CONFIG_DIR/zfs_autosnapshot.conf}"
 PLUGIN_NAME="zfs.autosnapshot"
 RUNTIME_DIR="/var/run/zfs-autosnapshot"
+AUTOSNAPSHOT_ACTIVE_FILE="${RUNTIME_DIR}/zfs_autosnapshot.active"
+SEND_ACTIVITY_DIR="/var/run/zfs-autosnapshot-ops/active-send-datasets"
 
 # -----------------------------------------------------------------------------
 # Defaults (can be overridden in config file)
@@ -36,10 +47,13 @@ LOCKDIR="${RUNTIME_DIR}/zfs_autosnapshot.lockdir"
 ACTIVE_CHILD_PID_FILE="${RUNTIME_DIR}/zfs_autosnapshot.child.pid"
 STOP_REQUEST_FILE="${RUNTIME_DIR}/zfs_autosnapshot.stop"
 LOG_FILE="/var/log/zfs_autosnapshot.log"
+LOG_ARCHIVE_FILE="/var/log/zfs_autosnapshot.archive.log"
 SUMMARY_LOG_FILE="/var/log/zfs_autosnapshot.last.log"
 LEASE_STATE_FILE="${CONFIG_DIR}/snapshot_leases.tsv"
 LOG_RUN_MARKER="[RUN_START]"
 KEEP_LOG_RUNS="${KEEP_LOG_RUNS:-2}"
+DEBUG_LOG_MAX_BYTES="${DEBUG_LOG_MAX_BYTES:-524288}"
+DEBUG_LOG_ARCHIVE_MAX_BYTES="${DEBUG_LOG_ARCHIVE_MAX_BYTES:-1048576}"
 # If a single snapshot destroy runs longer than this, treat it as hung and exit.
 DESTROY_HANG_TIMEOUT_SECONDS=120
 # After deleting a snapshot, give ZFS/free-space accounting a short window to
@@ -59,7 +73,6 @@ RUN_SUMMARY_ENABLED=0
 LOCK_FALLBACK_HELD=0
 STOP_REQUESTED=0
 ACTIVE_CHILD_PID=""
-ACTIVE_CHILD_SNAP=""
 
 COUNT_CREATED=0
 COUNT_DELETED_TOTAL=0
@@ -87,17 +100,24 @@ LOW_SPACE_UNRESOLVED_NOTES=$'\n'
 # shellcheck disable=SC2034  # tracked through indirect helpers
 PROTECTED_LATEST_SNAPSHOTS=$'\n'
 declare -A LOW_SPACE_DATASET_SNAPSHOT_LINES=()
+declare -A LOW_SPACE_DATASET_SNAPSHOT_LINES_DESC=()
 declare -A LOW_SPACE_DATASET_CANDIDATE_SNAP=()
 declare -A LOW_SPACE_DATASET_CANDIDATE_USED=()
 declare -A LOW_SPACE_DATASET_CANDIDATE_EPOCH=()
 declare -A LOW_SPACE_DATASET_ANY_SNAPS=()
 declare -A LOW_SPACE_DATASET_GENERATION=()
 declare -A LOW_SPACE_DATASET_REFRESH_GENERATION=()
+declare -A DATASET_SNAPSHOT_METADATA_LOADED=()
+declare -A SNAPSHOT_USED_CACHE=()
+declare -A SNAPSHOT_WRITTEN_CACHE=()
+declare -A SNAPSHOT_USERREFS_CACHE=()
+declare -A SNAPSHOT_DAY_KEY_CACHE=()
+declare -A SNAPSHOT_WEEK_KEY_CACHE=()
 
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-log() { echo "$@"; }
+log() { printf '%s\n' "$(zfsas_log_sanitize_text "$*")"; }
 
 trim() {
 	local s="$1"
@@ -309,8 +329,45 @@ prepare_runtime_state() {
 
 clear_active_child_state() {
 	ACTIVE_CHILD_PID=""
-	ACTIVE_CHILD_SNAP=""
 	rm -f "$ACTIVE_CHILD_PID_FILE" >/dev/null 2>&1 || true
+}
+
+set_autosnapshot_active_marker() {
+	local tmp_file
+
+	tmp_file="$(mktemp "${AUTOSNAPSHOT_ACTIVE_FILE}.tmp.XXXXXX")" || return 0
+	{
+		printf 'PID=%s\n' "$$"
+		printf 'STARTED_AT=%s\n' "$(date +%s)"
+	} >"$tmp_file"
+	chmod 0600 "$tmp_file" >/dev/null 2>&1 || true
+	if ! mv -f "$tmp_file" "$AUTOSNAPSHOT_ACTIVE_FILE" 2>/dev/null; then
+		rm -f "$tmp_file" >/dev/null 2>&1 || true
+	fi
+}
+
+clear_autosnapshot_active_marker() {
+	rm -f "$AUTOSNAPSHOT_ACTIVE_FILE" >/dev/null 2>&1 || true
+}
+
+send_operation_active_for_dataset() {
+	local dataset="$1"
+	local state_file line
+
+	[[ -d "$SEND_ACTIVITY_DIR" ]] || return 1
+
+	while IFS= read -r -d '' state_file; do
+		while IFS= read -r line; do
+			[[ "$line" == "$dataset" ]] && return 0
+		done <"$state_file"
+	done < <(find "$SEND_ACTIVITY_DIR" -maxdepth 1 -type f -name '*.datasets' -print0 2>/dev/null)
+
+	return 1
+}
+
+any_send_operation_active() {
+	[[ -d "$SEND_ACTIVITY_DIR" ]] || return 1
+	find "$SEND_ACTIVITY_DIR" -maxdepth 1 -type f -name '*.datasets' 2>/dev/null | grep -q .
 }
 
 register_active_child() {
@@ -318,7 +375,6 @@ register_active_child() {
 	local snap="$2"
 
 	ACTIVE_CHILD_PID="$pid"
-	ACTIVE_CHILD_SNAP="$snap"
 	printf '%s\n' "$pid" >"$ACTIVE_CHILD_PID_FILE"
 	chmod 0600 "$ACTIVE_CHILD_PID_FILE" 2>/dev/null || true
 	chown root:root "$ACTIVE_CHILD_PID_FILE" 2>/dev/null || true
@@ -700,46 +756,99 @@ load_snapshot_property_maps() {
 	local -n written_ref="$3"
 	# shellcheck disable=SC2034  # nameref targets are used by the caller
 	local -n userrefs_ref="$4"
-	local metadata snap property value
+	local snap snap_created
 
 	used_ref=()
 	written_ref=()
 	userrefs_ref=()
 
+	load_dataset_snapshot_inventory "$dataset"
+
+	while IFS=$'\t' read -r snap snap_created; do
+		[[ -n "$snap" ]] || continue
+		# shellcheck disable=SC2034  # nameref write consumed by caller
+		used_ref["$snap"]="${SNAPSHOT_USED_CACHE[$snap]:-0}"
+		# shellcheck disable=SC2034  # nameref write consumed by caller
+		written_ref["$snap"]="${SNAPSHOT_WRITTEN_CACHE[$snap]:-0}"
+		# shellcheck disable=SC2034  # nameref write consumed by caller
+		userrefs_ref["$snap"]="${SNAPSHOT_USERREFS_CACHE[$snap]:-0}"
+	done <<<"${LOW_SPACE_DATASET_SNAPSHOT_LINES[$dataset]}"
+}
+
+load_dataset_snapshot_metadata_cache() {
+	local dataset="$1"
+	local metadata inventory snap property value snap_created asc_lines="" desc_lines=""
+
+	if [[ -n "${DATASET_SNAPSHOT_METADATA_LOADED[$dataset]:-}" ]]; then
+		return 0
+	fi
+
+	inventory="$(zfs list -H -p -t snapshot -o name,creation -r "$dataset" 2>/dev/null | grep -F "@${PREFIX}" || true)"
 	metadata="$(zfs get -H -p -o name,property,value -t snapshot -r used,written,userrefs "$dataset" 2>/dev/null | grep -F "@${PREFIX}" || true)"
+
+	while IFS=$'\t' read -r snap snap_created; do
+		[[ -n "$snap" && -n "$snap_created" ]] || continue
+		asc_lines+="${snap}"$'\t'"${snap_created}"$'\n'
+	done <<<"$inventory"
+
+	if [[ -n "$asc_lines" ]]; then
+		asc_lines="$(printf '%s' "$asc_lines" | LC_ALL=C sort -t $'\t' -k2,2n || true)"
+		desc_lines="$(printf '%s' "$asc_lines" | LC_ALL=C sort -t $'\t' -k2,2nr || true)"
+	fi
 
 	while IFS=$'\t' read -r snap property value; do
 		[[ -n "$snap" && -n "$property" ]] || continue
-
 		case "$property" in
 		used)
-			# shellcheck disable=SC2034  # nameref write consumed by caller
-			used_ref["$snap"]="$value"
+			SNAPSHOT_USED_CACHE["$snap"]="$value"
 			;;
 		written)
-			# shellcheck disable=SC2034  # nameref write consumed by caller
-			written_ref["$snap"]="$value"
+			SNAPSHOT_WRITTEN_CACHE["$snap"]="$value"
 			;;
 		userrefs)
-			# shellcheck disable=SC2034  # nameref write consumed by caller
-			userrefs_ref["$snap"]="$value"
+			SNAPSHOT_USERREFS_CACHE["$snap"]="$value"
 			;;
 		esac
 	done <<<"$metadata"
+
+	LOW_SPACE_DATASET_SNAPSHOT_LINES["$dataset"]="$asc_lines"
+	LOW_SPACE_DATASET_SNAPSHOT_LINES_DESC["$dataset"]="$desc_lines"
+	LOW_SPACE_DATASET_GENERATION["$dataset"]=${LOW_SPACE_DATASET_GENERATION["$dataset"]:-0}
+	LOW_SPACE_DATASET_REFRESH_GENERATION["$dataset"]=-1
+	DATASET_SNAPSHOT_METADATA_LOADED["$dataset"]=1
 }
 
 load_dataset_snapshot_inventory() {
 	local dataset="$1"
-	local inventory
+	load_dataset_snapshot_metadata_cache "$dataset"
+}
 
-	if [[ -n "${LOW_SPACE_DATASET_SNAPSHOT_LINES[$dataset]+set}" ]]; then
+snapshot_day_key_for_epoch() {
+	local epoch="$1"
+	local key="${SNAPSHOT_DAY_KEY_CACHE[$epoch]:-}"
+
+	if [[ -n "$key" ]]; then
+		printf '%s' "$key"
 		return 0
 	fi
 
-	inventory="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$dataset" | grep -F "@${PREFIX}" | sort -t $'\t' -k2,2n || true)"
-	LOW_SPACE_DATASET_SNAPSHOT_LINES["$dataset"]="$inventory"
-	LOW_SPACE_DATASET_GENERATION["$dataset"]=${LOW_SPACE_DATASET_GENERATION["$dataset"]:-0}
-	LOW_SPACE_DATASET_REFRESH_GENERATION["$dataset"]=-1
+	key="$(date -d @"$epoch" +%Y-%m-%d)"
+	SNAPSHOT_DAY_KEY_CACHE["$epoch"]="$key"
+	printf '%s' "$key"
+}
+
+snapshot_week_key_for_epoch() {
+	local epoch="$1"
+	local key="${SNAPSHOT_WEEK_KEY_CACHE[$epoch]:-}"
+
+	if [[ -n "$key" ]]; then
+		printf '%s' "$key"
+		return 0
+	fi
+
+	key="$(date -d @"$epoch" +%Y-%W)"
+	SNAPSHOT_WEEK_KEY_CACHE["$epoch"]="$key"
+	printf '%s' "$key"
 }
 
 refresh_dataset_cleanup_candidate() {
@@ -748,13 +857,9 @@ refresh_dataset_cleanup_candidate() {
 	local inventory snap_name snap_created protection_reason used_bytes written_bytes
 	local chain_start="" chain_start_epoch="" chain_start_used=0 found_snapshots=0
 	local selected_snap="" selected_epoch="" selected_used=0
-	local -A space_used_map=()
-	local -A space_userrefs_map=()
-	local -A space_written_map=()
 
 	load_dataset_snapshot_inventory "$dataset"
 	inventory="${LOW_SPACE_DATASET_SNAPSHOT_LINES[$dataset]}"
-	load_snapshot_property_maps "$dataset" space_used_map space_written_map space_userrefs_map
 
 	while IFS=$'\t' read -r snap_name snap_created; do
 		[[ -n "$snap_name" && -n "$snap_created" ]] || continue
@@ -772,7 +877,7 @@ refresh_dataset_cleanup_candidate() {
 			continue
 		fi
 
-		protection_reason="$(snapshot_protection_reason "$snap_name" "${space_userrefs_map[$snap_name]:-0}" || true)"
+		protection_reason="$(snapshot_protection_reason "$snap_name" "${SNAPSHOT_USERREFS_CACHE[$snap_name]:-0}" || true)"
 		if [[ -n "$protection_reason" ]]; then
 			if ((count_skips)) && record_skipped_held_snapshot "$snap_name"; then
 				log "Low-space cleanup -> skipping held/leased snapshot: $snap_name (${protection_reason})"
@@ -783,8 +888,8 @@ refresh_dataset_cleanup_candidate() {
 			continue
 		fi
 
-		used_bytes="$(snapshot_numeric_property "${space_used_map[$snap_name]:-0}" 0)"
-		written_bytes="$(snapshot_numeric_property "${space_written_map[$snap_name]:-0}" 0)"
+		used_bytes="$(snapshot_numeric_property "${SNAPSHOT_USED_CACHE[$snap_name]:-0}" 0)"
+		written_bytes="$(snapshot_numeric_property "${SNAPSHOT_WRITTEN_CACHE[$snap_name]:-0}" 0)"
 
 		if [[ -z "$chain_start" ]]; then
 			chain_start="$snap_name"
@@ -828,6 +933,9 @@ ensure_dataset_cleanup_candidate() {
 mark_dataset_cleanup_candidate_dirty() {
 	local dataset="$1"
 	LOW_SPACE_DATASET_GENERATION["$dataset"]=$(( ${LOW_SPACE_DATASET_GENERATION["$dataset"]:-0} + 1 ))
+	unset 'LOW_SPACE_DATASET_SNAPSHOT_LINES[$dataset]'
+	unset 'LOW_SPACE_DATASET_SNAPSHOT_LINES_DESC[$dataset]'
+	unset 'DATASET_SNAPSHOT_METADATA_LOADED[$dataset]'
 }
 
 mark_cleanup_candidates_dirty_for_snapshot() {
@@ -1301,11 +1409,7 @@ prune_log_to_last_runs() {
 		return 0
 	fi
 
-	if : >"$file" 2>/dev/null; then
-		cat "$tmp" >"$file" 2>/dev/null || true
-	fi
-
-	rm -f "$tmp"
+	mv "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
 }
 
 write_run_summary() {
@@ -1384,6 +1488,7 @@ on_exit() {
 	local exit_code="$?"
 	set +e
 	clear_active_child_state
+	clear_autosnapshot_active_marker
 
 	if ((LOCK_FALLBACK_HELD)); then
 		rmdir "$LOCKDIR" 2>/dev/null || true
@@ -1417,6 +1522,7 @@ acquire_lock() {
 	fi
 
 	rm -f "$STOP_REQUEST_FILE" "$ACTIVE_CHILD_PID_FILE" >/dev/null 2>&1 || true
+	set_autosnapshot_active_marker
 }
 
 # -----------------------------------------------------------------------------
@@ -1426,22 +1532,23 @@ time_clean_dataset() {
 	local ds="$1"
 	log "Time-based cleanup for dataset: $ds"
 
+	if any_send_operation_active; then
+		log "  Skipping cleanup for $ds because a ZFS send is active. Snapshot creation will still be allowed later in this run."
+		return 0
+	fi
+
 	# Output format: name<TAB>creation_epoch (newest first)
 	local snaps
 	local protection_reason written_raw written_bytes userrefs_raw used_raw used_bytes
 	local zero_change_anchor=""
 	local latest_snapshot=""
-	local -A snap_written_map=()
-	local -A snap_userrefs_map=()
-	snaps="$(zfs list -H -p -t snapshot -o name,creation -S creation -r "$ds" | grep -F "@${PREFIX}" || true)"
+	load_dataset_snapshot_inventory "$ds"
+	snaps="${LOW_SPACE_DATASET_SNAPSHOT_LINES_DESC[$ds]}"
 
 	if [[ -z "$snaps" ]]; then
 		log "  No ${PREFIX} snapshots found."
 		return 0
 	fi
-
-	declare -A snap_used_map=()
-	load_snapshot_property_maps "$ds" snap_used_map snap_written_map snap_userrefs_map
 
 	# Keep seen day/week keys in newline-delimited sets for broad Bash compatibility.
 	local kept_day=$'\n'
@@ -1450,11 +1557,11 @@ time_clean_dataset() {
 	while IFS=$'\t' read -r snap_name snap_created; do
 		[[ -z "$snap_name" || -z "$snap_created" ]] && continue
 
-		written_raw="${snap_written_map[$snap_name]:-}"
+		written_raw="${SNAPSHOT_WRITTEN_CACHE[$snap_name]:-}"
 		written_bytes="$(snapshot_numeric_property "$written_raw" -1)"
-		used_raw="${snap_used_map[$snap_name]:-0}"
+		used_raw="${SNAPSHOT_USED_CACHE[$snap_name]:-0}"
 		used_bytes="$(snapshot_numeric_property "$used_raw" 0)"
-		userrefs_raw="${snap_userrefs_map[$snap_name]:-0}"
+		userrefs_raw="${SNAPSHOT_USERREFS_CACHE[$snap_name]:-0}"
 		protection_reason="$(snapshot_protection_reason "$snap_name" "$userrefs_raw" || true)"
 
 		if [[ -z "$latest_snapshot" ]]; then
@@ -1500,7 +1607,7 @@ time_clean_dataset() {
 
 		if ((age > KEEP_DAILY_UNTIL_SECONDS)); then
 			local week_key
-			week_key="$(date -d @"$snap_created" +%Y-%W)"
+			week_key="$(snapshot_week_key_for_epoch "$snap_created")"
 			if [[ "$kept_week" != *$'\n'"$week_key"$'\n'* ]]; then
 				kept_week+="$week_key"$'\n'
 				log "  Keeping weekly latest: $snap_name"
@@ -1518,7 +1625,7 @@ time_clean_dataset() {
 
 		if ((age > KEEP_ALL_FOR_SECONDS)); then
 			local day_key
-			day_key="$(date -d @"$snap_created" +%Y-%m-%d)"
+			day_key="$(snapshot_day_key_for_epoch "$snap_created")"
 			if [[ "$kept_day" != *$'\n'"$day_key"$'\n'* ]]; then
 				kept_day+="$day_key"$'\n'
 				log "  Keeping daily latest: $snap_name"
@@ -1561,6 +1668,8 @@ fi
 DATASETS="$(trim "$DATASETS")"
 PREFIX="$(trim "$PREFIX")"
 KEEP_LOG_RUNS="$(trim "$KEEP_LOG_RUNS")"
+DEBUG_LOG_MAX_BYTES="$(trim "$DEBUG_LOG_MAX_BYTES")"
+DEBUG_LOG_ARCHIVE_MAX_BYTES="$(trim "$DEBUG_LOG_ARCHIVE_MAX_BYTES")"
 POST_DELETE_RECHECK_WAIT_SECONDS="$(trim "$POST_DELETE_RECHECK_WAIT_SECONDS")"
 POST_DELETE_RECHECK_INTERVAL_SECONDS="$(trim "$POST_DELETE_RECHECK_INTERVAL_SECONDS")"
 
@@ -1589,6 +1698,8 @@ if [[ -z "$LOG_FILE" || -z "$SUMMARY_LOG_FILE" ]]; then
 fi
 
 require_numeric_in_range "KEEP_LOG_RUNS" "$KEEP_LOG_RUNS" 1 50
+require_numeric_in_range "DEBUG_LOG_MAX_BYTES" "$DEBUG_LOG_MAX_BYTES" 65536 8388608
+require_numeric_in_range "DEBUG_LOG_ARCHIVE_MAX_BYTES" "$DEBUG_LOG_ARCHIVE_MAX_BYTES" 131072 16777216
 require_numeric_in_range "KEEP_ALL_FOR_DAYS" "$KEEP_ALL_FOR_DAYS" 1 36500
 require_numeric_in_range "KEEP_DAILY_UNTIL_DAYS" "$KEEP_DAILY_UNTIL_DAYS" 2 36500
 require_numeric_in_range "KEEP_WEEKLY_UNTIL_DAYS" "$KEEP_WEEKLY_UNTIL_DAYS" 3 36500
@@ -1609,6 +1720,7 @@ fi
 
 prepare_runtime_state
 acquire_lock
+zfsas_log_prepare_for_append "$LOG_FILE" "$LOG_ARCHIVE_FILE" "$DEBUG_LOG_MAX_BYTES" 500 20 "$DEBUG_LOG_ARCHIVE_MAX_BYTES" || true
 
 IFS=',' read -r -a raw_pairs <<<"$DATASETS"
 declare -a pairs=()
@@ -1656,6 +1768,12 @@ if [[ -f "$LEASE_STATE_FILE" ]]; then
 fi
 
 declare -a pool_names=()
+cleanup_deferred_for_send=0
+
+if any_send_operation_active; then
+	cleanup_deferred_for_send=1
+	log "A ZFS send operation is active, so this autosnapshot pass will skip all cleanup phases and only create new snapshots."
+fi
 
 # Phase A: time-based cleanup + collect unique pools for reporting
 for pair in "${pairs[@]}"; do
@@ -1664,7 +1782,9 @@ for pair in "${pairs[@]}"; do
 	pool="${ds%%/*}"
 	remember_pool_name "$pool"
 
-	time_clean_dataset "$ds"
+	if (( cleanup_deferred_for_send == 0 )); then
+		time_clean_dataset "$ds"
+	fi
 done
 
 RUN_DATASET_COUNT="${#pairs[@]}"
@@ -1680,94 +1800,104 @@ blocked_low_datasets=$'\n'
 blocked_low_dataset_notes=$'\n'
 simulated_deleted_snaps=$'\n'
 LOW_SPACE_DATASET_SNAPSHOT_LINES=()
+LOW_SPACE_DATASET_SNAPSHOT_LINES_DESC=()
 LOW_SPACE_DATASET_CANDIDATE_SNAP=()
 LOW_SPACE_DATASET_CANDIDATE_USED=()
 LOW_SPACE_DATASET_CANDIDATE_EPOCH=()
 LOW_SPACE_DATASET_ANY_SNAPS=()
 LOW_SPACE_DATASET_GENERATION=()
 LOW_SPACE_DATASET_REFRESH_GENERATION=()
+DATASET_SNAPSHOT_METADATA_LOADED=()
+SNAPSHOT_USED_CACHE=()
+SNAPSHOT_WRITTEN_CACHE=()
+SNAPSHOT_USERREFS_CACHE=()
+SNAPSHOT_DAY_KEY_CACHE=()
+SNAPSHOT_WEEK_KEY_CACHE=()
 
-while :; do
-	abort_if_stop_requested
-	low_dataset=""
-	low_dataset_threshold=0
-	low_dataset_effective_avail=0
-	low_dataset_active_constraints_display=""
-	# shellcheck disable=SC2034  # passed by name into helper functions
-	declare -a low_dataset_active_constraints=()
-
-	for pair in "${pairs[@]}"; do
+if (( cleanup_deferred_for_send == 0 )); then
+	while :; do
 		abort_if_stop_requested
-		ds="${pair%:*}"
-		thresh="${pair##*:}"
-		pool="${ds%%/*}"
-		min_free="$(threshold_to_bytes "$thresh")"
-		declare -a active_constraints=()
-
-		if ! get_dataset_active_constraints "$ds" simulated_constraint_reclaimed_bytes effective_avail active_constraints; then
-			log "Dataset $ds check failed: unable to read available space. Skipping low-space cleanup for this dataset."
-			continue
-		fi
-
-		if ((effective_avail >= min_free)); then
-			continue
-		fi
-
-		if newline_set_contains "$blocked_low_datasets" "$ds"; then
-			continue
-		fi
-
-		low_dataset="$ds"
-		low_dataset_threshold="$min_free"
-		low_dataset_effective_avail="$effective_avail"
+		low_dataset=""
+		low_dataset_threshold=0
+		low_dataset_effective_avail=0
+		low_dataset_active_constraints_display=""
 		# shellcheck disable=SC2034  # passed by name into helper functions
-		low_dataset_active_constraints=("${active_constraints[@]}")
-		low_dataset_active_constraints_display="$(format_constraint_list low_dataset_active_constraints)"
-		break
-	done
+		declare -a low_dataset_active_constraints=()
 
-	[[ -n "$low_dataset" ]] || break
+		for pair in "${pairs[@]}"; do
+			abort_if_stop_requested
+			ds="${pair%:*}"
+			thresh="${pair##*:}"
+			pool="${ds%%/*}"
+			min_free="$(threshold_to_bytes "$thresh")"
+			declare -a active_constraints=()
 
-	log "Dataset $low_dataset is below its free-space target: effective_avail=${low_dataset_effective_avail} min_required=${low_dataset_threshold} active_constraints=${low_dataset_active_constraints_display}"
+			if ! get_dataset_active_constraints "$ds" simulated_constraint_reclaimed_bytes effective_avail active_constraints; then
+				log "Dataset $ds check failed: unable to read available space. Skipping low-space cleanup for this dataset."
+				continue
+			fi
 
-	oldest_snap=""
-	oldest_snap_dataset=""
-	oldest_snap_used=0
-	oldest_snap_actual_dataset=""
-	any_candidate_snapshots=0
-	find_oldest_reclaimable_snapshot_for_constraints \
-		low_dataset_active_constraints \
-		oldest_snap \
-		oldest_snap_dataset \
-		oldest_snap_used \
-		any_candidate_snapshots \
-		1
+			if ((effective_avail >= min_free)); then
+				continue
+			fi
 
-	if ((any_candidate_snapshots == 0)); then
-		log "Dataset $low_dataset is low on space, but no ${PREFIX} snapshots remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
-		remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
-		remember_newline_entry blocked_low_dataset_notes "$low_dataset: No ${PREFIX} snapshots remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
-		continue
-	fi
+			if newline_set_contains "$blocked_low_datasets" "$ds"; then
+				continue
+			fi
 
-	if [[ -z "$oldest_snap" ]]; then
-		log "Dataset $low_dataset is low on space, but no deletable ${PREFIX} snapshot chains remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
-		remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
-		remember_newline_entry blocked_low_dataset_notes "$low_dataset: No deletable ${PREFIX} snapshot chains remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
-		continue
-	fi
+			low_dataset="$ds"
+			low_dataset_threshold="$min_free"
+			low_dataset_effective_avail="$effective_avail"
+			# shellcheck disable=SC2034  # passed by name into helper functions
+			low_dataset_active_constraints=("${active_constraints[@]}")
+			low_dataset_active_constraints_display="$(format_constraint_list low_dataset_active_constraints)"
+			break
+		done
 
-	oldest_snap_actual_dataset="${oldest_snap%@*}"
-	log "Dataset $low_dataset low on space -> deleting oldest eligible snapshot: $oldest_snap (dataset=${oldest_snap_actual_dataset} used=${oldest_snap_used} active_constraints=${low_dataset_active_constraints_display})"
-	do_destroy "$oldest_snap" "space_pressure"
-	remember_newline_entry simulated_deleted_snaps "$oldest_snap" >/dev/null 2>&1 || true
-	mark_cleanup_candidates_dirty_for_snapshot "$oldest_snap"
+		[[ -n "$low_dataset" ]] || break
 
-	if ((DRY_RUN)); then
-		apply_simulated_reclaim_to_constraints "$oldest_snap_dataset" "$oldest_snap_used" simulated_constraint_reclaimed_bytes
-		after_effective_avail="$(get_dataset_effective_avail "$low_dataset" simulated_constraint_reclaimed_bytes)"
-		log "Dataset $low_dataset low on space -> [DRY_RUN] simulated effective free space after delete: ${after_effective_avail}"
-	else
+		log "Dataset $low_dataset is below its free-space target: effective_avail=${low_dataset_effective_avail} min_required=${low_dataset_threshold} active_constraints=${low_dataset_active_constraints_display}"
+
+		oldest_snap=""
+		oldest_snap_dataset=""
+		oldest_snap_used=0
+		oldest_snap_actual_dataset=""
+		any_candidate_snapshots=0
+		find_oldest_reclaimable_snapshot_for_constraints \
+			low_dataset_active_constraints \
+			oldest_snap \
+			oldest_snap_dataset \
+			oldest_snap_used \
+			any_candidate_snapshots \
+			1
+
+		if ((any_candidate_snapshots == 0)); then
+			log "Dataset $low_dataset is low on space, but no ${PREFIX} snapshots remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
+			remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
+			remember_newline_entry blocked_low_dataset_notes "$low_dataset: No ${PREFIX} snapshots remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
+			continue
+		fi
+
+		if [[ -z "$oldest_snap" ]]; then
+			log "Dataset $low_dataset is low on space, but no deletable ${PREFIX} snapshot chains remain on datasets that can benefit it (active_constraints=${low_dataset_active_constraints_display})."
+			remember_newline_entry blocked_low_datasets "$low_dataset" >/dev/null 2>&1 || true
+			remember_newline_entry blocked_low_dataset_notes "$low_dataset: No deletable ${PREFIX} snapshot chains remain on datasets that can improve ${low_dataset}." >/dev/null 2>&1 || true
+			continue
+		fi
+
+		oldest_snap_actual_dataset="${oldest_snap%@*}"
+		log "Dataset $low_dataset low on space -> deleting oldest eligible snapshot: $oldest_snap (dataset=${oldest_snap_actual_dataset} used=${oldest_snap_used} active_constraints=${low_dataset_active_constraints_display})"
+		do_destroy "$oldest_snap" "space_pressure"
+		remember_newline_entry simulated_deleted_snaps "$oldest_snap" >/dev/null 2>&1 || true
+		mark_cleanup_candidates_dirty_for_snapshot "$oldest_snap"
+
+		if ((DRY_RUN)); then
+			apply_simulated_reclaim_to_constraints "$oldest_snap_dataset" "$oldest_snap_used" simulated_constraint_reclaimed_bytes
+			after_effective_avail="$(get_dataset_effective_avail "$low_dataset" simulated_constraint_reclaimed_bytes)"
+			log "Dataset $low_dataset low on space -> [DRY_RUN] simulated effective free space after delete: ${after_effective_avail}"
+			continue
+		fi
+
 		after_effective_avail="$(get_dataset_effective_avail "$low_dataset")"
 		if [[ -z "$after_effective_avail" ]]; then
 			log "Dataset $low_dataset low on space -> unable to re-check available space after deleting $oldest_snap; marking it unresolved for now."
@@ -1802,14 +1932,13 @@ while :; do
 		if ((after_effective_avail <= low_dataset_effective_avail)); then
 			log "Dataset $low_dataset low on space -> visible free space did not rise after deleting $oldest_snap (before=${low_dataset_effective_avail} after=${after_effective_avail} used=${oldest_snap_used}); continuing because other datasets may still benefit ${low_dataset}."
 		fi
-	fi
 
-	# A successful or simulated delete changes the current landscape, so re-check
-	# all low datasets from scratch instead of keeping prior blocked state.
-	blocked_low_datasets=$'\n'
-	blocked_low_dataset_notes=$'\n'
-done
-
+		# A successful or simulated delete changes the current landscape, so re-check
+		# all low datasets from scratch instead of keeping prior blocked state.
+		blocked_low_datasets=$'\n'
+		blocked_low_dataset_notes=$'\n'
+	done
+fi
 set_low_space_unresolved_state "$blocked_low_datasets" "$blocked_low_dataset_notes"
 
 # Phase C: create new snapshots

@@ -3,14 +3,26 @@ $pluginName = 'zfs.autosnapshot';
 $settingsPagePath = '/Settings/ZFSAutoSnapshot';
 $configDir = "/boot/config/plugins/{$pluginName}";
 $configFile = "{$configDir}/zfs_autosnapshot.conf";
+$sendConfigFile = "{$configDir}/zfs_send.conf";
 $syncScript = "/usr/local/emhttp/plugins/{$pluginName}/scripts/sync-cron.sh";
 $logApiUrl = "/plugins/{$pluginName}/php/log-tail.php";
 $logStreamApiUrl = "/plugins/{$pluginName}/php/log-stream.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
 $saveApiUrl = "/plugins/{$pluginName}/php/save-settings.php";
+$sendSettingsUrl = "/plugins/{$pluginName}/php/send-settings.php";
+$migrateDatasetsUrl = "/plugins/{$pluginName}/php/migrate-datasets.php";
+$snapshotManagerPageUrl = "/plugins/{$pluginName}/php/snapshot-manager-page.php";
+$snapshotManagerEmbeddedUrl = $snapshotManagerPageUrl . '?embedded=1';
+$recoveryToolsUrl = "/plugins/{$pluginName}/php/recovery-tools.php";
+$snapshotManagerListUrl = "/plugins/{$pluginName}/php/snapshot-manager-list.php";
+$snapshotManagerDatasetUrl = "/plugins/{$pluginName}/php/snapshot-manager-dataset.php";
+$snapshotManagerActionUrl = "/plugins/{$pluginName}/php/snapshot-manager-action.php";
 $logPollIntervalMs = 2000;
 
 require_once __DIR__ . '/response-helpers.php';
+require_once __DIR__ . '/send-helpers.php';
+
+$csrfToken = zfsas_get_csrf_token();
 
 $defaults = [
     'DATASETS' => '',
@@ -40,6 +52,8 @@ $weekdayNames = [
     '5' => 'Friday',
     '6' => 'Saturday',
 ];
+
+$sendDefaults = zfsas_send_defaults();
 
 function h($value)
 {
@@ -127,7 +141,7 @@ function trimValue($value)
 
 function isValidDatasetName($dataset)
 {
-    return preg_match('/^[A-Za-z0-9._\/:-]+$/', (string) $dataset) === 1;
+    return zfsas_is_valid_dataset_name($dataset);
 }
 
 function datasetPoolName($dataset)
@@ -410,18 +424,21 @@ function buildDatasetPools($datasetRows)
     return $poolMap;
 }
 
-function buildDatasetRows($availableDatasets, $configuredDatasetMap)
+function buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationDatasets = [])
 {
     $rows = [];
     $seen = [];
 
     foreach ($availableDatasets as $dataset) {
+        $pool = datasetPoolName($dataset);
+        $locked = isset($sendDestinationDatasets[$dataset]);
         $rows[] = [
             'dataset' => $dataset,
-            'pool' => datasetPoolName($dataset),
-            'selected' => isset($configuredDatasetMap[$dataset]),
+            'pool' => $pool,
+            'selected' => (!$locked && isset($configuredDatasetMap[$dataset])),
             'threshold' => isset($configuredDatasetMap[$dataset]) ? $configuredDatasetMap[$dataset] : '100G',
             'available' => true,
+            'locked' => $locked,
         ];
         $seen[$dataset] = true;
     }
@@ -431,19 +448,22 @@ function buildDatasetRows($availableDatasets, $configuredDatasetMap)
             continue;
         }
 
+        $pool = datasetPoolName($dataset);
+        $locked = isset($sendDestinationDatasets[$dataset]);
         $rows[] = [
             'dataset' => $dataset,
-            'pool' => datasetPoolName($dataset),
-            'selected' => true,
+            'pool' => $pool,
+            'selected' => !$locked,
             'threshold' => $threshold,
             'available' => false,
+            'locked' => $locked,
         ];
     }
 
     return sortDatasetRows($rows);
 }
 
-function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThresholds, $availableDatasets, $configuredDatasetMap)
+function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThresholds, $availableDatasets, $configuredDatasetMap, $sendDestinationDatasets = [])
 {
     $rows = [];
     $seen = [];
@@ -471,16 +491,17 @@ function buildDatasetRowsFromPost($postedNames, $postedSelected, $postedThreshol
         $rows[] = [
             'dataset' => $dataset,
             'pool' => datasetPoolName($dataset),
-            'selected' => isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1',
+            'selected' => (!isset($sendDestinationDatasets[$dataset]) && isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1'),
             'threshold' => strtoupper(str_replace(' ', '', $threshold)),
             'available' => isset($availableSet[$dataset]),
+            'locked' => isset($sendDestinationDatasets[$dataset]),
         ];
     }
 
     return sortDatasetRows($rows);
 }
 
-function buildDatasetsCsvFromPost($postedNames, $postedSelected, $postedThresholds, &$errors)
+function buildDatasetsCsvFromPost($postedNames, $postedSelected, $postedThresholds, &$errors, $sendDestinationDatasets = [])
 {
     $entries = [];
     $seen = [];
@@ -497,7 +518,8 @@ function buildDatasetsCsvFromPost($postedNames, $postedSelected, $postedThreshol
         }
         $seen[$dataset] = true;
 
-        $isSelected = isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1';
+        $isLocked = isset($sendDestinationDatasets[$dataset]);
+        $isSelected = (!$isLocked && isset($postedSelected[$index]) && (string) $postedSelected[$index] === '1');
         if (!$isSelected) {
             continue;
         }
@@ -726,25 +748,36 @@ $defaultSettingsReturnUrl = pluginSettingsPageUrl($settingsPagePath, ['saved' =>
 $config = parseConfigFile($configFile, $defaults);
 $errors = [];
 $notices = [];
+$datasetParseWarnings = [];
+$configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $datasetParseWarnings);
+$availableDatasets = [];
+$sendConfig = zfsas_send_parse_config_file($sendConfigFile, $sendDefaults);
+$sendParseErrors = [];
+$sendParseWarnings = [];
+$sendJobs = zfsas_send_parse_jobs($sendConfig['SEND_JOBS'] ?? '', $sendParseErrors, $sendParseWarnings);
+$sendDestinationCandidates = array_values(array_unique(array_merge($availableDatasets, array_keys($configuredDatasetMap))));
+$sendDestinationDatasets = zfsas_send_destination_datasets_from_jobs($sendJobs, $sendDestinationCandidates);
+$initialSection = trim((string) ($_GET['section'] ?? 'main'));
+if (!in_array($initialSection, ['main', 'special-features', 'repair-tools', 'snapshot-manager'], true)) {
+    $initialSection = 'main';
+}
 
 if (!$isAjaxSaveRequest && (($_GET['saved'] ?? '') === '1')) {
     $notices[] = 'Settings saved and schedule applied.';
 }
 
-$datasetParseWarnings = [];
-$configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $datasetParseWarnings);
-
 $datasetDiscoveryError = null;
-$availableDatasets = [];
 $datasetRows = [];
 $datasetPools = [];
 
 if ($isAjaxSaveRequest) {
-    $datasetRows = buildDatasetRows([], $configuredDatasetMap);
+    $datasetRows = buildDatasetRows([], $configuredDatasetMap, $sendDestinationDatasets);
     $datasetPools = buildDatasetPools($datasetRows);
 } else {
     $availableDatasets = listZfsDatasets($datasetDiscoveryError);
-    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap);
+    $sendDestinationCandidates = array_values(array_unique(array_merge($availableDatasets, array_keys($configuredDatasetMap))));
+    $sendDestinationDatasets = zfsas_send_destination_datasets_from_jobs($sendJobs, $sendDestinationCandidates);
+    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationDatasets);
     $datasetPools = buildDatasetPools($datasetRows);
 }
 
@@ -754,7 +787,26 @@ if (!$isAjaxSaveRequest && !empty($datasetParseWarnings)) {
     }
 }
 
+if (!$isAjaxSaveRequest && !empty($sendParseWarnings)) {
+    foreach ($sendParseWarnings as $warning) {
+        $notices[] = $warning;
+    }
+}
+
 if ($isPostRequest) {
+    $csrfError = null;
+    if (!zfsas_validate_csrf_token($csrfError)) {
+        if ($isAjaxSaveRequest) {
+            zfsas_emit_marked_json([
+                'ok' => false,
+                'errors' => [$csrfError],
+                'notices' => [],
+            ], 403);
+        }
+
+        $errors[] = $csrfError;
+    }
+
     $submitted = $config;
 
     $submitted['PREFIX'] = trimValue($_POST['prefix'] ?? $submitted['PREFIX']);
@@ -776,13 +828,13 @@ if ($isPostRequest) {
     $postDatasetSelected = (isset($_POST['dataset_selected']) && is_array($_POST['dataset_selected'])) ? $_POST['dataset_selected'] : [];
     $postDatasetThresholds = (isset($_POST['dataset_threshold']) && is_array($_POST['dataset_threshold'])) ? $_POST['dataset_threshold'] : [];
 
-    $datasetRows = buildDatasetRowsFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $availableDatasets, $configuredDatasetMap);
+    $datasetRows = buildDatasetRowsFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $availableDatasets, $configuredDatasetMap, $sendDestinationDatasets);
     $datasetPools = buildDatasetPools($datasetRows);
 
     if (count($postDatasetNames) === 0) {
         $errors[] = 'Dataset selection data was not submitted. Refresh the page and try again.';
     } else {
-        $datasetCsv = buildDatasetsCsvFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $errors);
+        $datasetCsv = buildDatasetsCsvFromPost($postDatasetNames, $postDatasetSelected, $postDatasetThresholds, $errors, $sendDestinationDatasets);
         if ($datasetCsv !== null) {
             $submitted['DATASETS'] = $datasetCsv;
         }
@@ -807,20 +859,28 @@ if ($isPostRequest) {
         $errors[] = 'Schedule mode is invalid.';
     }
 
-    $submitted['SCHEDULE_EVERY_MINUTES'] = intInRange($submitted['SCHEDULE_EVERY_MINUTES'], 1, 59, 'Every N minutes', $errors) ?? $submitted['SCHEDULE_EVERY_MINUTES'];
-    $submitted['SCHEDULE_EVERY_HOURS'] = intInRange($submitted['SCHEDULE_EVERY_HOURS'], 1, 24, 'Every N hours', $errors) ?? $submitted['SCHEDULE_EVERY_HOURS'];
-    $submitted['SCHEDULE_DAILY_HOUR'] = intInRange($submitted['SCHEDULE_DAILY_HOUR'], 0, 23, 'Daily hour', $errors) ?? $submitted['SCHEDULE_DAILY_HOUR'];
-    $submitted['SCHEDULE_DAILY_MINUTE'] = intInRange($submitted['SCHEDULE_DAILY_MINUTE'], 0, 59, 'Daily minute', $errors) ?? $submitted['SCHEDULE_DAILY_MINUTE'];
-
-    $normalizedWeekday = normalizeWeekday($submitted['SCHEDULE_WEEKLY_DAY']);
-    if ($normalizedWeekday === null) {
-        $errors[] = 'Weekly day must be a day number (0-6) or weekday name.';
-    } else {
-        $submitted['SCHEDULE_WEEKLY_DAY'] = $normalizedWeekday;
+    switch ($submitted['SCHEDULE_MODE']) {
+        case 'minutes':
+            $submitted['SCHEDULE_EVERY_MINUTES'] = intInRange($submitted['SCHEDULE_EVERY_MINUTES'], 1, 59, 'Every N minutes', $errors) ?? $submitted['SCHEDULE_EVERY_MINUTES'];
+            break;
+        case 'hourly':
+            $submitted['SCHEDULE_EVERY_HOURS'] = intInRange($submitted['SCHEDULE_EVERY_HOURS'], 1, 24, 'Every N hours', $errors) ?? $submitted['SCHEDULE_EVERY_HOURS'];
+            break;
+        case 'daily':
+            $submitted['SCHEDULE_DAILY_HOUR'] = intInRange($submitted['SCHEDULE_DAILY_HOUR'], 0, 23, 'Daily hour', $errors) ?? $submitted['SCHEDULE_DAILY_HOUR'];
+            $submitted['SCHEDULE_DAILY_MINUTE'] = intInRange($submitted['SCHEDULE_DAILY_MINUTE'], 0, 59, 'Daily minute', $errors) ?? $submitted['SCHEDULE_DAILY_MINUTE'];
+            break;
+        case 'weekly':
+            $normalizedWeekday = normalizeWeekday($submitted['SCHEDULE_WEEKLY_DAY']);
+            if ($normalizedWeekday === null) {
+                $errors[] = 'Weekly day must be a day number (0-6) or weekday name.';
+            } else {
+                $submitted['SCHEDULE_WEEKLY_DAY'] = $normalizedWeekday;
+            }
+            $submitted['SCHEDULE_WEEKLY_HOUR'] = intInRange($submitted['SCHEDULE_WEEKLY_HOUR'], 0, 23, 'Weekly hour', $errors) ?? $submitted['SCHEDULE_WEEKLY_HOUR'];
+            $submitted['SCHEDULE_WEEKLY_MINUTE'] = intInRange($submitted['SCHEDULE_WEEKLY_MINUTE'], 0, 59, 'Weekly minute', $errors) ?? $submitted['SCHEDULE_WEEKLY_MINUTE'];
+            break;
     }
-
-    $submitted['SCHEDULE_WEEKLY_HOUR'] = intInRange($submitted['SCHEDULE_WEEKLY_HOUR'], 0, 23, 'Weekly hour', $errors) ?? $submitted['SCHEDULE_WEEKLY_HOUR'];
-    $submitted['SCHEDULE_WEEKLY_MINUTE'] = intInRange($submitted['SCHEDULE_WEEKLY_MINUTE'], 0, 59, 'Weekly minute', $errors) ?? $submitted['SCHEDULE_WEEKLY_MINUTE'];
 
     $cron = buildCronFromSettings($submitted, $errors);
     $submitted['CRON_SCHEDULE'] = $cron;
@@ -840,7 +900,7 @@ if ($isPostRequest) {
 
             $syncOutput = [];
             $syncExit = 0;
-            @exec(escapeshellcmd($syncScript) . ' 2>&1', $syncOutput, $syncExit);
+            @exec(escapeshellarg($syncScript) . ' 2>&1', $syncOutput, $syncExit);
 
             if ($syncExit !== 0) {
                 $errors[] = 'Settings saved, but failed to apply scheduler: ' . implode(' | ', $syncOutput);
@@ -848,7 +908,7 @@ if ($isPostRequest) {
                 if (!$isAjaxSaveRequest) {
                     $postSaveWarnings = [];
                     $configuredDatasetMap = parseDatasetsCsv($config['DATASETS'], $postSaveWarnings);
-                    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap);
+                    $datasetRows = buildDatasetRows($availableDatasets, $configuredDatasetMap, $sendDestinationDatasets);
                     $datasetPools = buildDatasetPools($datasetRows);
 
                     $returnTarget = zfsas_normalize_return_url($_POST['return_to'] ?? '', $defaultSettingsReturnUrl);
@@ -903,7 +963,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 <style>
 .zfsas-wrap {
   margin: 16px;
-  max-width: 1100px;
+  max-width: 1440px;
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   color: var(--text-color, #1f2933);
 }
@@ -945,6 +1005,139 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   margin-bottom: 14px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   color: var(--text-color, #1f2933);
+}
+
+.zfsas-section-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.zfsas-section-tab {
+  appearance: none;
+  border: 1px solid var(--border-color, #cfd8e3);
+  border-radius: 999px;
+  background: var(--input-background-color, var(--background-color, #fff));
+  color: inherit;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.zfsas-section-tab:hover {
+  border-color: rgba(82, 126, 235, 0.45);
+}
+
+.zfsas-section-tab.is-active {
+  background: rgba(82, 126, 235, 0.12);
+  border-color: rgba(82, 126, 235, 0.45);
+  box-shadow: inset 0 0 0 1px rgba(82, 126, 235, 0.12);
+}
+
+.zfsas-section-panel {
+  display: none;
+}
+
+.zfsas-section-panel.is-active {
+  display: block;
+}
+
+.zfsas-placeholder-copy {
+  max-width: 760px;
+}
+
+.zfsas-placeholder-title {
+  margin: 0 0 6px;
+}
+
+.zfsas-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.zfsas-tool-row {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  padding: 14px 0;
+  border-top: 1px solid var(--border-color, #e1e8ef);
+}
+
+.zfsas-tool-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.zfsas-tool-button-wrap {
+  display: flex;
+  align-items: flex-start;
+}
+
+.zfsas-tool-button-wrap .btn {
+  width: 100%;
+  justify-content: center;
+}
+
+.zfsas-tool-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.zfsas-tool-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.zfsas-tool-description {
+  margin: 0;
+}
+
+.zfsas-embedded-shell {
+  max-width: none;
+  overflow: visible;
+}
+
+.zfsas-embedded-shell .zfsas-help {
+  margin-bottom: 12px;
+}
+
+.zfsas-embedded-frame-wrap {
+  border: 1px solid var(--border-color, #d9e1ea);
+  border-radius: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--background-color, #fff);
+}
+
+#zfsas_panel_snapshot_manager .zfsas-embedded-shell {
+  padding-bottom: 0;
+}
+
+#zfsas_panel_snapshot_manager .zfsas-embedded-frame-wrap {
+  margin-left: -16px;
+  margin-right: -16px;
+  margin-bottom: -16px;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  border-radius: 0 0 10px 10px;
+}
+
+.zfsas-embedded-frame {
+  display: block;
+  width: 100%;
+  min-height: 980px;
+  border: 0;
+  background: transparent;
 }
 
 .zfsas-grid {
@@ -1152,6 +1345,10 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   color: inherit;
 }
 
+.zfsas-row-locked {
+  opacity: 0.6;
+}
+
 .zfsas-empty {
   margin-top: 12px;
   padding: 12px;
@@ -1250,6 +1447,164 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   font-size: 12px;
 }
 
+.zfsas-sm-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.zfsas-sm-toolbar-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-color, #4f5a66);
+  opacity: 0.82;
+}
+
+.zfsas-sm-toolbar-status.error {
+  color: var(--text-color, #8f2d2a);
+  opacity: 1;
+}
+
+.zfsas-sm-summary-table th:last-child,
+.zfsas-sm-summary-table td:last-child {
+  text-align: right;
+}
+
+.zfsas-sm-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--border-color, #d9e1ea);
+  background: rgba(82, 126, 235, 0.06);
+}
+
+.zfsas-sm-status-chip.is-busy {
+  background: rgba(180, 120, 0, 0.1);
+  border-color: rgba(180, 120, 0, 0.28);
+}
+
+.zfsas-sm-status-chip.is-error {
+  background: rgba(176, 0, 32, 0.08);
+  border-color: rgba(176, 0, 32, 0.28);
+}
+
+.zfsas-sm-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  z-index: 1040;
+}
+
+.zfsas-sm-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(860px, 100vw);
+  height: 100vh;
+  z-index: 1050;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.zfsas-sm-drawer-panel {
+  width: min(860px, 100vw);
+  height: 100vh;
+  overflow: auto;
+  background: var(--background-color, #fff);
+  color: var(--text-color, #1f2933);
+  box-shadow: -12px 0 32px rgba(15, 23, 42, 0.18);
+  padding: 20px 18px 24px;
+}
+
+.zfsas-sm-drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.zfsas-sm-drawer-title {
+  margin: 0;
+}
+
+.zfsas-sm-drawer-subtitle {
+  margin-top: 6px;
+  color: var(--text-color, #4f5a66);
+  opacity: 0.85;
+  font-size: 13px;
+}
+
+.zfsas-sm-bulk-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 0 12px;
+  background: linear-gradient(to bottom, var(--background-color, #fff) 75%, rgba(255,255,255,0));
+}
+
+.zfsas-sm-bulk-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-color, #4f5a66);
+  opacity: 0.82;
+}
+
+.zfsas-sm-feedback {
+  margin: 10px 0 0;
+}
+
+.zfsas-sm-feedback .zfsas-alert {
+  margin-bottom: 0;
+}
+
+.zfsas-sm-table .zfsas-select-cell {
+  width: 38px;
+  text-align: center;
+}
+
+.zfsas-sm-table .zfsas-actions-cell {
+  min-width: 220px;
+  text-align: right;
+}
+
+.zfsas-sm-table .zfsas-actions-cell .btn {
+  margin-left: 6px;
+  margin-top: 4px;
+}
+
+.zfsas-sm-snapshot-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.zfsas-sm-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(82, 126, 235, 0.06);
+  border: 1px solid var(--border-color, #d9e1ea);
+}
+
+.zfsas-sm-meta-chip.is-protected {
+  background: rgba(180, 120, 0, 0.1);
+  border-color: rgba(180, 120, 0, 0.28);
+}
+
 @media (max-width: 900px) {
   .zfsas-grid {
     grid-template-columns: 1fr;
@@ -1289,6 +1644,29 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     width: 100%;
     justify-content: flex-start;
   }
+
+  .zfsas-sm-toolbar-status,
+  .zfsas-sm-bulk-count {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .zfsas-sm-drawer-panel {
+    padding: 18px 14px 24px;
+  }
+
+  .zfsas-sm-table .zfsas-actions-cell {
+    min-width: 160px;
+  }
+
+  .zfsas-tool-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .zfsas-tool-button-wrap .btn {
+    width: auto;
+  }
 }
 </style>
 
@@ -1312,240 +1690,334 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
   <form method="post" action="<?php echo h($saveApiUrl); ?>" data-ajax-action="<?php echo h($saveApiUrl); ?>" id="zfsas_settings_form">
     <input type="hidden" name="return_to" value="<?php echo h($defaultSettingsReturnUrl); ?>">
-    <div class="zfsas-card">
-      <h3>Datasets</h3>
-      <div class="zfsas-help">
-        Check the datasets you want this plugin to manage. Only checked datasets are included in automated snapshot cleanup and creation.
-      </div>
+    <?php if ($csrfToken !== '') : ?>
+    <input type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>">
+    <?php endif; ?>
+    <div class="zfsas-section-nav" role="tablist" aria-label="Plugin sections">
+      <button type="button" class="zfsas-section-tab is-active" id="zfsas_tab_main" data-section-target="main" role="tab" aria-selected="true" aria-controls="zfsas_panel_main">Main Page</button>
+      <button type="button" class="zfsas-section-tab" id="zfsas_tab_features" data-section-target="special-features" role="tab" aria-selected="false" aria-controls="zfsas_panel_special_features">Special Features</button>
+      <button type="button" class="zfsas-section-tab" id="zfsas_tab_repairs" data-section-target="repair-tools" role="tab" aria-selected="false" aria-controls="zfsas_panel_repair_tools">Repair Tools</button>
+      <button type="button" class="zfsas-section-tab" id="zfsas_tab_snapshot_manager" data-section-target="snapshot-manager" role="tab" aria-selected="false" aria-controls="zfsas_panel_snapshot_manager">Snapshot Manager</button>
+    </div>
 
-      <?php if (count($datasetRows) === 0) : ?>
-        <div class="zfsas-empty">
-          No ZFS datasets were found. Create a dataset first, then reload this page.
+    <div class="zfsas-section-panel is-active" id="zfsas_panel_main" data-section-panel="main" role="tabpanel" aria-labelledby="zfsas_tab_main">
+      <div class="zfsas-card">
+        <h3>Datasets</h3>
+        <div class="zfsas-help">
+          Check the datasets you want this plugin to manage. Only checked datasets are included in automated snapshot cleanup and creation.
         </div>
-      <?php else : ?>
-        <div class="zfsas-dataset-toolbar">
-          <div class="zfsas-pool-filter">
-            <label for="dataset_pool_filter">Pool</label>
-            <select id="dataset_pool_filter" class="zfsas-select">
-              <option value="__all">All pools</option>
-              <?php foreach ($datasetPools as $poolName => $poolStats) : ?>
-                <option value="<?php echo h($poolName); ?>">
-                  <?php echo h($poolName); ?> (<?php echo (int) $poolStats['total']; ?>)
-                </option>
-              <?php endforeach; ?>
-            </select>
+
+        <?php if (count($datasetRows) === 0) : ?>
+          <div class="zfsas-empty">
+            No ZFS datasets were found. Create a dataset first, then reload this page.
           </div>
-          <button type="button" class="btn" id="dataset_select_visible">Select shown</button>
-          <button type="button" class="btn" id="dataset_clear_visible">Clear shown</button>
-          <button type="button" class="btn" id="dataset_select_all">Select all</button>
-          <button type="button" class="btn" id="dataset_clear_all">Clear all</button>
-          <div class="zfsas-help zfsas-dataset-count" id="dataset_count"></div>
-        </div>
+        <?php else : ?>
+          <div class="zfsas-dataset-toolbar">
+            <div class="zfsas-pool-filter">
+              <label for="dataset_pool_filter">Pool</label>
+              <select id="dataset_pool_filter" class="zfsas-select">
+                <option value="__all">All pools</option>
+                <?php foreach ($datasetPools as $poolName => $poolStats) : ?>
+                  <option value="<?php echo h($poolName); ?>">
+                    <?php echo h($poolName); ?> (<?php echo (int) $poolStats['total']; ?>)
+                  </option>
+                <?php endforeach; ?>
+              </select>
+            </div>
+            <button type="button" class="btn" id="dataset_select_visible">Select shown</button>
+            <button type="button" class="btn" id="dataset_clear_visible">Clear shown</button>
+            <button type="button" class="btn" id="dataset_select_all">Select all</button>
+            <button type="button" class="btn" id="dataset_clear_all">Clear all</button>
+            <div class="zfsas-help zfsas-dataset-count" id="dataset_count"></div>
+          </div>
 
-        <div class="zfsas-table-wrap">
-          <table class="zfsas-table">
-            <thead>
-              <tr>
-                <th class="zfsas-center">Use</th>
-                <th>Dataset</th>
-                <th class="zfsas-threshold-col">Pool free-space target</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php foreach ($datasetRows as $index => $row) : ?>
-                <tr class="zfsas-dataset-row" data-pool="<?php echo h($row['pool']); ?>">
-                  <td class="zfsas-center">
-                    <input type="hidden" name="dataset_name[<?php echo (int) $index; ?>]" value="<?php echo h($row['dataset']); ?>">
-                    <input class="zfsas-dataset-checkbox" type="checkbox" name="dataset_selected[<?php echo (int) $index; ?>]" value="1" <?php echo $row['selected'] ? 'checked' : ''; ?>>
-                  </td>
-                  <td>
-                    <div class="zfsas-dataset-cell">
-                      <div>
-                        <code><?php echo h($row['dataset']); ?></code>
-                        <span class="zfsas-pool-chip"><?php echo h($row['pool']); ?></span>
-                        <?php if (!$row['available']) : ?>
-                          <span class="zfsas-badge">Not currently detected</span>
-                        <?php endif; ?>
-                      </div>
-                    </div>
-                  </td>
-                  <td class="zfsas-threshold-col">
-                    <input class="zfsas-input zfsas-threshold-input" name="dataset_threshold[<?php echo (int) $index; ?>]" value="<?php echo h($row['threshold']); ?>">
-                    <div class="zfsas-help">Examples: <code>500M</code>, <code>100G</code>, <code>2T</code>.</div>
-                  </td>
+          <div class="zfsas-table-wrap">
+            <table class="zfsas-table">
+              <thead>
+                <tr>
+                  <th class="zfsas-center">Use</th>
+                  <th>Dataset</th>
+                  <th class="zfsas-threshold-col">Pool free-space target</th>
                 </tr>
-              <?php endforeach; ?>
-            </tbody>
-          </table>
-        </div>
-      <?php endif; ?>
-
-      <div class="zfsas-field" style="margin-top: 14px;">
-        <label for="prefix">Snapshot name prefix</label>
-        <input id="prefix" name="prefix" class="zfsas-input" value="<?php echo h($config['PREFIX']); ?>">
-        <div class="zfsas-help">
-          Safety guard: only snapshots containing the prefix <code id="prefix_preview"><?php echo h($config['PREFIX']); ?></code> are eligible for automatic deletion.
-        </div>
-      </div>
-
-      <div class="zfsas-field" style="margin-top: 12px;">
-        <label for="dry_run">Mode</label>
-        <label class="zfsas-checkline" for="dry_run">
-          <input type="checkbox" id="dry_run" name="dry_run" value="1" <?php echo ($config['DRY_RUN'] === '1') ? 'checked' : ''; ?>>
-          <span>Dry run (preview only, no snapshot create/delete)</span>
-        </label>
-        <div class="zfsas-help">
-          Leave this unchecked for normal operation. In Dry Run mode, use Debug Log view to see each action that would be taken.
-        </div>
-      </div>
-    </div>
-
-    <div class="zfsas-card">
-      <h3>Retention Policy (Days)</h3>
-      <div class="zfsas-grid">
-        <div class="zfsas-field">
-          <label for="keep_all_for_days">Keep every snapshot for this many days</label>
-          <input id="keep_all_for_days" name="keep_all_for_days" class="zfsas-input" type="number" min="1" max="36500" value="<?php echo h($config['KEEP_ALL_FOR_DAYS']); ?>">
-          <div class="zfsas-help">
-            All snapshots newer than this age are kept.
-          </div>
-        </div>
-
-        <div class="zfsas-field">
-          <label for="keep_daily_until_days">Then keep 1 snapshot per day until this many days</label>
-          <input id="keep_daily_until_days" name="keep_daily_until_days" class="zfsas-input" type="number" min="2" max="36500" value="<?php echo h($config['KEEP_DAILY_UNTIL_DAYS']); ?>">
-          <div class="zfsas-help">
-            For snapshots older than the first window, keep the newest snapshot from each day.
-          </div>
-        </div>
-
-        <div class="zfsas-field">
-          <label for="keep_weekly_until_days">Then keep 1 snapshot per week until this many days</label>
-          <input id="keep_weekly_until_days" name="keep_weekly_until_days" class="zfsas-input" type="number" min="3" max="36500" value="<?php echo h($config['KEEP_WEEKLY_UNTIL_DAYS']); ?>">
-          <div class="zfsas-help">
-            Snapshots older than this are removed.
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="zfsas-card">
-      <h3>Run Schedule</h3>
-      <div class="zfsas-field">
-        <label for="schedule_mode">How often should automatic runs happen?</label>
-        <select id="schedule_mode" name="schedule_mode" class="zfsas-select">
-          <option value="disabled" <?php echo ($config['SCHEDULE_MODE'] === 'disabled') ? 'selected' : ''; ?>>Disabled (manual only)</option>
-          <option value="minutes" <?php echo ($config['SCHEDULE_MODE'] === 'minutes') ? 'selected' : ''; ?>>Every N minutes</option>
-          <option value="hourly" <?php echo ($config['SCHEDULE_MODE'] === 'hourly') ? 'selected' : ''; ?>>Every N hours</option>
-          <option value="daily" <?php echo ($config['SCHEDULE_MODE'] === 'daily') ? 'selected' : ''; ?>>Every day at a specific time</option>
-          <option value="weekly" <?php echo ($config['SCHEDULE_MODE'] === 'weekly') ? 'selected' : ''; ?>>Once per week</option>
-          <option value="custom" <?php echo ($config['SCHEDULE_MODE'] === 'custom') ? 'selected' : ''; ?>>Advanced: custom cron</option>
-        </select>
-        <div class="zfsas-help">
-          The plugin converts this to a cron job automatically.
-        </div>
-      </div>
-
-      <div class="zfsas-field zfsas-schedule-row" data-mode="minutes" style="margin-top: 12px;">
-        <label for="schedule_every_minutes">Every how many minutes?</label>
-        <input id="schedule_every_minutes" name="schedule_every_minutes" class="zfsas-input" type="number" min="1" max="59" value="<?php echo h($config['SCHEDULE_EVERY_MINUTES']); ?>">
-        <div class="zfsas-help">
-          1 means every minute. 15 means every 15 minutes.
-        </div>
-      </div>
-
-      <div class="zfsas-field zfsas-schedule-row" data-mode="hourly" style="margin-top: 12px;">
-        <label for="schedule_every_hours">Every how many hours?</label>
-        <input id="schedule_every_hours" name="schedule_every_hours" class="zfsas-input" type="number" min="1" max="24" value="<?php echo h($config['SCHEDULE_EVERY_HOURS']); ?>">
-        <div class="zfsas-help">
-          1 means every hour. 6 means every 6 hours.
-        </div>
-      </div>
-
-      <div class="zfsas-field zfsas-schedule-row" data-mode="daily" style="margin-top: 12px;">
-        <label>Daily run time (24-hour clock)</label>
-        <div class="zfsas-inline">
-          <input id="schedule_daily_hour" name="schedule_daily_hour" class="zfsas-input" type="number" min="0" max="23" value="<?php echo h($config['SCHEDULE_DAILY_HOUR']); ?>">
-          <input id="schedule_daily_minute" name="schedule_daily_minute" class="zfsas-input" type="number" min="0" max="59" value="<?php echo h($config['SCHEDULE_DAILY_MINUTE']); ?>">
-        </div>
-        <div class="zfsas-help">
-          Example: 03 and 30 means 3:30 AM every day.
-        </div>
-      </div>
-
-      <div class="zfsas-field zfsas-schedule-row" data-mode="weekly" style="margin-top: 12px;">
-        <label for="schedule_weekly_day">Weekly day and time</label>
-        <div class="zfsas-inline">
-          <select id="schedule_weekly_day" name="schedule_weekly_day" class="zfsas-select">
-            <?php foreach ($weekdayNames as $dayValue => $dayLabel) : ?>
-              <option value="<?php echo h($dayValue); ?>" <?php echo ((string) $config['SCHEDULE_WEEKLY_DAY'] === (string) $dayValue) ? 'selected' : ''; ?>><?php echo h($dayLabel); ?></option>
-            <?php endforeach; ?>
-          </select>
-          <input id="schedule_weekly_hour" name="schedule_weekly_hour" class="zfsas-input" type="number" min="0" max="23" value="<?php echo h($config['SCHEDULE_WEEKLY_HOUR']); ?>">
-          <input id="schedule_weekly_minute" name="schedule_weekly_minute" class="zfsas-input" type="number" min="0" max="59" value="<?php echo h($config['SCHEDULE_WEEKLY_MINUTE']); ?>">
-        </div>
-        <div class="zfsas-help">
-          Example: Sunday, 04 and 00 means every Sunday at 4:00 AM.
-        </div>
-      </div>
-
-      <div class="zfsas-field zfsas-schedule-row" data-mode="custom" style="margin-top: 12px;">
-        <label for="custom_cron_schedule">Custom cron expression (advanced)</label>
-        <input id="custom_cron_schedule" name="custom_cron_schedule" class="zfsas-input" value="<?php echo h($config['CUSTOM_CRON_SCHEDULE']); ?>">
-        <div class="zfsas-help">
-          Use only if you need behavior outside the plain-English options. Format must have exactly 5 fields.
-        </div>
-      </div>
-
-      <div id="schedule_preview" class="zfsas-preview"></div>
-      <div class="zfsas-help" style="margin-top: 10px;">
-        Current cron expression: <code id="resolved_cron_value"><?php echo h($resolvedCron); ?></code>
-      </div>
-    </div>
-
-    <div class="zfsas-actions">
-      <div id="manual_run_status" class="zfsas-manual-status">Manual run is ready.</div>
-      <div id="save_feedback" class="zfsas-save-feedback-inline">
-        <?php if (!empty($errors)) : ?>
-          <div class="zfsas-alert zfsas-alert-error">
-            <?php foreach ($errors as $error) : ?>
-              <div><?php echo h($error); ?></div>
-            <?php endforeach; ?>
+              </thead>
+              <tbody>
+                <?php foreach ($datasetRows as $index => $row) : ?>
+                  <tr class="zfsas-dataset-row<?php echo !empty($row['locked']) ? ' zfsas-row-locked' : ''; ?>" data-pool="<?php echo h($row['pool']); ?>">
+                    <td class="zfsas-center">
+                      <input type="hidden" name="dataset_name[<?php echo (int) $index; ?>]" value="<?php echo h($row['dataset']); ?>">
+                      <input class="zfsas-dataset-checkbox" type="checkbox" name="dataset_selected[<?php echo (int) $index; ?>]" value="1" <?php echo $row['selected'] ? 'checked' : ''; ?> <?php echo !empty($row['locked']) ? 'disabled' : ''; ?>>
+                    </td>
+                    <td>
+                      <div class="zfsas-dataset-cell">
+                        <div>
+                          <code><?php echo h($row['dataset']); ?></code>
+                          <span class="zfsas-pool-chip"><?php echo h($row['pool']); ?></span>
+                          <?php if (!empty($row['locked'])) : ?>
+                            <span class="zfsas-badge">Reserved for ZFS Send destination</span>
+                          <?php endif; ?>
+                          <?php if (!$row['available']) : ?>
+                            <span class="zfsas-badge">Not currently detected</span>
+                          <?php endif; ?>
+                        </div>
+                      </div>
+                    </td>
+                    <td class="zfsas-threshold-col">
+                      <input class="zfsas-input zfsas-threshold-input" name="dataset_threshold[<?php echo (int) $index; ?>]" value="<?php echo h($row['threshold']); ?>" <?php echo !empty($row['locked']) ? 'disabled' : ''; ?>>
+                      <div class="zfsas-help">Examples: <code>500M</code>, <code>100G</code>, <code>2T</code>.</div>
+                    </td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
           </div>
         <?php endif; ?>
+
+        <div class="zfsas-field" style="margin-top: 14px;">
+          <label for="prefix">Snapshot name prefix</label>
+          <input id="prefix" name="prefix" class="zfsas-input" value="<?php echo h($config['PREFIX']); ?>">
+          <div class="zfsas-help">
+            Safety guard: only snapshots containing the prefix <code id="prefix_preview"><?php echo h($config['PREFIX']); ?></code> are eligible for automatic deletion.
+          </div>
+        </div>
+
+        <div class="zfsas-field" style="margin-top: 12px;">
+          <label for="dry_run">Mode</label>
+          <label class="zfsas-checkline" for="dry_run">
+            <input type="checkbox" id="dry_run" name="dry_run" value="1" <?php echo ($config['DRY_RUN'] === '1') ? 'checked' : ''; ?>>
+            <span>Dry run (preview only, no snapshot create/delete)</span>
+          </label>
+          <div class="zfsas-help">
+            Leave this unchecked for normal operation. In Dry Run mode, use Debug Log view to see each action that would be taken.
+          </div>
+        </div>
       </div>
-      <button type="button" class="btn" id="manual_run">Run Now</button>
-      <button
-        type="button"
-        class="btn btn-primary"
-        id="zfsas_save_btn"
-        <?php if (!empty($notices)) : ?>data-show-saved="1"<?php endif; ?>
-      >Save Settings</button>
-      <noscript><button type="submit" class="btn btn-primary">Save Settings</button></noscript>
+
+      <div class="zfsas-card">
+        <h3>Retention Policy (Days)</h3>
+        <div class="zfsas-grid">
+          <div class="zfsas-field">
+            <label for="keep_all_for_days">Keep every snapshot for this many days</label>
+            <input id="keep_all_for_days" name="keep_all_for_days" class="zfsas-input" type="number" min="1" max="36500" value="<?php echo h($config['KEEP_ALL_FOR_DAYS']); ?>">
+            <div class="zfsas-help">
+              All snapshots newer than this age are kept.
+            </div>
+          </div>
+
+          <div class="zfsas-field">
+            <label for="keep_daily_until_days">Then keep 1 snapshot per day until this many days</label>
+            <input id="keep_daily_until_days" name="keep_daily_until_days" class="zfsas-input" type="number" min="2" max="36500" value="<?php echo h($config['KEEP_DAILY_UNTIL_DAYS']); ?>">
+            <div class="zfsas-help">
+              For snapshots older than the first window, keep the newest snapshot from each day.
+            </div>
+          </div>
+
+          <div class="zfsas-field">
+            <label for="keep_weekly_until_days">Then keep 1 snapshot per week until this many days</label>
+            <input id="keep_weekly_until_days" name="keep_weekly_until_days" class="zfsas-input" type="number" min="3" max="36500" value="<?php echo h($config['KEEP_WEEKLY_UNTIL_DAYS']); ?>">
+            <div class="zfsas-help">
+              Snapshots older than this are removed.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="zfsas-card">
+        <h3>Run Schedule</h3>
+        <div class="zfsas-field">
+          <label for="schedule_mode">How often should automatic runs happen?</label>
+          <select id="schedule_mode" name="schedule_mode" class="zfsas-select">
+            <option value="disabled" <?php echo ($config['SCHEDULE_MODE'] === 'disabled') ? 'selected' : ''; ?>>Disabled (manual only)</option>
+            <option value="minutes" <?php echo ($config['SCHEDULE_MODE'] === 'minutes') ? 'selected' : ''; ?>>Every N minutes</option>
+            <option value="hourly" <?php echo ($config['SCHEDULE_MODE'] === 'hourly') ? 'selected' : ''; ?>>Every N hours</option>
+            <option value="daily" <?php echo ($config['SCHEDULE_MODE'] === 'daily') ? 'selected' : ''; ?>>Every day at a specific time</option>
+            <option value="weekly" <?php echo ($config['SCHEDULE_MODE'] === 'weekly') ? 'selected' : ''; ?>>Once per week</option>
+            <option value="custom" <?php echo ($config['SCHEDULE_MODE'] === 'custom') ? 'selected' : ''; ?>>Advanced: custom cron</option>
+          </select>
+          <div class="zfsas-help">
+            The plugin converts this to a cron job automatically.
+          </div>
+        </div>
+
+        <div class="zfsas-field zfsas-schedule-row" data-mode="minutes" style="margin-top: 12px;">
+          <label for="schedule_every_minutes">Every how many minutes?</label>
+          <input id="schedule_every_minutes" name="schedule_every_minutes" class="zfsas-input" type="number" min="1" max="59" value="<?php echo h($config['SCHEDULE_EVERY_MINUTES']); ?>">
+          <div class="zfsas-help">
+            1 means every minute. 15 means every 15 minutes.
+          </div>
+        </div>
+
+        <div class="zfsas-field zfsas-schedule-row" data-mode="hourly" style="margin-top: 12px;">
+          <label for="schedule_every_hours">Every how many hours?</label>
+          <input id="schedule_every_hours" name="schedule_every_hours" class="zfsas-input" type="number" min="1" max="24" value="<?php echo h($config['SCHEDULE_EVERY_HOURS']); ?>">
+          <div class="zfsas-help">
+            1 means every hour. 6 means every 6 hours.
+          </div>
+        </div>
+
+        <div class="zfsas-field zfsas-schedule-row" data-mode="daily" style="margin-top: 12px;">
+          <label>Daily run time (24-hour clock)</label>
+          <div class="zfsas-inline">
+            <input id="schedule_daily_hour" name="schedule_daily_hour" class="zfsas-input" type="number" min="0" max="23" value="<?php echo h($config['SCHEDULE_DAILY_HOUR']); ?>">
+            <input id="schedule_daily_minute" name="schedule_daily_minute" class="zfsas-input" type="number" min="0" max="59" value="<?php echo h($config['SCHEDULE_DAILY_MINUTE']); ?>">
+          </div>
+          <div class="zfsas-help">
+            Example: 03 and 30 means 3:30 AM every day.
+          </div>
+        </div>
+
+        <div class="zfsas-field zfsas-schedule-row" data-mode="weekly" style="margin-top: 12px;">
+          <label for="schedule_weekly_day">Weekly day and time</label>
+          <div class="zfsas-inline">
+            <select id="schedule_weekly_day" name="schedule_weekly_day" class="zfsas-select">
+              <?php foreach ($weekdayNames as $dayValue => $dayLabel) : ?>
+                <option value="<?php echo h($dayValue); ?>" <?php echo ((string) $config['SCHEDULE_WEEKLY_DAY'] === (string) $dayValue) ? 'selected' : ''; ?>><?php echo h($dayLabel); ?></option>
+              <?php endforeach; ?>
+            </select>
+            <input id="schedule_weekly_hour" name="schedule_weekly_hour" class="zfsas-input" type="number" min="0" max="23" value="<?php echo h($config['SCHEDULE_WEEKLY_HOUR']); ?>">
+            <input id="schedule_weekly_minute" name="schedule_weekly_minute" class="zfsas-input" type="number" min="0" max="59" value="<?php echo h($config['SCHEDULE_WEEKLY_MINUTE']); ?>">
+          </div>
+          <div class="zfsas-help">
+            Example: Sunday, 04 and 00 means every Sunday at 4:00 AM.
+          </div>
+        </div>
+
+        <div class="zfsas-field zfsas-schedule-row" data-mode="custom" style="margin-top: 12px;">
+          <label for="custom_cron_schedule">Custom cron expression (advanced)</label>
+          <input id="custom_cron_schedule" name="custom_cron_schedule" class="zfsas-input" value="<?php echo h($config['CUSTOM_CRON_SCHEDULE']); ?>">
+          <div class="zfsas-help">
+            Use only if you need behavior outside the plain-English options. Format must have exactly 5 fields.
+          </div>
+        </div>
+
+        <div id="schedule_preview" class="zfsas-preview"></div>
+        <div class="zfsas-help" style="margin-top: 10px;">
+          Current cron expression: <code id="resolved_cron_value"><?php echo h($resolvedCron); ?></code>
+        </div>
+      </div>
+
+      <div class="zfsas-actions">
+        <div id="manual_run_status" class="zfsas-manual-status">Manual run is ready.</div>
+        <div id="save_feedback" class="zfsas-save-feedback-inline">
+          <?php if (!empty($errors)) : ?>
+            <div class="zfsas-alert zfsas-alert-error">
+              <?php foreach ($errors as $error) : ?>
+                <div><?php echo h($error); ?></div>
+              <?php endforeach; ?>
+            </div>
+          <?php endif; ?>
+        </div>
+        <button type="button" class="btn" id="manual_run">Run Now</button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          id="zfsas_save_btn"
+          <?php if (!empty($notices)) : ?>data-show-saved="1"<?php endif; ?>
+        >Save Settings</button>
+        <noscript><button type="submit" class="btn btn-primary">Save Settings</button></noscript>
+      </div>
+
+      <div class="zfsas-card" id="live_run_log">
+        <h3>Run Output</h3>
+        <div class="zfsas-help">
+          Default view shows a concise one-run summary.
+          Use "Show Debug Log" to inspect the verbose debug log.
+          These logs are stored in protected root-owned system paths and are only exposed through this page.
+          "Download Logs" exports both logs in one text file.
+        </div>
+        <div class="zfsas-log-toolbar">
+          <button type="button" class="btn" id="log_view_toggle">Show Debug Log</button>
+          <button type="button" class="btn" id="log_toggle">Pause Live View</button>
+          <button type="button" class="btn" id="log_refresh">Refresh Now</button>
+          <button type="button" class="btn" id="log_download">Download Logs</button>
+          <select id="log_lines" class="zfsas-select">
+            <option value="200">Last 200 lines</option>
+            <option value="400" selected>Last 400 lines</option>
+            <option value="800">Last 800 lines</option>
+            <option value="1200">Last 1200 lines</option>
+          </select>
+          <div id="log_status" class="zfsas-log-status">Loading live log...</div>
+        </div>
+        <pre id="log_output" class="zfsas-log-output">Loading log output...</pre>
+      </div>
     </div>
 
-    <div class="zfsas-card" id="live_run_log">
-      <h3>Run Output</h3>
-      <div class="zfsas-help">
-        Default view shows a concise one-run summary.
-        Use "Show Debug Log" to inspect the verbose debug log.
-        These logs are stored in protected root-owned system paths and are only exposed through this page.
-        "Download Logs" exports both logs in one text file.
+    <div class="zfsas-section-panel" id="zfsas_panel_special_features" data-section-panel="special-features" role="tabpanel" aria-labelledby="zfsas_tab_features" hidden>
+      <div class="zfsas-card zfsas-placeholder-copy">
+        <h3 class="zfsas-placeholder-title">Special Features</h3>
+        <div class="zfsas-help">
+          Optional power-user features live here. ZFS Send keeps its own config and queue page, and the dataset migrator has its own guided workflow because it needs container handling, verification progress, and rollback safety.
+        </div>
+        <div class="zfsas-alert zfsas-alert-warn">
+          <code>ZFS Send</code> is the finished feature in this release. <code>Dataset Migrator</code>, <code>Recovery Tools</code>, and <code>Snapshot Manager</code> are still unfinished preview tools and may not work correctly yet.
+        </div>
+        <div class="zfsas-tool-list">
+          <div class="zfsas-tool-row">
+            <div class="zfsas-tool-button-wrap">
+              <button type="button" class="btn btn-primary" id="open_send_settings">Open ZFS Send</button>
+            </div>
+            <div class="zfsas-tool-copy">
+              <div class="zfsas-tool-title">ZFS Send</div>
+              <div class="zfsas-help zfsas-tool-description">
+                Configure scheduled replication jobs, send retention policy, queue limits, and live send status for datasets you want mirrored elsewhere.
+              </div>
+            </div>
+          </div>
+          <div class="zfsas-tool-row">
+            <div class="zfsas-tool-button-wrap">
+              <button type="button" class="btn" id="open_dataset_migrator">Open Dataset Migrator</button>
+            </div>
+            <div class="zfsas-tool-copy">
+              <div class="zfsas-tool-title">Dataset Migrator</div>
+              <div class="zfsas-help zfsas-tool-description">
+                Convert top-level folders inside a dataset into child datasets with guided Docker handling, paranoid verification, rollback safety, and live progress reporting. This tool is still unfinished and may not work correctly yet.
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="zfsas-log-toolbar">
-        <button type="button" class="btn" id="log_view_toggle">Show Debug Log</button>
-        <button type="button" class="btn" id="log_toggle">Pause Live View</button>
-        <button type="button" class="btn" id="log_refresh">Refresh Now</button>
-        <button type="button" class="btn" id="log_download">Download Logs</button>
-        <select id="log_lines" class="zfsas-select">
-          <option value="200">Last 200 lines</option>
-          <option value="400" selected>Last 400 lines</option>
-          <option value="800">Last 800 lines</option>
-          <option value="1200">Last 1200 lines</option>
-        </select>
-        <div id="log_status" class="zfsas-log-status">Loading live log...</div>
+    </div>
+
+    <div class="zfsas-section-panel" id="zfsas_panel_repair_tools" data-section-panel="repair-tools" role="tabpanel" aria-labelledby="zfsas_tab_repairs" hidden>
+      <div class="zfsas-card zfsas-placeholder-copy">
+        <h3 class="zfsas-placeholder-title">Repair Tools</h3>
+        <div class="zfsas-help">
+          Guided repair and recovery utilities live on their own page so they can surface scrub state, corruption diagnostics, and recovery actions without cluttering the main settings page.
+        </div>
+        <div class="zfsas-tool-list">
+          <div class="zfsas-tool-row">
+            <div class="zfsas-tool-button-wrap">
+              <button type="button" class="btn btn-primary" id="open_recovery_tools">Open Recovery Tools</button>
+            </div>
+            <div class="zfsas-tool-copy">
+              <div class="zfsas-tool-title">Recovery Tools</div>
+              <div class="zfsas-help zfsas-tool-description">
+                Open the guided recovery page for corruption diagnostics, scrub-aware repair workflows, and manual scan tools when you need to investigate damaged data. This tool is still unfinished and may not work correctly yet.
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <pre id="log_output" class="zfsas-log-output">Loading log output...</pre>
+    </div>
+
+    <div class="zfsas-section-panel" id="zfsas_panel_snapshot_manager" data-section-panel="snapshot-manager" role="tabpanel" aria-labelledby="zfsas_tab_snapshot_manager" hidden>
+      <div class="zfsas-card zfsas-embedded-shell">
+        <h3 class="zfsas-placeholder-title">Snapshot Manager</h3>
+        <div class="zfsas-help">
+          Snapshot Manager is available directly in this tab. It still stays lightweight by waiting to load the full dataset summary and drawer UI until you switch here.
+        </div>
+        <div class="zfsas-alert zfsas-alert-warn">
+          <code>Snapshot Manager</code> is still unfinished and may not work correctly yet. Please treat its actions as preview-only for now and verify results manually.
+        </div>
+        <div class="zfsas-embedded-frame-wrap">
+          <iframe
+            id="snapshot_manager_frame"
+            class="zfsas-embedded-frame"
+            title="Snapshot Manager"
+            loading="lazy"
+            data-src="<?php echo h($snapshotManagerEmbeddedUrl); ?>"
+          ></iframe>
+        </div>
+      </div>
     </div>
   </form>
 </div>
@@ -1561,6 +2033,14 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var logStreamApiUrl = <?php echo json_encode($logStreamApiUrl); ?>;
   var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
   var saveApiUrl = <?php echo json_encode($saveApiUrl); ?>;
+  var sendSettingsUrl = <?php echo json_encode($sendSettingsUrl); ?>;
+  var migrateDatasetsUrl = <?php echo json_encode($migrateDatasetsUrl); ?>;
+  var snapshotManagerEmbeddedUrl = <?php echo json_encode($snapshotManagerEmbeddedUrl); ?>;
+  var recoveryToolsUrl = <?php echo json_encode($recoveryToolsUrl); ?>;
+  var snapshotManagerListUrl = <?php echo json_encode($snapshotManagerListUrl); ?>;
+  var snapshotManagerDatasetUrl = <?php echo json_encode($snapshotManagerDatasetUrl); ?>;
+  var snapshotManagerActionUrl = <?php echo json_encode($snapshotManagerActionUrl); ?>;
+  var initialSection = <?php echo json_encode($initialSection); ?>;
   var logView = 'summary';
   var logPaused = false;
   var logTimer = null;
@@ -1571,6 +2051,14 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var saveButtonDefaultText = saveButton ? saveButton.textContent : 'Save Settings';
   var saveBusy = false;
   var saveSuccessTimer = null;
+  var sectionTabs = document.querySelectorAll('.zfsas-section-tab');
+  var sectionPanels = document.querySelectorAll('.zfsas-section-panel');
+  var snapshotManagerLoaded = false;
+  var snapshotManagerLoading = false;
+  var snapshotManagerCurrentDataset = '';
+  var snapshotManagerSelection = {};
+  var snapshotManagerFrame = byId('snapshot_manager_frame');
+  var snapshotManagerFrameLoaded = false;
 
   function escapeHtml(text) {
     return String(text)
@@ -1579,6 +2067,325 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
+  }
+
+  function activateSection(sectionName) {
+    if (typeof sectionName !== 'string' || sectionName === '') {
+      sectionName = 'main';
+    }
+
+    sectionTabs.forEach(function (tab) {
+      var isActive = tab.getAttribute('data-section-target') === sectionName;
+      tab.classList.toggle('is-active', isActive);
+      tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+
+    sectionPanels.forEach(function (panel) {
+      var isActive = panel.getAttribute('data-section-panel') === sectionName;
+      panel.classList.toggle('is-active', isActive);
+      panel.hidden = !isActive;
+    });
+
+    if (sectionName === 'snapshot-manager') {
+      ensureSnapshotManagerEmbeddedLoaded();
+    }
+
+  }
+
+  function requestSnapshotManagerEmbeddedHeight() {
+    if (!snapshotManagerFrame || !snapshotManagerFrame.contentWindow) {
+      return;
+    }
+
+    try {
+      snapshotManagerFrame.contentWindow.postMessage({
+        type: 'zfsas:snapshot-manager:request-height'
+      }, window.location.origin);
+    } catch (error) {
+      // Ignore postMessage errors here.
+    }
+  }
+
+  function ensureSnapshotManagerEmbeddedLoaded() {
+    if (!snapshotManagerFrame || snapshotManagerFrameLoaded) {
+      return;
+    }
+
+    var src = snapshotManagerFrame.getAttribute('data-src') || snapshotManagerEmbeddedUrl;
+    if (!src) {
+      return;
+    }
+
+    snapshotManagerFrameLoaded = true;
+    snapshotManagerFrame.src = src;
+  }
+
+  function snapshotManagerDatasetRowsEl() {
+    return byId('snapshot_manager_dataset_rows');
+  }
+
+  function snapshotManagerSnapshotRowsEl() {
+    return byId('snapshot_manager_snapshot_rows');
+  }
+
+  function setSnapshotManagerToolbarStatus(message, isError) {
+    var el = byId('snapshot_manager_toolbar_status');
+    if (!el) {
+      return;
+    }
+    el.textContent = message;
+    el.classList.toggle('error', !!isError);
+  }
+
+  function renderSnapshotManagerFeedback(messages, isError) {
+    var el = byId('snapshot_manager_feedback');
+    if (!el) {
+      return;
+    }
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      el.innerHTML = '';
+      return;
+    }
+
+    var html = '<div class="zfsas-alert ' + (isError ? 'zfsas-alert-error' : 'zfsas-alert-warn') + '">';
+    messages.forEach(function (message) {
+      html += '<div>' + escapeHtml(message) + '</div>';
+    });
+    html += '</div>';
+    el.innerHTML = html;
+  }
+
+  function snapshotManagerSelectedSnapshots() {
+    return Object.keys(snapshotManagerSelection).filter(function (key) {
+      return !!snapshotManagerSelection[key];
+    });
+  }
+
+  function refreshSnapshotManagerBulkCount() {
+    var el = byId('snapshot_manager_bulk_count');
+    if (!el) {
+      return;
+    }
+
+    if (!snapshotManagerCurrentDataset) {
+      el.textContent = 'No dataset selected.';
+      return;
+    }
+
+    var selectedCount = snapshotManagerSelectedSnapshots().length;
+    var pendingRow = byId('snapshot_manager_dataset_title');
+    var label = selectedCount + ' snapshot' + (selectedCount === 1 ? '' : 's') + ' selected';
+    if (pendingRow && pendingRow.textContent) {
+      label += ' on ' + pendingRow.textContent + '.';
+    }
+    el.textContent = label;
+  }
+
+  function closeSnapshotManagerDrawer() {
+    var drawer = byId('snapshot_manager_drawer');
+    var backdrop = byId('snapshot_manager_backdrop');
+    if (drawer) {
+      drawer.hidden = true;
+    }
+    if (backdrop) {
+      backdrop.hidden = true;
+    }
+    snapshotManagerSelection = {};
+    refreshSnapshotManagerBulkCount();
+  }
+
+  function openSnapshotManagerDrawer() {
+    var drawer = byId('snapshot_manager_drawer');
+    var backdrop = byId('snapshot_manager_backdrop');
+    if (drawer) {
+      drawer.hidden = false;
+    }
+    if (backdrop) {
+      backdrop.hidden = false;
+    }
+  }
+
+  function snapshotManagerDatasetStatusHtml(row) {
+    var label = 'Idle';
+    var classes = ['zfsas-sm-status-chip'];
+
+    if (row.lastError) {
+      label = row.lastError;
+      classes.push('is-error');
+    } else if (row.busy && row.currentAction) {
+      label = row.currentAction;
+      classes.push('is-busy');
+    } else if (row.pendingCount > 0) {
+      label = row.pendingCount + ' queued';
+      classes.push('is-busy');
+    } else if (row.lastMessage) {
+      label = row.lastMessage;
+    }
+
+    return '<span class="' + classes.join(' ') + '">' + escapeHtml(label) + '</span>';
+  }
+
+  function renderSnapshotManagerDatasets(datasets) {
+    var tbody = snapshotManagerDatasetRowsEl();
+    if (!tbody) {
+      return;
+    }
+
+    if (!Array.isArray(datasets) || datasets.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" class="zfsas-help">No datasets were found for Snapshot Manager.</td></tr>';
+      return;
+    }
+
+    var html = '';
+    datasets.forEach(function (row) {
+      html += '<tr data-dataset="' + escapeHtml(row.dataset) + '">';
+      html += '<td><code>' + escapeHtml(row.dataset) + '</code></td>';
+      html += '<td class="zfsas-center">' + String(row.snapshotCount || 0) + '</td>';
+      html += '<td>' + snapshotManagerDatasetStatusHtml(row) + '</td>';
+      html += '<td><button type="button" class="btn snapshot-manager-open" data-dataset="' + escapeHtml(row.dataset) + '">Manage</button></td>';
+      html += '</tr>';
+    });
+
+    tbody.innerHTML = html;
+  }
+
+  function ensureSnapshotManagerLoaded() {
+    if (snapshotManagerLoaded || snapshotManagerLoading) {
+      return;
+    }
+    loadSnapshotManagerDatasets();
+  }
+
+  function loadSnapshotManagerDatasets() {
+    snapshotManagerLoading = true;
+    setSnapshotManagerToolbarStatus('Loading dataset snapshot counts...', false);
+
+    requestJson(
+      snapshotManagerListUrl + '?_=' + Date.now(),
+      function (data) {
+        snapshotManagerLoading = false;
+        snapshotManagerLoaded = true;
+        renderSnapshotManagerDatasets(data.datasets || []);
+        setSnapshotManagerToolbarStatus('Snapshot Manager dataset list refreshed.', false);
+      },
+      function (error) {
+        snapshotManagerLoading = false;
+        snapshotManagerLoaded = false;
+        renderSnapshotManagerDatasets([]);
+        setSnapshotManagerToolbarStatus('Snapshot Manager load failed: ' + error.message, true);
+      }
+    );
+  }
+
+  function renderSnapshotRows(dataset, snapshots, status) {
+    var tbody = snapshotManagerSnapshotRowsEl();
+    if (!tbody) {
+      return;
+    }
+
+    if (!Array.isArray(snapshots) || snapshots.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="zfsas-help">No snapshots were found for this dataset.</td></tr>';
+      return;
+    }
+
+    var html = '';
+    snapshots.forEach(function (row) {
+      var isSelected = !!snapshotManagerSelection[row.snapshot];
+      var holdLabel = row.held ? 'Release' : 'Hold';
+      var deleteDisabled = row.sendProtected ? ' disabled' : '';
+      var rollbackDisabled = row.sendProtected ? ' disabled' : '';
+      html += '<tr data-snapshot="' + escapeHtml(row.snapshot) + '">';
+      html += '<td class="zfsas-select-cell"><input type="checkbox" class="snapshot-manager-select" value="' + escapeHtml(row.snapshot) + '"' + (isSelected ? ' checked' : '') + '></td>';
+      html += '<td><code>' + escapeHtml(row.snapshotName) + '</code><div class="zfsas-sm-snapshot-meta">';
+      if (row.sendProtected) {
+        html += '<span class="zfsas-sm-meta-chip is-protected">Protected send checkpoint</span>';
+      }
+      if (row.held) {
+        html += '<span class="zfsas-sm-meta-chip">Held: ' + escapeHtml((row.holdTags || []).join(', ') || 'yes') + '</span>';
+      }
+      html += '</div></td>';
+      html += '<td>' + escapeHtml(row.createdText) + '</td>';
+      html += '<td class="zfsas-center">' + escapeHtml(row.usedText) + '</td>';
+      html += '<td class="zfsas-center">' + escapeHtml(row.writtenText) + '</td>';
+      html += '<td class="zfsas-center">' + String(row.userrefs || 0) + '</td>';
+      html += '<td class="zfsas-actions-cell">';
+      html += '<button type="button" class="btn snapshot-manager-row-action" data-action="rollback" data-snapshot="' + escapeHtml(row.snapshot) + '"' + rollbackDisabled + '>Rollback</button>';
+      html += '<button type="button" class="btn snapshot-manager-row-action" data-action="delete" data-snapshot="' + escapeHtml(row.snapshot) + '"' + deleteDisabled + '>Delete</button>';
+      html += '<button type="button" class="btn snapshot-manager-row-action" data-action="' + (row.held ? 'release' : 'hold') + '" data-snapshot="' + escapeHtml(row.snapshot) + '">' + holdLabel + '</button>';
+      html += '<button type="button" class="btn snapshot-manager-row-action" data-action="send" data-snapshot="' + escapeHtml(row.snapshot) + '">Send</button>';
+      html += '</td>';
+      html += '</tr>';
+    });
+
+    tbody.innerHTML = html;
+
+    var titleEl = byId('snapshot_manager_dataset_title');
+    if (titleEl) {
+      titleEl.textContent = dataset;
+    }
+
+    var subtitleParts = ['Snapshots listed oldest to newest.'];
+    if (status && status.pending_count > 0) {
+      subtitleParts.push(String(status.pending_count) + ' queued operation(s).');
+    } else if (status && status.current_action_label) {
+      subtitleParts.push(status.current_action_label + ' is running.');
+    }
+    var subtitleEl = byId('snapshot_manager_dataset_subtitle');
+    if (subtitleEl) {
+      subtitleEl.textContent = subtitleParts.join(' ');
+    }
+
+    var selectAllEl = byId('snapshot_manager_select_all');
+    if (selectAllEl) {
+      selectAllEl.checked = false;
+    }
+  }
+
+  function loadSnapshotManagerDataset(dataset) {
+    snapshotManagerCurrentDataset = dataset;
+    snapshotManagerSelection = {};
+    refreshSnapshotManagerBulkCount();
+    renderSnapshotManagerFeedback([], false);
+    openSnapshotManagerDrawer();
+    renderSnapshotRows(dataset, [], null);
+
+    requestJson(
+      snapshotManagerDatasetUrl + '?dataset=' + encodeURIComponent(dataset) + '&_=' + Date.now(),
+      function (data) {
+        renderSnapshotRows(dataset, data.snapshots || [], data.status || null);
+        refreshSnapshotManagerBulkCount();
+      },
+      function (error) {
+        renderSnapshotManagerFeedback(['Unable to load snapshots for ' + dataset + ': ' + error.message], true);
+      }
+    );
+  }
+
+  function requestSnapshotManagerAction(body, onSuccess) {
+    requestJsonPost(
+      snapshotManagerActionUrl,
+      body,
+      function (data) {
+        renderSnapshotManagerFeedback([data.message || 'Snapshot manager action accepted.'], false);
+        loadSnapshotManagerDatasets();
+        if (snapshotManagerCurrentDataset) {
+          window.setTimeout(function () {
+            loadSnapshotManagerDataset(snapshotManagerCurrentDataset);
+          }, 400);
+        }
+        if (typeof onSuccess === 'function') {
+          onSuccess(data);
+        }
+      },
+      function (error, payload) {
+        if (payload && payload.error) {
+          renderSnapshotManagerFeedback([payload.error], true);
+        } else {
+          renderSnapshotManagerFeedback([error.message], true);
+        }
+      }
+    );
   }
 
   function requestTargetUrl(form) {
@@ -2008,6 +2815,10 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   function setAllDatasetChecks(checked, visibleOnly) {
     var boxes = document.querySelectorAll('.zfsas-dataset-checkbox');
     boxes.forEach(function (box) {
+      if (box.disabled) {
+        box.checked = false;
+        return;
+      }
       if (visibleOnly) {
         var row = box.closest('.zfsas-dataset-row');
         if (row && !rowIsVisible(row)) {
@@ -2205,7 +3016,14 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       }
 
       if (xhr.status < 200 || xhr.status >= 300) {
-        onError(new Error('HTTP ' + xhr.status));
+        var errorPayload = null;
+        try {
+          errorPayload = parsePossiblyWrappedJson(xhr.responseText);
+        } catch (ignoredParseError) {
+          errorPayload = null;
+        }
+
+        onError(new Error((errorPayload && errorPayload.error) ? errorPayload.error : ('HTTP ' + xhr.status)), errorPayload);
         return;
       }
 
@@ -2418,7 +3236,16 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
   var datasetBoxes = document.querySelectorAll('.zfsas-dataset-checkbox');
   datasetBoxes.forEach(function (box) {
+    if (box.disabled) {
+      box.checked = false;
+    }
     box.addEventListener('change', refreshDatasetCount);
+  });
+
+  sectionTabs.forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      activateSection(tab.getAttribute('data-section-target') || 'main');
+    });
   });
 
   var logToggleBtn = byId('log_toggle');
@@ -2468,7 +3295,239 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   }
 
   var manualRunBtn = byId('manual_run');
+  var openSendSettingsBtn = byId('open_send_settings');
+  var openDatasetMigratorBtn = byId('open_dataset_migrator');
+  var openRecoveryToolsBtn = byId('open_recovery_tools');
   var manualRunBusy = false;
+  if (openSendSettingsBtn) {
+    openSendSettingsBtn.addEventListener('click', function () {
+      window.location.href = sendSettingsUrl;
+    });
+  }
+
+  if (openDatasetMigratorBtn) {
+    openDatasetMigratorBtn.addEventListener('click', function () {
+      window.location.href = migrateDatasetsUrl;
+    });
+  }
+
+  if (openRecoveryToolsBtn) {
+    openRecoveryToolsBtn.addEventListener('click', function () {
+      window.location.href = recoveryToolsUrl;
+    });
+  }
+
+  if (snapshotManagerFrame) {
+    snapshotManagerFrame.addEventListener('load', function () {
+      requestSnapshotManagerEmbeddedHeight();
+    });
+  }
+
+  window.addEventListener('message', function (event) {
+    if (event.origin !== window.location.origin) {
+      return;
+    }
+
+    var data = event.data;
+    if (!data || data.type !== 'zfsas:snapshot-manager:height') {
+      return;
+    }
+
+    var nextHeight = parseInt(data.height, 10);
+    if (snapshotManagerFrame && !isNaN(nextHeight) && nextHeight > 0) {
+      snapshotManagerFrame.style.height = Math.max(nextHeight, 980) + 'px';
+    }
+  });
+
+  var snapshotManagerRefreshBtn = byId('snapshot_manager_refresh');
+  if (snapshotManagerRefreshBtn) {
+    snapshotManagerRefreshBtn.addEventListener('click', function () {
+      loadSnapshotManagerDatasets();
+    });
+  }
+
+  var snapshotManagerCloseBtn = byId('snapshot_manager_close');
+  if (snapshotManagerCloseBtn) {
+    snapshotManagerCloseBtn.addEventListener('click', closeSnapshotManagerDrawer);
+  }
+
+  var snapshotManagerBackdrop = byId('snapshot_manager_backdrop');
+  if (snapshotManagerBackdrop) {
+    snapshotManagerBackdrop.addEventListener('click', closeSnapshotManagerDrawer);
+  }
+
+  var snapshotManagerRefreshDatasetBtn = byId('snapshot_manager_refresh_dataset');
+  if (snapshotManagerRefreshDatasetBtn) {
+    snapshotManagerRefreshDatasetBtn.addEventListener('click', function () {
+      if (!snapshotManagerCurrentDataset) {
+        renderSnapshotManagerFeedback(['Choose a dataset first.'], true);
+        return;
+      }
+      loadSnapshotManagerDataset(snapshotManagerCurrentDataset);
+    });
+  }
+
+  var snapshotManagerDatasetRows = snapshotManagerDatasetRowsEl();
+  if (snapshotManagerDatasetRows) {
+    snapshotManagerDatasetRows.addEventListener('click', function (event) {
+      var button = event.target.closest('.snapshot-manager-open');
+      if (!button) {
+        return;
+      }
+
+      var dataset = button.getAttribute('data-dataset') || '';
+      if (!dataset) {
+        return;
+      }
+
+      loadSnapshotManagerDataset(dataset);
+    });
+  }
+
+  var snapshotManagerSnapshotRows = snapshotManagerSnapshotRowsEl();
+  if (snapshotManagerSnapshotRows) {
+    snapshotManagerSnapshotRows.addEventListener('change', function (event) {
+      var checkbox = event.target.closest('.snapshot-manager-select');
+      if (!checkbox) {
+        return;
+      }
+      snapshotManagerSelection[checkbox.value] = checkbox.checked;
+      refreshSnapshotManagerBulkCount();
+    });
+
+    snapshotManagerSnapshotRows.addEventListener('click', function (event) {
+      var button = event.target.closest('.snapshot-manager-row-action');
+      if (!button) {
+        return;
+      }
+
+      var action = button.getAttribute('data-action') || '';
+      var snapshot = button.getAttribute('data-snapshot') || '';
+      if (!snapshotManagerCurrentDataset || !snapshot) {
+        return;
+      }
+
+      if (action === 'delete') {
+        if (!window.confirm('Queue deletion for snapshot ' + snapshot + '?')) {
+          return;
+        }
+      } else if (action === 'rollback') {
+        if (!window.confirm('Rollback ' + snapshotManagerCurrentDataset + ' to ' + snapshot + '? This removes newer snapshots and can discard recent changes.')) {
+          return;
+        }
+      }
+
+      var body = {
+        action: action,
+        dataset: snapshotManagerCurrentDataset,
+        snapshots: [snapshot]
+      };
+
+      if (action === 'send') {
+        var destination = window.prompt('Destination dataset for one-off send from ' + snapshot + ':', '');
+        if (destination === null) {
+          return;
+        }
+        destination = destination.trim();
+        if (destination === '') {
+          renderSnapshotManagerFeedback(['Destination dataset is required for one-off send.'], true);
+          return;
+        }
+        body.destination = destination;
+      }
+
+      requestSnapshotManagerAction(body);
+    });
+  }
+
+  var snapshotManagerSelectAll = byId('snapshot_manager_select_all');
+  if (snapshotManagerSelectAll) {
+    snapshotManagerSelectAll.addEventListener('change', function () {
+      document.querySelectorAll('.snapshot-manager-select').forEach(function (checkbox) {
+        checkbox.checked = snapshotManagerSelectAll.checked;
+        snapshotManagerSelection[checkbox.value] = checkbox.checked;
+      });
+      refreshSnapshotManagerBulkCount();
+    });
+  }
+
+  var snapshotManagerTakeSnapshotBtn = byId('snapshot_manager_take_snapshot');
+  if (snapshotManagerTakeSnapshotBtn) {
+    snapshotManagerTakeSnapshotBtn.addEventListener('click', function () {
+      if (!snapshotManagerCurrentDataset) {
+        renderSnapshotManagerFeedback(['Choose a dataset first.'], true);
+        return;
+      }
+
+      var defaultName = 'manual-' + new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+      var snapshotName = window.prompt('New snapshot name for ' + snapshotManagerCurrentDataset + ':', defaultName);
+      if (snapshotName === null) {
+        return;
+      }
+      snapshotName = snapshotName.trim();
+      if (snapshotName === '') {
+        renderSnapshotManagerFeedback(['Snapshot name cannot be empty.'], true);
+        return;
+      }
+
+      requestSnapshotManagerAction({
+        action: 'take_snapshot',
+        dataset: snapshotManagerCurrentDataset,
+        snapshot_name: snapshotName
+      });
+    });
+  }
+
+  function queueSelectedSnapshotManagerAction(action, confirmMessage) {
+    if (!snapshotManagerCurrentDataset) {
+      renderSnapshotManagerFeedback(['Choose a dataset first.'], true);
+      return;
+    }
+
+    var snapshots = snapshotManagerSelectedSnapshots();
+    if (snapshots.length === 0) {
+      renderSnapshotManagerFeedback(['Select at least one snapshot first.'], true);
+      return;
+    }
+
+    if (confirmMessage && !window.confirm(confirmMessage.replace('{count}', String(snapshots.length)))) {
+      return;
+    }
+
+    requestSnapshotManagerAction({
+      action: action,
+      dataset: snapshotManagerCurrentDataset,
+      snapshots: snapshots
+    }, function () {
+      snapshotManagerSelection = {};
+      if (snapshotManagerSelectAll) {
+        snapshotManagerSelectAll.checked = false;
+      }
+      refreshSnapshotManagerBulkCount();
+    });
+  }
+
+  var snapshotManagerDeleteSelectedBtn = byId('snapshot_manager_delete_selected');
+  if (snapshotManagerDeleteSelectedBtn) {
+    snapshotManagerDeleteSelectedBtn.addEventListener('click', function () {
+      queueSelectedSnapshotManagerAction('delete', 'Queue deletion for {count} selected snapshot(s)?');
+    });
+  }
+
+  var snapshotManagerHoldSelectedBtn = byId('snapshot_manager_hold_selected');
+  if (snapshotManagerHoldSelectedBtn) {
+    snapshotManagerHoldSelectedBtn.addEventListener('click', function () {
+      queueSelectedSnapshotManagerAction('hold', '');
+    });
+  }
+
+  var snapshotManagerReleaseSelectedBtn = byId('snapshot_manager_release_selected');
+  if (snapshotManagerReleaseSelectedBtn) {
+    snapshotManagerReleaseSelectedBtn.addEventListener('click', function () {
+      queueSelectedSnapshotManagerAction('release', '');
+    });
+  }
+
   if (manualRunBtn) {
     manualRunBtn.addEventListener('click', function () {
       if (manualRunBusy) {
@@ -2607,6 +3666,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     saveButton.removeAttribute('data-show-saved');
   }
 
+  activateSection(initialSection);
   applyPoolFilter();
   refreshScheduleUI();
   refreshDatasetCount();

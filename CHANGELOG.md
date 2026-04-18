@@ -5,6 +5,252 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.18.02
+
+- Promoted the current testing stack toward general release with clearer guardrails around what is ready now versus what is still preview-only.
+- Marked `Dataset Migrator`, `Recovery Tools`, and `Snapshot Manager` more explicitly as unfinished preview tools that may not work correctly yet, while keeping `ZFS Send` presented as the finished feature in this release.
+- Kept the newer logging improvements from `2026.04.18.01`, including condensed archived history, sanitized log output, and RAM-backed runtime logs for the more verbose recovery and migration tooling.
+
+### 2026.04.18.01 (Testing Branch Only)
+
+- Reworked plugin logging so the main autosnapshot log, shared `ZFS Send` log, Snapshot Manager log, Recovery scan logs, and Dataset Migrator log now keep a detailed current window plus a condensed archived history instead of just growing forever or being bluntly thrown away.
+- Moved the Recovery scan and Dataset Migrator runtime logs out of the plugin config folder and into RAM-backed `/var/log`, which keeps busy diagnostic logging off the Unraid flash device while still letting the UI read the current log cleanly.
+- Improved `ZFS Send` delete-daemon logging so failures still log in detail, but large successful delete backlogs now report periodic progress instead of spamming one success line per snapshot.
+- Expanded log downloads so the autosnapshot export now includes the archived debug log, and the shared send log download includes the archived send log when there is no preserved per-failed-job log available.
+- Added sanitize-by-default shell log output for obvious secret-like fields such as passwords, tokens, secrets, API keys, bearer tokens, and similar key-value credentials, even though the plugin is not expected to log sensitive material during normal operation.
+
+### 2026.04.17.09 (Testing Branch Only)
+
+- Fixed a `ZFS Send` delete-queue restart bug on upgraded systems where the queue kicker could miss a real backlog if the runtime delete state file was still in the older legacy `JOB` format. Upgraded boxes now recognize that legacy file as real pending work, start the delete daemon, and let the new worker import it into the lighter in-memory runtime model automatically.
+
+### 2026.04.17.08 (Testing Branch Only)
+
+- Reworked the runtime `ZFS Send` delete queue so it no longer rewrites the full live queue snapshot during normal operation. The delete daemon now keeps the real queue in memory, writes only a tiny runtime status file for the WebUI, and only serializes the full backlog during controlled shutdown, reboot, or upgrade handoff.
+- Added one-time import of the older job-style runtime delete state on startup so an upgraded box can reingest an existing backlog, throw away the old heavy state file, and continue draining deletes under the lighter in-memory model.
+- Simplified per-item delete handling again so the worker only sanity-checks that a queued target still looks like a snapshot path before calling `zfs destroy`, instead of doing another exact preflight lookup for every delete.
+
+### 2026.04.17.07 (Testing Branch Only)
+
+- Simplified the `ZFS Send` delete worker so it no longer re-reads full snapshot identity metadata before every queued delete. It now only checks that the target is still an exact snapshot path, runs `zfs destroy`, retries a couple of times on transient errors, and then logs and drops that queue item if the delete still fails.
+- This should remove a big chunk of the per-item pre-delete overhead on slow pools while still keeping the worker from ever turning a queued snapshot delete into a whole-dataset destroy.
+
+### 2026.04.17.06 (Testing Branch Only)
+
+- Changed the `ZFS Send` delete daemon to process the runtime cleanup queue in plain arrival order instead of rescanning the full backlog looking for the smallest sort key on every pass, which should stop large pending-delete queues from wasting time on queue-order bookkeeping instead of actual snapshot destruction.
+- Changed delayed delete retries so blocked snapshots are pushed to the tail of the runtime queue, and added explicit “Deleting snapshot …” log lines before each destroy step so it is finally obvious in the log whether the daemon is actively deleting a snapshot or still stuck in queue management.
+
+### 2026.04.17.05 (Testing Branch Only)
+
+- Fixed a `ZFS Send` delete-queue slowdown where the runtime delete daemon could spend most of its time rewriting the large live queue state file after every processed snapshot, making it look like the queue kicker was not starting work even though a delete worker was already running.
+- Changed the runtime delete daemon to batch those live state-file flushes on an interval instead of forcing a full rewrite after every single delete transition, so large pending-delete backlogs can drain normally again.
+
+### 2026.04.17.04 (Testing Branch Only)
+
+- Changed the new runtime `ZFS Send` delete queue so planned shutdowns, reboots, and upgrades now flush the in-memory delete backlog into persistent plugin storage under `/boot/config/plugins/zfs.autosnapshot/runtime_queue`, and the next start reingests that saved backlog and clears the persisted file automatically.
+- Updated queue visibility and duplicate checks so the WebUI and queue logic can still see a persisted delete backlog before the runtime daemon has reloaded it, which keeps pending-delete counts and delete protection consistent across those controlled restarts.
+
+### 2026.04.17.03 (Testing Branch Only)
+
+- Fixed queue startup and runtime behavior so `ZFS Send` and delete workers now stay paused while Unraid reports the array as stopped, stopping, starting, or otherwise not actionable, instead of trying early ZFS operations that just fail and recover on retry during boot or shutdown transitions.
+- Clarified the new runtime cleanup queue model by keeping due work enqueueing intact while the array is paused, but preventing the queue kicker from launching workers until the array is actually ready to process snapshot sends and deletions.
+
+### 2026.04.17.02 (Testing Branch Only)
+
+- Fixed a `ZFS Send` delete-daemon crash where the new runtime cleanup worker could die immediately with `job_id: unbound variable` before it started processing queued snapshot deletions, leaving large pending-delete counts stuck even though the send jobs themselves had finished normally.
+
+### 2026.04.17.01 (Testing Branch Only)
+
+- Replaced the old one-file-per-delete `ZFS Send` cleanup queue with a runtime delete daemon that keeps active delete work in memory, rebuilds from one lightweight runtime state snapshot when needed, and ingests new cleanup work through a single temp inbox instead of creating thousands of separate queue files.
+- Changed send-side retention, zero-change cleanup, low-space cleanup, and Snapshot Manager delete requests to feed that new delete daemon backend, which should stop huge cleanup passes from collapsing under tens of thousands of tiny queue files while still preserving the same delete protections and duplicate suppression.
+- Updated the WebUI queue helpers so pending-delete counts and Snapshot Manager “already queued” hiding now read the new runtime delete-daemon state and its intake buffer, instead of depending on old per-delete job files to exist.
+
+### 2026.04.16.20 (Testing Branch Only)
+
+- Moved the hot `ZFS Send` queue out of `/boot` and into temp runtime storage so queue churn, retries, and bulk cleanup planning no longer hammer the Unraid flash device with thousands of tiny writes.
+- Changed scheduled send recovery so the durable state on `/boot` now stays minimal: it remembers the last fully completed schedule window, while interrupted child-send fan-outs are rebuilt after reboot by inspecting current-window send snapshots on the destination and only queueing the child datasets that are still missing.
+- Added upgrade cleanup that purges the old on-boot send queue files so stale pre-migration queue entries cannot survive this storage move and confuse the new runtime-only queue.
+
+### 2026.04.16.19 (Testing Branch Only)
+
+- Fixed a `ZFS Send` scheduler bug where the queue kicker could crash with an `unbound variable` error while building a scheduled send job id, which could stall scheduled enqueueing even though the active send worker kept running.
+
+### 2026.04.16.18 (Testing Branch Only)
+
+- Fixed a `ZFS Send` queue write race where worker startup could delete another process's in-flight `.tmp` job file, which could corrupt child queue items, strip their action fields, and cause repeated blank-action retries.
+- Fixed recursive `ZFS Send` source checkpoint cleanup so each child dataset now deletes its older source-side send checkpoints only after that exact child checkpoint has been verified on the destination, instead of advancing the whole source tree and breaking lagging children like `foundryvtt`.
+- Added automatic recovery for the broken-chain backup case: if a scheduled child send finds no common checkpoint but the destination dataset still has snapshots, the worker now preserves the log, purges that destination dataset for a clean reseed, and fails the current attempt so the normal retry path can rebuild the backup from scratch.
+- Hardened scheduled child-job handling so corrupted or legacy queue rows that are missing `JOB_ACTION` are inferred as child send items instead of being misread as a new prepare phase, which should stop cases like the repeated `element-web` blank-action failure loop.
+
+### 2026.04.16.17 (Testing Branch Only)
+
+- Reworked `ZFS Send` cleanup planning so destination retention and low-space cleanup now batch snapshot metadata and active delete-job checks in memory instead of repeatedly rescanning ZFS and the queue for every candidate snapshot. This should make very large send-managed snapshot sets much less painful to process.
+- Reworked autosnapshot cleanup to cache per-dataset snapshot metadata during the run and reuse it across time-based and low-space cleanup decisions, while still invalidating the affected dataset cache after a real delete so follow-up reclaim decisions stay correct.
+
+### 2026.04.16.16 (Testing Branch Only)
+
+- Added a `Download Log` action to failed `ZFS Send` queue items and changed failed-job logging so the shared send log is copied into persistent plugin storage when a job lands in final failed state, surviving later runs and reboots until you clear that queue item.
+- Changed repeated failures for the same `ZFS Send` queue item to append new preserved log captures into the same archived failure log instead of overwriting the earlier evidence, so you can see the whole sequence across retries in one download.
+
+### 2026.04.16.15 (Testing Branch Only)
+
+- Fixed source-side `ZFS Send` checkpoint cleanup again so if there is only one configured send schedule using that source dataset, older send checkpoints from earlier schedule incarnations are now treated as part of the same send chain and cleaned up too, instead of leaving the second-most-recent source checkpoint behind forever.
+
+### 2026.04.16.14 (Testing Branch Only)
+
+- Fixed source-side `ZFS Send` checkpoint cleanup again so it can now catch older legacy-format send checkpoints on the source tree when there is only one send schedule using that source dataset, instead of leaving the original setup-era checkpoint behind forever.
+
+### 2026.04.16.13 (Testing Branch Only)
+
+- Fixed post-send checkpoint cleanup so `ZFS Send` no longer deletes the previous send checkpoint from the destination after a successful replication. Destination-side send checkpoints now stay available there until the normal send retention policy or low-space cleanup decides they can go.
+- Fixed source-side checkpoint cleanup so after a new send snapshot has been verified on the destination, the source tree now removes every older checkpoint in that send chain instead of only trying to remove the single immediately previous one and leaving older leftovers behind forever.
+
+### 2026.04.16.12 (Testing Branch Only)
+
+- Changed recursive `ZFS Send` fan-out so the actual child send items now queue only the transfer work, and each child send queues its own zero-change cleanup at the end instead of creating a separate cleanup queue row that just clogs the send queue.
+- Fixed scheduled `ZFS Send` timing so completed schedule windows are now remembered outside the short-lived queue rows, and automatic jobs only queue once per real local schedule window instead of being re-added every time the kicker wakes up after the old success rows auto-expire.
+- Aligned scheduled `ZFS Send` windows to local wall-clock boundaries, so `6h`, `12h`, and `1d` jobs now line up with the expected local hour and midnight boundaries instead of drifting off raw UTC math.
+
+### 2026.04.16.11 (Testing Branch Only)
+
+- Fixed a `ZFS Send` worker bug that could overwrite the real send failure with the generic `snapshot_created` error message and make bad queue items look like they were looping in the wrong phase.
+- Added a `Cancel` control to active `ZFS Send` queue items so stuck queued, waiting, or running send jobs can be stopped and left behind as a canceled queue row until you confirm-clear them.
+
+### 2026.04.16.10 (Testing Branch Only)
+
+- Fixed legacy completed or skipped queue items so old jobs created before the auto-expire change are now purged out of the send queue instead of lingering in the GUI forever when they are no longer runnable.
+
+### 2026.04.16.09 (Testing Branch Only)
+
+- Fixed several `ZFS Send` queue bugs that could stop scheduled replication from enqueuing at the right time or could prune the wrong job history, and tightened the worker pipeline handling so queued send work now runs with safer validation and lock cleanup.
+- Hardened the new feature pages and workers with shared dataset-name validation, safer shell quoting, tighter CSRF/file-permission handling, atomic cron/log writes, and better guardrails around snapshot actions, recovery scans, and irreversible rollback paths.
+
+### 2026.04.16.08 (Testing Branch Only)
+
+- Reworked scheduled `ZFS Send` prep so it now runs as its own pool-scoped stage, queues retention and low-space snapshot deletions first, waits for that pool's delete queue to drain, and only then fans the actual send work back out into parallel transfer jobs.
+- Changed scheduled `ZFS Send` low-space planning so it now estimates reclaim from the snapshots it queues for deletion and can pull cleanup candidates from all `ZFS Send`-managed destination datasets on the same pool, instead of only the dataset tree belonging to the one schedule item that happened to start prep.
+
+### 2026.04.16.07 (Testing Branch Only)
+
+- Reworked recursive `ZFS Send` queue handling so after the initial scheduled-send prep finishes, child datasets now fan out into their own top-down queue items for the actual transfer work and their own follow-up zero-change cleanup steps instead of appearing as one giant queue row.
+- Changed successful queued send and cleanup items to disappear automatically about `5` seconds after completion, while unrecoverable failed send items now stay visible with both `Retry` and `Confirm Clear` controls so you can decide when to remove them from the queue.
+
+### 2026.04.16.06 (Testing Branch Only)
+
+- Removed `ZFS Send` schedule options shorter than `6` hours so the scheduler now only offers `6h`, `12h`, `1d`, and `7d`, which better matches how long real replication runs can take.
+- Added compatibility handling so older saved `ZFS Send` jobs that were set to `15m`, `30m`, or `1h` are automatically upgraded to `6h` instead of being dropped outright.
+
+### 2026.04.16.05 (Testing Branch Only)
+
+- Hardened the `Dataset Migrator` folder-to-container mapping so it now canonicalizes Docker mount source paths and keeps migration batching strictly confined to the selected dataset root, preventing containers with other host paths from pulling unrelated locations into the migration plan.
+
+### 2026.04.16.04 (Testing Branch Only)
+
+- Reworked the `Dataset Migrator` container handling so it no longer drops every running container at once. It now stops only the containers tied to the current migration batch, migrates all related top-level folders those containers share inside the selected dataset, and then starts those containers back up before moving on.
+- Added dependency-aware batch ordering to the `Dataset Migrator` so shared service groups are handled in one pass when possible, reducing unnecessary stop/start churn while still keeping dependent containers down only for the folder groups they actually need.
+
+### 2026.04.16.03 (Testing Branch Only)
+
+- Reworked the `Special Features` and `Repair Tools` sections so each tool now shows as a button on the left with its description beside it, making the tool pages easier to scan and leaving more room for additional entries later.
+
+### 2026.04.16.02 (Testing Branch Only)
+
+- Fixed the `Dataset Migrator` start path so it no longer reruns the full folder-size preview before launching the worker, and so it now waits for the worker to report real startup status instead of claiming success before anything has actually begun.
+- Reduced unnecessary `Dataset Migrator` refresh work by skipping the expensive preview rescan while the currently selected dataset is already the one being migrated in the background.
+
+### 2026.04.16.01 (Testing Branch Only)
+
+- Fixed the main settings page load path after the recent `ZFS Send` work by restoring the correct initialization order for dataset parsing and send reservation calculations, and by switching the page to the shared `ZFS Send` defaults so the main plugin page can boot cleanly again.
+
+### 2026.04.15.9 (Testing Branch Only)
+
+- Added `ZFS Send` retention settings so the send tool can queue destination snapshot deletions using the same keep-all, then daily, then weekly style policy before a scheduled send and again as a zero-change cleanup pass afterward, while always preserving the newest successful send checkpoint needed for the next incremental replication.
+- Added a live pending-delete count next to the `ZFS Send` queue header so you can see when retention and other background snapshot deletions have been queued for later processing.
+- Changed regular autosnapshot cleanup coordination so if any `ZFS Send` job is active, the autosnapshot run now skips all cleanup phases for that pass and only creates new snapshots, avoiding cross-dataset cleanup decisions while send work is still in progress.
+
+### 2026.04.15.8 (Testing Branch Only)
+
+- Changed scheduled `ZFS Send` destination cleanup so its free-space target can now delete the oldest eligible destination snapshots of any type inside the configured send targets, while still protecting the newest successful send checkpoint and any checkpoint basenames that queued or running sends still need.
+- Added runner coordination between the two shell engines so `ZFS Send` now waits for an in-progress autosnapshot run to finish before starting, and the regular autosnapshot cleanup phases now skip datasets that are actively being sent while still allowing the normal snapshot-creation phase to continue.
+
+### 2026.04.15.7 (Testing Branch Only)
+
+- Added a new `Dataset Migrator` under `Special Features` that can convert top-level folders inside a selected dataset into child datasets with live folder-by-folder progress, free-space wait messaging, paranoid verification, rollback if a folder copy fails, and automatic stop/restart handling for Docker containers that were running before the migration started.
+
+### 2026.04.15.6 (Testing Branch Only)
+
+- Fixed the main autosnapshot dataset picker so `ZFS Send` reservations now lock only the actual destination datasets in use, plus child datasets under a recursive send target, instead of falsely locking the whole destination pool or unrelated siblings.
+
+### 2026.04.15.5 (Testing Branch Only)
+
+- Widened the main settings container and let the embedded `Snapshot Manager` frame use the full width of its card so the right side is less likely to get clipped on wide dataset/action layouts.
+
+### 2026.04.15.4 (Testing Branch Only)
+
+- Fixed the packaged file modes for the new queue-processing binaries so the `ZFS Send` queue kicker and workers install as executable files, and added an install-time permission repair step to restore execute bits on upgraded systems.
+
+### 2026.04.15.3 (Testing Branch Only)
+
+- Fixed the `ZFS Send` scheduler save validation so the empty “Add Job” row no longer gets treated as a real new job just because its frequency, children, and threshold controls have default values.
+
+### 2026.04.15.2 (Testing Branch Only)
+
+- Injected Unraid's CSRF token into the standalone `ZFS Send`, `Snapshot Manager`, and `Recovery Tools` pages so their existing button and AJAX code can send valid CSRF-protected requests instead of failing before PHP runs.
+
+### 2026.04.15.1 (Testing Branch Only)
+
+- Reissued the latest testing build under a new date-based version because some Unraid updater paths appear to sort `2026.04.14.10` as if it were older than `2026.04.14.9`, even though the manifest itself was correct.
+- Carries forward the `ZFS Send` dedicated save-handler fix from `2026.04.14.10` without additional code changes.
+
+### 2026.04.14.10 (Testing Branch Only)
+
+- Reworked the `ZFS Send` save flow so `save-send-settings.php` now performs the save directly instead of including the full `send-settings.php` page file, which should eliminate the strange bare `1` response seen on some Unraid systems.
+
+### 2026.04.14.9 (Testing Branch Only)
+
+- Changed the `ZFS Send` save button to post its AJAX request directly back to `send-settings.php`, which bypasses the flaky dedicated save route that was still returning a bare `1` on some systems instead of the marked JSON response the page expects.
+
+### 2026.04.14.8 (Testing Branch Only)
+
+- Fixed a JavaScript regression on the `ZFS Send` page where the queue/status loader was calling a missing `requestJson()` helper, which caused the page script to throw during startup instead of running cleanly.
+
+### 2026.04.14.7 (Testing Branch Only)
+
+- Replaced the `ZFS Send` save endpoint with a real dedicated save handler instead of the old thin include wrapper, which should stop the send settings button from falling back into a full HTML page response and throwing `Invalid save response`.
+
+### 2026.04.14.6 (Testing Branch Only)
+
+- Fixed the embedded `Snapshot Manager` drawer so it stays hidden until you actually click `Manage Snapshots`, and the close button now reliably hides the drawer again even on theme-customized systems.
+- Fixed the `Recovery Tools` dataset selector so the automatic refresh no longer wipes out the dataset you just picked before you can start a scan.
+
+### 2026.04.14.5 (Testing Branch Only)
+
+- Moved `Snapshot Manager` back directly into the `Snapshot Manager` tab so it opens in place instead of sending you off to a separate page, while still lazy-loading the heavy manager UI only when you actually switch to that tab.
+- Hardened the `ZFS Send` settings save flow so it uses the same broader CSRF detection and wrapped-response parsing style as the main settings page, which makes custom theme interference less likely to show up as an invalid save response.
+
+### 2026.04.14.4 (Testing Branch Only)
+
+- Reworked scheduled `ZFS Send` into a persistent queue with retry handling, minute-based queue kicking, configurable parallel send workers, child-dataset replication support, and a shared job/status view on the send page.
+- Moved `Snapshot Manager` onto its own dedicated page so the main settings stay light, added dataset-level summary rows with last snapshot time and active send progress, and kept snapshot lists lazy-loaded until you explicitly manage a dataset.
+- Routed manual snapshot deletes through the same central queue as send jobs, hid already queued deletions from the live snapshot list, and matched queued deletions by stable snapshot identity instead of display order.
+- Added the first real `Recovery Tools` page with scrub/corruption visibility plus a GUI-driven manual readability scan for cases where scrub detects damage but cannot map it back to a specific file.
+
+### 2026.04.14.3 (Testing Branch Only)
+
+- Added a new `Snapshot Manager` section with a dataset summary view, snapshot counts, pending-operation status, and a slide-over snapshot drawer for manual ZFS snapshot work.
+- Added queued manual snapshot actions so bulk delete, hold, and release work one dataset at a time without blocking other datasets, while rollback and one-off send actions start immediately when the selected dataset is idle.
+- Added protection for ZFS send checkpoints inside Snapshot Manager so the dedicated replication snapshot chain is not accidentally broken by manual delete or rollback actions.
+
+### 2026.04.14.2 (Testing Branch Only)
+
+- Added the first real `Special Features` tool: a dedicated `ZFS Send` page with its own config, manual run button, and scheduled replication jobs.
+- ZFS send jobs now use their own send-only snapshot chain, keep only the newest successful send snapshot per job, and can clean older send checkpoints off the destination side when free space gets tight.
+- Destination pools used by ZFS send are now reserved on the main page so regular autosnapshot management cannot be enabled there by mistake.
+
+### 2026.04.14.1 (Testing Branch Only)
+
+- Added a section switcher above the Datasets area so the settings page now has dedicated tabs for `Main Page`, `Special Features`, and `Repair Tools`.
+- Left the `Special Features` and `Repair Tools` tabs as clear placeholders for future planned tools while keeping the full existing settings UI under `Main Page`.
+
 ### 2026.04.11.4 (Testing Branch Only)
 
 - Adjusted the inline save-error layout so the fixed-width error slot now sits to the left of both action buttons instead of only to the left of Save.

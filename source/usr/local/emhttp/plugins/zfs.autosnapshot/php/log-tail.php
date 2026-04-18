@@ -1,5 +1,6 @@
 <?php
 $debugLogFile = '/var/log/zfs_autosnapshot.log';
+$debugArchiveLogFile = '/var/log/zfs_autosnapshot.archive.log';
 $summaryLogFile = '/var/log/zfs_autosnapshot.last.log';
 
 function sendJson($payload, $statusCode = 200)
@@ -19,6 +20,7 @@ function sendJson($payload, $statusCode = 200)
 function isSafeLogPath($path)
 {
     clearstatcache(true, $path);
+    $allowedRoot = '/var/log';
 
     if (!is_string($path) || $path === '') {
         return false;
@@ -29,6 +31,16 @@ function isSafeLogPath($path)
     }
 
     if (file_exists($path) && !is_file($path)) {
+        return false;
+    }
+
+    $dirReal = realpath(dirname($path));
+    if ($dirReal === false || ($dirReal !== $allowedRoot && strpos($dirReal, $allowedRoot . '/') !== 0)) {
+        return false;
+    }
+
+    $real = realpath($path);
+    if ($real !== false && $real !== $allowedRoot && strpos($real, $allowedRoot . '/') !== 0) {
         return false;
     }
 
@@ -103,7 +115,7 @@ function streamLogSection($title, $path)
     }
 }
 
-function downloadCombinedLogs($debugLogFile, $summaryLogFile)
+function downloadCombinedLogs($debugLogFile, $debugArchiveLogFile, $summaryLogFile)
 {
     if (!headers_sent()) {
         header('Content-Type: text/plain; charset=UTF-8');
@@ -116,6 +128,8 @@ function downloadCombinedLogs($debugLogFile, $summaryLogFile)
     echo "ZFS Auto Snapshot Log Export\n";
     echo "Generated: " . gmdate('Y-m-d H:i:s') . " UTC\n\n";
 
+    streamLogSection('Archived Debug Log', $debugArchiveLogFile);
+    echo "\n";
     streamLogSection('Debug Log', $debugLogFile);
     echo "\n";
     streamLogSection('Latest Run Summary', $summaryLogFile);
@@ -125,7 +139,7 @@ list($logType, $logFile) = resolveLogTypeAndFile($_GET['type'] ?? 'summary', $su
 
 $download = isset($_GET['download']) && (string) $_GET['download'] === '1';
 if ($download) {
-    downloadCombinedLogs($debugLogFile, $summaryLogFile);
+    downloadCombinedLogs($debugLogFile, $debugArchiveLogFile, $summaryLogFile);
     exit;
 }
 

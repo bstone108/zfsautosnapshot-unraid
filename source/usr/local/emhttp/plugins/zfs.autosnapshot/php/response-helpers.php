@@ -12,6 +12,112 @@ if (!defined('ZFSAS_JSON_END')) {
     define('ZFSAS_JSON_END', 'ZFSAS_JSON_END');
 }
 
+function zfsas_is_valid_dataset_name($dataset)
+{
+    return preg_match('/^[A-Za-z0-9._\/:+\-]+$/', (string) $dataset) === 1;
+}
+
+function zfsas_get_csrf_token()
+{
+    static $cachedToken = null;
+
+    if ($cachedToken !== null) {
+        return $cachedToken;
+    }
+
+    $cachedToken = '';
+
+    if (session_status() === PHP_SESSION_NONE) {
+        @session_start();
+    }
+
+    if (session_status() === PHP_SESSION_ACTIVE && isset($_SESSION['csrf_token'])) {
+        $candidate = trim((string) $_SESSION['csrf_token']);
+        if ($candidate !== '') {
+            $cachedToken = $candidate;
+            return $cachedToken;
+        }
+    }
+
+    if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && isset($GLOBALS['var']['csrf_token'])) {
+        $candidate = trim((string) $GLOBALS['var']['csrf_token']);
+        if ($candidate !== '') {
+            $cachedToken = $candidate;
+            return $cachedToken;
+        }
+    }
+
+    if (isset($GLOBALS['csrf_token'])) {
+        $candidate = trim((string) $GLOBALS['csrf_token']);
+        if ($candidate !== '') {
+            $cachedToken = $candidate;
+            return $cachedToken;
+        }
+    }
+
+    $varIniPath = '/var/local/emhttp/var.ini';
+    if (is_file($varIniPath) && is_readable($varIniPath)) {
+        $parsed = @parse_ini_file($varIniPath, false, INI_SCANNER_RAW);
+        if (is_array($parsed) && isset($parsed['csrf_token'])) {
+            $candidate = trim((string) $parsed['csrf_token']);
+            if ($candidate !== '') {
+                $cachedToken = $candidate;
+                return $cachedToken;
+            }
+        }
+    }
+
+    return $cachedToken;
+}
+
+function zfsas_get_submitted_csrf_token()
+{
+    $candidates = [
+        $_POST['csrf_token'] ?? null,
+        $_POST['csrf-token'] ?? null,
+        $_POST['_csrf'] ?? null,
+        $_SERVER['HTTP_X_CSRF_TOKEN'] ?? null,
+        $_SERVER['HTTP_CSRF_TOKEN'] ?? null,
+    ];
+
+    foreach ($candidates as $candidate) {
+        if (!is_string($candidate)) {
+            continue;
+        }
+
+        $candidate = trim($candidate);
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+
+    return '';
+}
+
+function zfsas_validate_csrf_token(&$error = null)
+{
+    $error = null;
+
+    $expectedToken = zfsas_get_csrf_token();
+    if ($expectedToken === '') {
+        $error = 'Security token is unavailable. Reload the page and try again.';
+        return false;
+    }
+
+    $submittedToken = zfsas_get_submitted_csrf_token();
+    if ($submittedToken === '') {
+        $error = 'Security token is missing. Reload the page and try again.';
+        return false;
+    }
+
+    if (!hash_equals($expectedToken, $submittedToken)) {
+        $error = 'Security token validation failed. Reload the page and try again.';
+        return false;
+    }
+
+    return true;
+}
+
 function zfsas_emit_marked_json($payload, $statusCode = 200)
 {
     $GLOBALS['zfsas_json_response_sent'] = true;
@@ -94,7 +200,8 @@ function zfsas_normalize_return_url($url, $fallback = '/Settings/ZFSAutoSnapshot
         return (string) $fallback;
     }
 
-    if (preg_match('/[\r\n]/', $candidate) === 1) {
+    $crlfMatch = preg_match('/[\r\n]/', $candidate);
+    if ($crlfMatch === false || $crlfMatch === 1) {
         return (string) $fallback;
     }
 

@@ -6,8 +6,10 @@ PLUGIN_DIR="/usr/local/emhttp/plugins/${PLUGIN_NAME}"
 BOOT_PLUGIN_DIR="/boot/config/plugins/${PLUGIN_NAME}"
 DEFAULT_CFG="${PLUGIN_DIR}/config/zfs_autosnapshot.conf.example"
 TARGET_CFG="${BOOT_PLUGIN_DIR}/zfs_autosnapshot.conf"
+DEFAULT_SEND_CFG="${PLUGIN_DIR}/config/zfs_send.conf.example"
+TARGET_SEND_CFG="${BOOT_PLUGIN_DIR}/zfs_send.conf"
+MAIN_TARGET_CFG="${BOOT_PLUGIN_DIR}/zfs_autosnapshot.conf"
 REPAIR_PERMS_SCRIPT="${PLUGIN_DIR}/scripts/repair-permissions.sh"
-CRON_FILE="/etc/cron.d/zfs_autosnapshot"
 RUNTIME_DIR="/var/run/zfs-autosnapshot"
 LOCK_FILE="${RUNTIME_DIR}/zfs_autosnapshot.lock"
 LOCK_DIR="${RUNTIME_DIR}/zfs_autosnapshot.lockdir"
@@ -15,6 +17,42 @@ CHILD_PID_FILE="${RUNTIME_DIR}/zfs_autosnapshot.child.pid"
 STOP_FILE="${RUNTIME_DIR}/zfs_autosnapshot.stop"
 RUN_MATCH='/usr/local/sbin/zfs_autosnapshot'
 SNAPSHOT_PREFIX='autosnapshot-'
+SEND_RUNTIME_DIR="/var/run/zfs-autosnapshot-send"
+SEND_LOCK_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.lock"
+SEND_LOCK_DIR="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.lockdir"
+SEND_CHILD_PID_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.child.pid"
+SEND_STOP_FILE="${SEND_RUNTIME_DIR}/zfs_autosnapshot_send.stop"
+SEND_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_send'
+ALLOW_ORPHAN_DESTROY_MATCHES=1
+OPS_RUNTIME_DIR="/var/run/zfs-autosnapshot-ops"
+OPS_STOP_FILE="${OPS_RUNTIME_DIR}/queue.stop"
+OPS_LOCK_FILE="${OPS_RUNTIME_DIR}/queue.lock"
+OPS_LOCK_DIR="${OPS_RUNTIME_DIR}/queue.lockdir"
+OPS_CHILD_PID_FILE="${OPS_RUNTIME_DIR}/queue.child.pid"
+OPS_KICKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_queue_kicker'
+OPS_SEND_WORKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_send_worker'
+OPS_DELETE_WORKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_delete_worker'
+OPS_JOB_LOCKS_DIR="${OPS_RUNTIME_DIR}/job-locks"
+RECOVERY_RUNTIME_DIR="/var/run/zfs-autosnapshot-recovery"
+RECOVERY_STOP_FILE="${RECOVERY_RUNTIME_DIR}/recovery.stop"
+RECOVERY_LOCK_FILE="${RECOVERY_RUNTIME_DIR}/recovery.lock"
+RECOVERY_LOCK_DIR="${RECOVERY_RUNTIME_DIR}/recovery.lockdir"
+RECOVERY_CHILD_PID_FILE="${RECOVERY_RUNTIME_DIR}/recovery.child.pid"
+RECOVERY_SCAN_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_recovery_scan'
+MIGRATOR_RUNTIME_DIR="/var/run/zfs-autosnapshot-migrator"
+MIGRATOR_LOCK_FILE="${MIGRATOR_RUNTIME_DIR}/migrator.lock"
+MIGRATOR_LOCK_DIR="${MIGRATOR_RUNTIME_DIR}/locks"
+MIGRATOR_CHILD_PID_FILE="${MIGRATOR_RUNTIME_DIR}/migrator.child.pid"
+MIGRATOR_STOP_FILE="${MIGRATOR_RUNTIME_DIR}/migrator.stop"
+MIGRATOR_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_migrate_datasets'
+SNAPSHOT_MANAGER_RUNTIME_DIR="/var/run/zfs-autosnapshot-manager"
+SNAPSHOT_MANAGER_LOCK_FILE="${SNAPSHOT_MANAGER_RUNTIME_DIR}/snapshot_manager.lock"
+SNAPSHOT_MANAGER_LOCK_DIR="${SNAPSHOT_MANAGER_RUNTIME_DIR}/locks"
+SNAPSHOT_MANAGER_CHILD_PID_FILE="${SNAPSHOT_MANAGER_RUNTIME_DIR}/snapshot_manager.child.pid"
+SNAPSHOT_MANAGER_STOP_FILE="${SNAPSHOT_MANAGER_RUNTIME_DIR}/snapshot_manager.stop"
+SNAPSHOT_MANAGER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_snapshot_manager_worker'
+LEGACY_OPS_QUEUE_DIR="${BOOT_PLUGIN_DIR}/ops_queue"
+TMP_OPS_QUEUE_DIR="/tmp/zfs-autosnapshot-ops"
 
 remember_pid() {
   local var_name="$1"
@@ -153,10 +191,12 @@ stop_running_jobs() {
     remember_pid seen_pids "$pid" >/dev/null 2>&1 || true
   done < <(list_running_pids)
 
-  while IFS= read -r pid; do
-    [[ -n "$pid" ]] || continue
-    remember_pid seen_pids "$pid" >/dev/null 2>&1 || true
-  done < <(list_orphaned_destroy_pids)
+  if (( ALLOW_ORPHAN_DESTROY_MATCHES )); then
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      remember_pid seen_pids "$pid" >/dev/null 2>&1 || true
+    done < <(list_orphaned_destroy_pids)
+  fi
 
   if [[ -z "$(printf '%s' "$seen_pids" | sed '/^[[:space:]]*$/d')" ]]; then
     echo "No running zfs_autosnapshot job detected."
@@ -205,6 +245,14 @@ else
   else
     echo "Keeping existing config: $TARGET_CFG"
   fi
+
+  if [[ ! -f "$TARGET_SEND_CFG" ]]; then
+    cp -f "$DEFAULT_SEND_CFG" "$TARGET_SEND_CFG"
+    chmod 0644 "$TARGET_SEND_CFG"
+    echo "Installed default config: $TARGET_SEND_CFG"
+  else
+    echo "Keeping existing config: $TARGET_SEND_CFG"
+  fi
 fi
 
 # Remove any AppleDouble metadata files that can break Unraid page parsing.
@@ -214,20 +262,68 @@ find "$PLUGIN_DIR" -type f \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev
 # old buggy process cannot survive an upgrade.
 stop_running_jobs
 
+RUNTIME_DIR="$SEND_RUNTIME_DIR"
+LOCK_FILE="$SEND_LOCK_FILE"
+LOCK_DIR="$SEND_LOCK_DIR"
+CHILD_PID_FILE="$SEND_CHILD_PID_FILE"
+STOP_FILE="$SEND_STOP_FILE"
+RUN_MATCH="$SEND_RUN_MATCH"
+SNAPSHOT_PREFIX='zfs-send-'
+TARGET_CFG="$TARGET_SEND_CFG"
+ALLOW_ORPHAN_DESTROY_MATCHES=1
+stop_running_jobs
+
+RUNTIME_DIR="$SNAPSHOT_MANAGER_RUNTIME_DIR"
+LOCK_FILE="$SNAPSHOT_MANAGER_LOCK_FILE"
+LOCK_DIR="$SNAPSHOT_MANAGER_LOCK_DIR"
+CHILD_PID_FILE="$SNAPSHOT_MANAGER_CHILD_PID_FILE"
+STOP_FILE="$SNAPSHOT_MANAGER_STOP_FILE"
+RUN_MATCH="$SNAPSHOT_MANAGER_RUN_MATCH"
+SNAPSHOT_PREFIX='manual-'
+TARGET_CFG="$MAIN_TARGET_CFG"
+ALLOW_ORPHAN_DESTROY_MATCHES=0
+stop_running_jobs
+
+RUNTIME_DIR="$OPS_RUNTIME_DIR"
+LOCK_FILE="$OPS_LOCK_FILE"
+LOCK_DIR="$OPS_LOCK_DIR"
+CHILD_PID_FILE="$OPS_CHILD_PID_FILE"
+STOP_FILE="$OPS_STOP_FILE"
+SNAPSHOT_PREFIX='zfs-send-'
+TARGET_CFG="$TARGET_SEND_CFG"
+ALLOW_ORPHAN_DESTROY_MATCHES=0
+for RUN_MATCH in "$OPS_KICKER_RUN_MATCH" "$OPS_SEND_WORKER_RUN_MATCH" "$OPS_DELETE_WORKER_RUN_MATCH"; do
+  stop_running_jobs
+done
+rm -rf "$OPS_JOB_LOCKS_DIR" >/dev/null 2>&1 || true
+rm -rf "$LEGACY_OPS_QUEUE_DIR" >/dev/null 2>&1 || true
+rm -rf "$TMP_OPS_QUEUE_DIR" >/dev/null 2>&1 || true
+
+RUNTIME_DIR="$RECOVERY_RUNTIME_DIR"
+LOCK_FILE="$RECOVERY_LOCK_FILE"
+LOCK_DIR="$RECOVERY_LOCK_DIR"
+CHILD_PID_FILE="$RECOVERY_CHILD_PID_FILE"
+STOP_FILE="$RECOVERY_STOP_FILE"
+SNAPSHOT_PREFIX='manual-recovery-'
+TARGET_CFG="$MAIN_TARGET_CFG"
+ALLOW_ORPHAN_DESTROY_MATCHES=0
+RUN_MATCH="$RECOVERY_SCAN_RUN_MATCH"
+stop_running_jobs
+
+RUNTIME_DIR="$MIGRATOR_RUNTIME_DIR"
+LOCK_FILE="$MIGRATOR_LOCK_FILE"
+LOCK_DIR="$MIGRATOR_LOCK_DIR"
+CHILD_PID_FILE="$MIGRATOR_CHILD_PID_FILE"
+STOP_FILE="$MIGRATOR_STOP_FILE"
+SNAPSHOT_PREFIX='manual-migration-'
+TARGET_CFG="$MAIN_TARGET_CFG"
+ALLOW_ORPHAN_DESTROY_MATCHES=0
+RUN_MATCH="$MIGRATOR_RUN_MATCH"
+stop_running_jobs
+
 sync_exit=0
 if [[ -x "${PLUGIN_DIR}/scripts/sync-cron.sh" ]]; then
   "${PLUGIN_DIR}/scripts/sync-cron.sh" || sync_exit=$?
-fi
-
-# Safety guard: if schedule mode is disabled, ensure cron file is removed.
-schedule_mode="$(awk -F= '/^SCHEDULE_MODE=/{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); gsub(/^"/,"",v); gsub(/"$/,"",v); print tolower(v); exit}' "$TARGET_CFG" 2>/dev/null || true)"
-if [[ -z "$schedule_mode" ]]; then
-  schedule_mode="disabled"
-fi
-
-if [[ "$schedule_mode" == "disabled" ]]; then
-  rm -f "$CRON_FILE"
-  echo "Schedule mode is disabled; ensured cron entry is removed."
 fi
 
 # Force cron runtime refresh on every install/upgrade so users do not need
