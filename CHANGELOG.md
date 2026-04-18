@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.18.02
+
+- Promoted the current testing stack toward general release with clearer guardrails around what is ready now versus what is still preview-only.
+- Marked `Dataset Migrator`, `Recovery Tools`, and `Snapshot Manager` more explicitly as unfinished preview tools that may not work correctly yet, while keeping `ZFS Send` presented as the finished feature in this release.
+- Kept the newer logging improvements from `2026.04.18.01`, including condensed archived history, sanitized log output, and RAM-backed runtime logs for the more verbose recovery and migration tooling.
+
 ### 2026.04.18.01 (Testing Branch Only)
 
 - Reworked plugin logging so the main autosnapshot log, shared `ZFS Send` log, Snapshot Manager log, Recovery scan logs, and Dataset Migrator log now keep a detailed current window plus a condensed archived history instead of just growing forever or being bluntly thrown away.

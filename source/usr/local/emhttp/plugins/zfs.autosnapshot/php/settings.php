@@ -1947,6 +1947,9 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
         <div class="zfsas-help">
           Optional power-user features live here. ZFS Send keeps its own config and queue page, and the dataset migrator has its own guided workflow because it needs container handling, verification progress, and rollback safety.
         </div>
+        <div class="zfsas-alert zfsas-alert-warn">
+          <code>ZFS Send</code> is the finished feature in this release. <code>Dataset Migrator</code>, <code>Recovery Tools</code>, and <code>Snapshot Manager</code> are still unfinished preview tools and may not work correctly yet.
+        </div>
         <div class="zfsas-tool-list">
           <div class="zfsas-tool-row">
             <div class="zfsas-tool-button-wrap">
@@ -1966,7 +1969,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
             <div class="zfsas-tool-copy">
               <div class="zfsas-tool-title">Dataset Migrator</div>
               <div class="zfsas-help zfsas-tool-description">
-                Convert top-level folders inside a dataset into child datasets with guided Docker handling, paranoid verification, rollback safety, and live progress reporting.
+                Convert top-level folders inside a dataset into child datasets with guided Docker handling, paranoid verification, rollback safety, and live progress reporting. This tool is still unfinished and may not work correctly yet.
               </div>
             </div>
           </div>
@@ -1988,7 +1991,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
             <div class="zfsas-tool-copy">
               <div class="zfsas-tool-title">Recovery Tools</div>
               <div class="zfsas-help zfsas-tool-description">
-                Open the guided recovery page for corruption diagnostics, scrub-aware repair workflows, and manual scan tools when you need to investigate damaged data.
+                Open the guided recovery page for corruption diagnostics, scrub-aware repair workflows, and manual scan tools when you need to investigate damaged data. This tool is still unfinished and may not work correctly yet.
               </div>
             </div>
           </div>
@@ -2001,6 +2004,9 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
         <h3 class="zfsas-placeholder-title">Snapshot Manager</h3>
         <div class="zfsas-help">
           Snapshot Manager is available directly in this tab. It still stays lightweight by waiting to load the full dataset summary and drawer UI until you switch here.
+        </div>
+        <div class="zfsas-alert zfsas-alert-warn">
+          <code>Snapshot Manager</code> is still unfinished and may not work correctly yet. Please treat its actions as preview-only for now and verify results manually.
         </div>
         <div class="zfsas-embedded-frame-wrap">
           <iframe

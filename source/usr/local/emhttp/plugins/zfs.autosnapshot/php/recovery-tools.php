@@ -168,6 +168,10 @@ $csrfToken = zfsas_get_csrf_token();
     </div>
   </div>
 
+  <div class="zfsas-alert zfsas-alert-warn">
+    <code>Recovery Tools</code> is still unfinished and may not work correctly yet. Treat the current workflows as preview diagnostics and verify any results manually before relying on them.
+  </div>
+
   <div class="zfsas-rt-card">
     <h3 style="margin-top:0;">Corruption Overview</h3>
     <div class="zfsas-rt-help">

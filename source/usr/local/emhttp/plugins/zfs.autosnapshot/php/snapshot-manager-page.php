@@ -312,6 +312,10 @@ $csrfToken = zfsas_get_csrf_token();
     <?php endif; ?>
   </div>
 
+  <div class="zfsas-alert zfsas-alert-warn">
+    <code>Snapshot Manager</code> is still unfinished and may not work correctly yet. Please verify any manual action results before treating them as authoritative.
+  </div>
+
   <div class="zfsas-sm-card">
     <div class="zfsas-sm-help">
       The main table stays lightweight: it only shows dataset-level summary information, pending queue activity, and active send progress. Snapshot lists load only when you click <strong>Manage Snapshots</strong>.
