@@ -268,7 +268,8 @@ if ($isPostRequest) {
     .zfsas-send-progress {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
+      min-width: 0;
     }
 
     .zfsas-send-progress-track {
@@ -286,7 +287,7 @@ if ($isPostRequest) {
     }
 
     .zfsas-send-progress-text {
-      min-width: 44px;
+      min-width: 38px;
       font-size: 12px;
       text-align: right;
       color: var(--text-color, #4f5a66);
@@ -294,6 +295,55 @@ if ($isPostRequest) {
 
     .zfsas-send-queue-table {
       min-width: 1080px;
+      table-layout: fixed;
+    }
+
+    .zfsas-send-queue-table th,
+    .zfsas-send-queue-table td {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: middle;
+    }
+
+    .zfsas-send-queue-table code,
+    .zfsas-send-queue-message {
+      display: inline-block;
+      max-width: 100%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: middle;
+    }
+
+    .zfsas-send-queue-table th:nth-child(1),
+    .zfsas-send-queue-table td:nth-child(1) {
+      width: 18%;
+    }
+
+    .zfsas-send-queue-table th:nth-child(2),
+    .zfsas-send-queue-table td:nth-child(2) {
+      width: 18%;
+    }
+
+    .zfsas-send-queue-table th:nth-child(3),
+    .zfsas-send-queue-table td:nth-child(3) {
+      width: 118px;
+    }
+
+    .zfsas-send-queue-table th:nth-child(4),
+    .zfsas-send-queue-table td:nth-child(4) {
+      width: 108px;
+    }
+
+    .zfsas-send-queue-table th:nth-child(5),
+    .zfsas-send-queue-table td:nth-child(5) {
+      width: 145px;
+    }
+
+    .zfsas-send-queue-table th:nth-child(7),
+    .zfsas-send-queue-table td:nth-child(7) {
+      width: 280px;
     }
 
     .zfsas-send-queue-badge {
@@ -329,7 +379,8 @@ if ($isPostRequest) {
       display: flex;
       align-items: center;
       gap: 8px;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
+      white-space: nowrap;
     }
 
     @media (max-width: 980px) {
@@ -581,8 +632,8 @@ if ($isPostRequest) {
           <?php else : ?>
             <?php foreach ($queueJobs as $queueJob) : ?>
               <tr data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">
-                <td><code><?php echo zfsas_send_h($queueJob['SOURCE_ROOT'] ?? $queueJob['DATASET'] ?? ''); ?></code></td>
-                <td><code><?php echo zfsas_send_h($queueJob['DESTINATION_ROOT'] ?? ''); ?></code></td>
+                <td title="<?php echo zfsas_send_h($queueJob['SOURCE_ROOT'] ?? $queueJob['DATASET'] ?? ''); ?>"><code><?php echo zfsas_send_h($queueJob['SOURCE_ROOT'] ?? $queueJob['DATASET'] ?? ''); ?></code></td>
+                <td title="<?php echo zfsas_send_h($queueJob['DESTINATION_ROOT'] ?? ''); ?>"><code><?php echo zfsas_send_h($queueJob['DESTINATION_ROOT'] ?? ''); ?></code></td>
                 <td>
                   <span class="zfsas-send-queue-badge"><?php echo zfsas_send_h(zfsas_ops_send_job_type_label($queueJob)); ?></span>
                 </td>
@@ -597,7 +648,9 @@ if ($isPostRequest) {
                     <div class="zfsas-send-progress-text"><?php echo (int) zfsas_ops_send_job_progress_percent($queueJob); ?>%</div>
                   </div>
                 </td>
-                <td><?php echo zfsas_send_h((string) (($queueJob['LAST_ERROR'] ?? '') !== '' ? $queueJob['LAST_ERROR'] : ($queueJob['LAST_MESSAGE'] ?? ''))); ?></td>
+                <?php $queueDisplayMessage = zfsas_ops_send_job_display_message($queueJob); ?>
+                <?php $queueRawMessage = zfsas_ops_send_job_raw_message($queueJob); ?>
+                <td title="<?php echo zfsas_send_h($queueRawMessage); ?>"><span class="zfsas-send-queue-message"><?php echo zfsas_send_h($queueDisplayMessage); ?></span></td>
                 <td>
                   <div class="zfsas-send-queue-actions">
                   <?php if (in_array((string) ($queueJob['STATE'] ?? ''), ['queued', 'running', 'retry_wait'], true)) : ?>
@@ -826,16 +879,17 @@ if ($isPostRequest) {
 
     var html = '';
     jobs.forEach(function (job) {
-      var message = job.lastError || job.lastMessage || '';
+      var message = job.lastMessage || job.lastError || '';
+      var rawMessage = job.rawMessage || job.lastError || job.lastMessage || '';
       var typeLabel = job.typeLabel || ((job.mode === 'manual_snapshot') ? 'Manual send' : 'Scheduled send');
 
       html += '<tr data-job-id="' + escapeHtml(job.id || '') + '">';
-      html += '<td><code>' + escapeHtml(job.source || '') + '</code></td>';
-      html += '<td><code>' + escapeHtml(job.destination || '') + '</code></td>';
+      html += '<td title="' + escapeHtml(job.source || '') + '"><code>' + escapeHtml(job.source || '') + '</code></td>';
+      html += '<td title="' + escapeHtml(job.destination || '') + '"><code>' + escapeHtml(job.destination || '') + '</code></td>';
       html += '<td>' + queueBadge(typeLabel, false) + '</td>';
       html += '<td>' + queueBadge(job.stateLabel || job.state || 'Queued', job.state === 'failed') + '</td>';
       html += '<td>' + queueProgressHtml(job.progress) + '</td>';
-      html += '<td>' + escapeHtml(message) + '</td>';
+      html += '<td title="' + escapeHtml(rawMessage) + '"><span class="zfsas-send-queue-message">' + escapeHtml(message) + '</span></td>';
       html += '<td><div class="zfsas-send-queue-actions">';
       if (job.canCancel) {
         html += '<button type="button" class="btn zfsas-send-cancel-job" data-job-id="' + escapeHtml(job.id || '') + '">Cancel</button>';

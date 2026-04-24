@@ -221,9 +221,9 @@ wait_for_autosnapshot_to_finish() {
   local mode message
 
   mode="$(job_get job JOB_MODE)"
-  message="Waiting for the regular autosnapshot run to finish before starting this send job."
+  message="Waiting for autosnapshot."
   if [[ "$mode" == "manual_snapshot" ]]; then
-    message="Waiting for the regular autosnapshot run to finish before starting this manual send."
+    message="Waiting for autosnapshot."
   fi
 
   while autosnapshot_run_active; do
@@ -236,9 +236,9 @@ wait_for_unraid_array_to_be_actionable_for_current_job() {
   local mode suffix current_message last_message=""
 
   mode="$(job_get job JOB_MODE)"
-  suffix="Waiting before starting this send job."
+  suffix="Waiting for array."
   if [[ "$mode" == "manual_snapshot" ]]; then
-    suffix="Waiting before starting this manual send."
+    suffix="Waiting for array."
   fi
 
   while ! unraid_array_actionable; do
@@ -247,7 +247,7 @@ wait_for_unraid_array_to_be_actionable_for_current_job() {
       log "$current_message"
       last_message="$current_message"
     fi
-    set_job_progress "preparing" "5" "$current_message"
+    set_job_progress "preparing" "5" "$suffix"
     sleep 5
   done
 }
@@ -334,12 +334,12 @@ reserve_destination_space_for_current_send() {
 
   buffer_bytes="$(send_space_buffer_bytes "$required_bytes")"
   if earlier_send_job_waiting_for_pool "$dest_pool"; then
-    defer_current_job "Waiting behind an earlier queued ZFS send job for destination pool ${dest_pool}."
+    defer_current_job "Waiting turn on ${dest_pool}."
     return 2
   fi
 
   if ! acquire_send_transfer_slot "$CURRENT_JOB_ID" "$$" transfer_slot_dir; then
-    defer_current_job "Waiting for an available ZFS send transfer slot. Pre-send space estimate is complete."
+    defer_current_job "Waiting for send slot."
     return 2
   fi
   CURRENT_SEND_TRANSFER_SLOT_DIR="$transfer_slot_dir"
@@ -361,7 +361,7 @@ reserve_destination_space_for_current_send() {
     fi
     rerun_space_cleanup_for_waiting_send "$schedule_job_id" "$dest_pool" "$capacity_dataset" "$cleanup_target" || true
     if ! acquire_send_transfer_slot "$CURRENT_JOB_ID" "$$" transfer_slot_dir; then
-      defer_current_job "Waiting for an available ZFS send transfer slot after cleanup planning. Pre-send space estimate is complete."
+      defer_current_job "Waiting for send slot."
       return 2
     fi
     CURRENT_SEND_TRANSFER_SLOT_DIR="$transfer_slot_dir"
@@ -373,7 +373,7 @@ reserve_destination_space_for_current_send() {
   fi
 
   release_current_send_transfer_slot
-  defer_current_job "Waiting for destination space reservation for ${destination}: need ${needed_bytes} bytes, available ${available_bytes} bytes after active sends. Cleanup will continue in the background."
+  defer_current_job "Waiting for destination space."
   return 2
 }
 
@@ -438,11 +438,13 @@ estimate_destination_space_for_current_send() {
     return 0
   fi
 
+  job[LAST_MESSAGE]="Calculating needed space."
+  persist_job || true
   required_bytes="$(estimate_zfs_send_stream_bytes "$base_snapshot" "$snapshot")"
   [[ "$required_bytes" =~ ^[0-9]+$ ]] || required_bytes=0
   job[SPACE_ESTIMATE_KEY]="$expected_key"
   job[SPACE_REQUIRED_BYTES]="$required_bytes"
-  job[LAST_MESSAGE]="Estimated ${required_bytes} bytes required to send ${snapshot} to ${destination}."
+  job[LAST_MESSAGE]="Space estimate ready."
   persist_job || true
   log "Estimated destination space for ${CURRENT_JOB_ID}: destination=${destination} snapshot=${snapshot} base=${base_snapshot:-none} required=${required_bytes}"
 }
@@ -473,7 +475,7 @@ wait_for_pool_prep_for_current_job() {
       return 1
       ;;
     queued|running|retry_wait)
-      defer_current_job "Waiting for destination pool prep '${prep_job_id}' to complete before starting ZFS send."
+      defer_current_job "Waiting for pool prep."
       return 2
       ;;
   esac
@@ -486,11 +488,15 @@ run_pipeline_with_space_reservation() {
   local base_snapshot="$2"
   local snapshot="$3"
   local destination="$4"
+  local send_progress="${5:-}"
   local rc
 
   estimate_destination_space_for_current_send "$destination" "$base_snapshot" "$snapshot" || return 1
   wait_for_pool_prep_for_current_job || return $?
   reserve_destination_space_for_current_send "$destination" "$base_snapshot" "$snapshot" || return $?
+  if [[ -n "$send_progress" ]]; then
+    set_job_progress "sending" "$send_progress" "Sending."
+  fi
   if run_pipeline_with_status "$description" "$base_snapshot" "$snapshot" "$destination"; then
     rc=0
   else
@@ -698,9 +704,9 @@ build_resume_members_for_current_job() {
 
   job[MEMBER_COUNT]="$member_index"
   if (( needs_resume == 0 )); then
-    job[LAST_MESSAGE]="Recovered scheduled send state. All child datasets already have ${basename}; queueing finalize only."
+    job[LAST_MESSAGE]="Queueing finalizer."
   else
-    job[LAST_MESSAGE]="Recovered scheduled send state. Queueing only child datasets still missing ${basename}."
+    job[LAST_MESSAGE]="Queueing missing sends."
   fi
   persist_job
   return 0
@@ -785,9 +791,9 @@ queue_child_send_jobs() {
     queued_job[RETRY_AT]="0"
     queued_job[LAST_ERROR]=""
     if (( resume_only == 1 )); then
-      queued_job[LAST_MESSAGE]="Queued as part of recovered scheduled send fan-out."
+      queued_job[LAST_MESSAGE]="Queued send."
     else
-      queued_job[LAST_MESSAGE]="Queued as part of recursive scheduled send fan-out."
+      queued_job[LAST_MESSAGE]="Queued send."
     fi
     queued_job[WORKER_PID]=""
     queued_job[PROGRESS_PERCENT]="5"
@@ -822,9 +828,9 @@ queue_child_send_jobs() {
   queued_job[RETRY_AT]="0"
   queued_job[LAST_ERROR]=""
   if (( resume_only == 1 )); then
-    queued_job[LAST_MESSAGE]="Queued final checkpoint cleanup for recovered scheduled send."
+    queued_job[LAST_MESSAGE]="Waiting for children."
   else
-    queued_job[LAST_MESSAGE]="Queued final checkpoint cleanup for recursive scheduled send."
+    queued_job[LAST_MESSAGE]="Waiting for children."
   fi
   queued_job[WORKER_PID]=""
   queued_job[PROGRESS_PERCENT]="5"
@@ -888,7 +894,7 @@ send_member_snapshot() {
   fi
 
   progress=$((30 + (member_index * 40 / (member_count == 0 ? 1 : member_count))))
-  set_job_progress "sending" "$progress" "Sending ${source_dataset}@${basename} to ${destination}."
+  set_job_progress "preparing" "$progress" "Preparing send."
 
   if [[ "$(job_get job JOB_MODE)" == "scheduled" ]]; then
     latest_common=""
@@ -900,7 +906,7 @@ send_member_snapshot() {
         return 1
       }
       description="Incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
-      run_pipeline_with_space_reservation "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" || return $?
+      run_pipeline_with_space_reservation "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" "$progress" || return $?
     else
       if (( destination_exists == 1 )) && dataset_has_any_snapshots "$destination"; then
         failure_message="No common send checkpoint remains between '${source_dataset}' and '${destination}'. The destination dataset was purged so the next retry can reseed this backup from scratch. Review the preserved send log for diagnostics."
@@ -916,7 +922,7 @@ send_member_snapshot() {
         return 1
       fi
       description="Full send ${snapshot} -> ${destination}"
-      run_pipeline_with_space_reservation "$description" "" "$snapshot" "$destination" || return $?
+      run_pipeline_with_space_reservation "$description" "" "$snapshot" "$destination" "$progress" || return $?
     fi
   else
     latest_common=""
@@ -928,7 +934,7 @@ send_member_snapshot() {
         return 1
       }
       description="Manual incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
-      run_pipeline_with_space_reservation "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" || return $?
+      run_pipeline_with_space_reservation "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" "$progress" || return $?
     else
       if (( destination_exists == 1 )) && dataset_has_any_snapshots "$destination"; then
         failure_message="No common snapshot remains between '${source_dataset}' and '${destination}', and a destructive automatic reseed is not available for this manual send. Review the send log and re-seed the destination manually."
@@ -936,11 +942,11 @@ send_member_snapshot() {
         return 1
       fi
       description="Manual full send ${snapshot} -> ${destination}"
-      run_pipeline_with_space_reservation "$description" "" "$snapshot" "$destination" || return $?
+      run_pipeline_with_space_reservation "$description" "" "$snapshot" "$destination" "$progress" || return $?
     fi
   fi
 
-  set_job_progress "verifying" "$((progress + 15))" "Verifying ${destination}@${basename}."
+  set_job_progress "verifying" "$((progress + 15))" "Verifying receive."
   snapshot_exists "${destination}@${basename}"
 }
 
@@ -1001,7 +1007,7 @@ cleanup_source_checkpoints_for_verified_member() {
 
   ((${#old_basenames[@]} > 0)) || return 0
 
-  set_job_progress "cleanup" "95" "Removing source send checkpoints older than verified common checkpoint ${retained_basename} for ${source_dataset}."
+  set_job_progress "cleanup" "95" "Cleaning source checkpoints."
   for snap_base in "${!old_basenames[@]}"; do
     while IFS=$'\t' read -r snap_name snap_epoch; do
       [[ -n "$snap_name" ]] || continue
@@ -1097,19 +1103,19 @@ process_cleanup_member_job() {
   if linked_job_state "$wait_job_id" wait_state; then
     case "$wait_state" in
       queued|running|retry_wait)
-        defer_current_job "Waiting for the matching child send to finish before running zero-change cleanup." 15
+        defer_current_job "Waiting for child send." 15
         return 2
         ;;
       failed)
-        skip_job "Skipped zero-change cleanup because the matching child send failed."
+        skip_job "Skipped; send failed."
         return 0
         ;;
     esac
   fi
 
-  set_job_progress "cleanup" "92" "Queueing zero-change cleanup for ${destination_dataset}."
+  set_job_progress "cleanup" "92" "Queueing zero-change cleanup."
   queue_schedule_zero_change_cleanup_for_dataset "$(job_get job SCHEDULE_JOB_ID)" "$destination_dataset" "$snapshot_basename" || true
-  complete_job "Queued zero-change cleanup for ${destination_dataset}."
+  complete_job "Queued zero-change cleanup."
   return 0
 }
 
@@ -1118,16 +1124,16 @@ process_finalize_job() {
   parent_run_id="$(job_get job PARENT_RUN_ID)"
 
   if run_child_jobs_have_failed "$parent_run_id"; then
-    skip_job "Skipping previous checkpoint cleanup because one or more child send jobs failed."
+    skip_job "Skipped; child failed."
     return 0
   fi
 
   if run_child_jobs_still_active "$parent_run_id"; then
-    defer_current_job "Waiting for child send and cleanup jobs to finish before removing the previous checkpoint." 15
+    defer_current_job "Waiting for children." 15
     return 2
   fi
 
-  complete_job "Recursive scheduled send finished successfully."
+  complete_job "Scheduled window complete."
   return 0
 }
 
@@ -1140,23 +1146,23 @@ process_pool_prep_job() {
   dest_pool="$(job_get job DESTINATION_POOL)"
   schedule_ids="$(job_get job SCHEDULE_JOB_IDS)"
   [[ -n "$dest_pool" && -n "$schedule_ids" ]] || {
-    fail_current_job_final "Destination pool prep is missing its pool or schedule list."
+    fail_current_job_final "Pool prep is missing settings."
     return 1
   }
 
   if ! acquire_pool_prep_lock "$dest_pool"; then
-    defer_current_job "Waiting for another ZFS send prep already working on pool ${dest_pool}." 15
+    defer_current_job "Waiting for pool prep lock." 15
     return 2
   fi
   CURRENT_PREP_POOL="$dest_pool"
 
-  set_job_progress "preparing" "15" "Running retention cleanup prep for ZFS Send datasets on pool ${dest_pool}."
+  set_job_progress "preparing" "15" "Planning retention cleanup."
   retention_started="$(date +%s)"
   queue_pool_retention_cleanup "$dest_pool" "$dest_pool" planned_reclaim || true
   retention_elapsed=$(( $(date +%s) - retention_started ))
   log "Pool prep retention cleanup planning for ${dest_pool} completed in ${retention_elapsed}s"
 
-  set_job_progress "preparing" "55" "Running free-space cleanup prep for ZFS Send jobs on pool ${dest_pool}."
+  set_job_progress "preparing" "55" "Planning free-space cleanup."
   space_started="$(date +%s)"
   for schedule_job_id in $schedule_ids; do
     dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
@@ -1170,7 +1176,7 @@ process_pool_prep_job() {
 
   ensure_delete_worker_for_backlog
   release_current_prep_pool_lock
-  complete_job "Destination pool prep completed for ${dest_pool}." 3600
+  complete_job "Pool prep done." 3600
   return 0
 }
 
@@ -1187,10 +1193,10 @@ process_send_job() {
       ;;
   esac
 
-  set_job_progress "preparing" "5" "Preparing send job."
+  set_job_progress "preparing" "5" "Preparing."
   wait_for_unraid_array_to_be_actionable_for_current_job
   wait_for_autosnapshot_to_finish
-  set_job_progress "preparing" "15" "Preparing send job."
+  set_job_progress "preparing" "15" "Preparing."
 
   case "$mode:$action" in
     scheduled:pool_prep)
@@ -1207,17 +1213,17 @@ process_send_job() {
           fail_current_job_final "Unable to rebuild the scheduled send resume state for this window. A fresh scheduled run will be needed."
           return 1
         }
-        set_job_progress "snapshot_created" "28" "Recovered scheduled send state. Queueing missing child send jobs."
+        set_job_progress "snapshot_created" "28" "Queueing missing sends."
         queue_child_send_jobs || return 1
         job[COMPLETES_SCHEDULE_WINDOW]="0"
-        complete_job "Recovered scheduled send state and queued the remaining transfer jobs."
+        complete_job "Queued missing sends."
         return 0
       fi
       prepare_scheduled_job_snapshot || return 1
-      set_job_progress "snapshot_created" "28" "Initial preparation complete. Queueing send and cleanup jobs."
+      set_job_progress "snapshot_created" "28" "Queueing child sends."
       queue_child_send_jobs || return 1
       job[COMPLETES_SCHEDULE_WINDOW]="0"
-      complete_job "Initial scheduled send preparation completed. Transfer jobs were queued."
+      complete_job "Queued child sends."
       release_current_prep_pool_lock
       return 0
       ;;
@@ -1241,7 +1247,7 @@ process_send_job() {
       ;;
   esac
 
-  set_job_progress "snapshot_created" "30" "Snapshot ready. Starting transfer."
+  set_job_progress "snapshot_created" "30" "Snapshot ready."
 
   member_count="$(job_get job MEMBER_COUNT 0)"
   [[ "$member_count" =~ ^[0-9]+$ ]] || member_count=0
@@ -1251,17 +1257,17 @@ process_send_job() {
     send_member_snapshot "$index" "$member_count" || return $?
     if [[ "$mode:$action" == "scheduled:send_member" ]]; then
       cleanup_source_checkpoints_for_verified_member || return 1
-      set_job_progress "cleanup" "$((90 + (index * 5 / (member_count == 0 ? 1 : member_count))))" "Queueing zero-change cleanup for $(job_get job MEMBER_${index}_DESTINATION)."
+      set_job_progress "cleanup" "$((90 + (index * 5 / (member_count == 0 ? 1 : member_count))))" "Queueing zero-change cleanup."
       queue_schedule_zero_change_cleanup_for_dataset "$(job_get job SCHEDULE_JOB_ID)" "$(job_get job MEMBER_${index}_DESTINATION)" "$(job_get job SOURCE_SNAPSHOT_NAME)" || true
     fi
   done
 
   if [[ "$mode:$action" == "scheduled:send_member" ]]; then
-    complete_job "Child send completed successfully."
+    complete_job "Send complete."
     return 0
   fi
 
-  complete_job "Send job completed successfully."
+  complete_job "Send complete."
   return 0
 }
 
@@ -1292,12 +1298,24 @@ main() {
   parse_send_jobs_config
 
   trap cleanup EXIT INT TERM
-  if [[ "$WORKER_ROLE" == "pool_prep" ]]; then
+  if [[ -n "${ZFSAS_WORKER_LOCK_DIR:-}" ]]; then
+    case "${WORKER_ROLE}:${ZFSAS_WORKER_LOCK_DIR}" in
+      send:"$SEND_WORKER_RUNTIME_DIR"/worker-*.lockdir|pool_prep:"$SEND_WORKER_RUNTIME_DIR"/pool-prep-*.lockdir)
+        WORKER_LOCK_DIR="$ZFSAS_WORKER_LOCK_DIR"
+        [[ -d "$WORKER_LOCK_DIR" ]] || mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+  elif [[ "$WORKER_ROLE" == "pool_prep" ]]; then
     WORKER_LOCK_DIR="${SEND_WORKER_RUNTIME_DIR}/pool-prep-$$.lockdir"
+    mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
   else
     WORKER_LOCK_DIR="${SEND_WORKER_RUNTIME_DIR}/worker-$$.lockdir"
+    mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
   fi
-  mkdir "$WORKER_LOCK_DIR" 2>/dev/null || exit 0
+  printf '%s\n' "$$" > "${WORKER_LOCK_DIR}/pid" 2>/dev/null || true
 
   exec >> "$LOG_FILE" 2>&1
   log "Send worker $$ starting (${WORKER_ROLE})"
@@ -1347,7 +1365,7 @@ main() {
     else
       result="$?"
       if (( result != 2 )) && [[ "$(job_get job STATE)" == "running" ]]; then
-        fail_current_job "Send job failed during phase '$(job_get job PHASE)'. Review the send log and retry if needed."
+        fail_current_job "Send failed during $(job_get job PHASE)."
       fi
     fi
 

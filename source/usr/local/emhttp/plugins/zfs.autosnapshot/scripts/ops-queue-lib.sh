@@ -24,6 +24,7 @@ FAILED_SEND_LOGS_DIR="${CONFIG_DIR}/failed_send_logs"
 SEND_SCHEDULE_STATE_FILE="${CONFIG_DIR}/send_schedule_state.state"
 RUNTIME_DIR="/var/run/zfs-autosnapshot-ops"
 SEND_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/send-workers"
+SEND_WORKER_LAUNCH_LOCK_DIR="${RUNTIME_DIR}/send-workers.launch.lockdir"
 SEND_TRANSFER_RUNTIME_DIR="${RUNTIME_DIR}/send-transfer-slots"
 DELETE_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/delete-worker"
 DELETE_QUEUE_PID_FILE="${DELETE_WORKER_RUNTIME_DIR}/daemon.pid"
@@ -42,7 +43,6 @@ SEND_LOG_ARCHIVE_MAX_BYTES="${SEND_LOG_ARCHIVE_MAX_BYTES:-4194304}"
 
 DEFAULT_SEND_SNAPSHOT_PREFIX="zfs-send-"
 DEFAULT_SEND_MAX_PARALLEL="1"
-SEND_PREFLIGHT_EXTRA_WORKERS="${SEND_PREFLIGHT_EXTRA_WORKERS:-4}"
 DEFAULT_SEND_KEEP_ALL_FOR_DAYS="14"
 DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS="30"
 DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS="183"
@@ -1152,7 +1152,7 @@ enqueue_resume_prepare_job() {
   job[ATTEMPT_COUNT]="0"
   job[RETRY_AT]="0"
   job[LAST_ERROR]=""
-  job[LAST_MESSAGE]="Queued to resume an interrupted scheduled send window."
+  job[LAST_MESSAGE]="Queued resume."
   job[WORKER_PID]=""
   job[PROGRESS_PERCENT]="5"
   job[MEMBER_COUNT]="0"
@@ -1193,7 +1193,7 @@ enqueue_pool_prep_job() {
   job[ATTEMPT_COUNT]="0"
   job[RETRY_AT]="0"
   job[LAST_ERROR]=""
-  job[LAST_MESSAGE]="Queued destination-pool prep for ZFS Send jobs on ${dest_pool}."
+  job[LAST_MESSAGE]="Queued pool prep."
   job[WORKER_PID]=""
   job[PROGRESS_PERCENT]="5"
   job[COMPLETES_SCHEDULE_WINDOW]="0"
@@ -1529,24 +1529,22 @@ release_send_transfer_slot() {
 }
 
 send_worker_lock_count() {
+  cleanup_stale_send_worker_locks worker
   find "$SEND_WORKER_RUNTIME_DIR" -maxdepth 1 -mindepth 1 -type d -name 'worker-*.lockdir' 2>/dev/null | wc -l | tr -d ' '
 }
 
 send_worker_slot_available() {
-  local count max_workers extra_workers
+  local count max_workers
   count="$(send_worker_lock_count)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
   max_workers="$SEND_MAX_PARALLEL"
   [[ "$max_workers" =~ ^[0-9]+$ ]] || max_workers="$DEFAULT_SEND_MAX_PARALLEL"
   (( max_workers >= 1 )) || max_workers=1
-  extra_workers="$SEND_PREFLIGHT_EXTRA_WORKERS"
-  [[ "$extra_workers" =~ ^[0-9]+$ ]] || extra_workers=4
-  (( extra_workers >= 0 )) || extra_workers=0
-  (( extra_workers <= 5 )) || extra_workers=5
-  (( count < max_workers + extra_workers ))
+  (( count < max_workers ))
 }
 
 pool_prep_worker_lock_count() {
+  cleanup_stale_send_worker_locks pool_prep
   find "$SEND_WORKER_RUNTIME_DIR" -maxdepth 1 -mindepth 1 -type d -name 'pool-prep-*.lockdir' 2>/dev/null | wc -l | tr -d ' '
 }
 
@@ -1555,6 +1553,129 @@ pool_prep_worker_slot_available() {
   count="$(pool_prep_worker_lock_count)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
   (( count < 8 ))
+}
+
+send_worker_lock_glob_for_role() {
+  local role="$1"
+  case "$role" in
+    pool_prep) printf 'pool-prep-*.lockdir' ;;
+    *) printf 'worker-*.lockdir' ;;
+  esac
+}
+
+send_worker_lock_prefix_for_role() {
+  local role="$1"
+  case "$role" in
+    pool_prep) printf 'pool-prep' ;;
+    *) printf 'worker' ;;
+  esac
+}
+
+cleanup_stale_send_worker_locks() {
+  local role="$1"
+  local glob lock_dir pid_file pid now_epoch mtime_epoch
+
+  mkdir -p "$SEND_WORKER_RUNTIME_DIR" >/dev/null 2>&1 || true
+  glob="$(send_worker_lock_glob_for_role "$role")"
+  now_epoch="$(date +%s)"
+  for lock_dir in "$SEND_WORKER_RUNTIME_DIR"/$glob; do
+    [[ -d "$lock_dir" ]] || continue
+    pid_file="${lock_dir}/pid"
+    pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+    if [[ -n "$pid" ]]; then
+      process_alive "$pid" || rm -rf "$lock_dir" >/dev/null 2>&1 || true
+      continue
+    fi
+    mtime_epoch="$(stat -c %Y "$lock_dir" 2>/dev/null || stat -f %m "$lock_dir" 2>/dev/null || echo "$now_epoch")"
+    [[ "$mtime_epoch" =~ ^[0-9]+$ ]] || mtime_epoch="$now_epoch"
+    if (( now_epoch - mtime_epoch > 300 )); then
+      rm -rf "$lock_dir" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+send_worker_lock_count_for_role_locked() {
+  local role="$1"
+  local glob
+
+  cleanup_stale_send_worker_locks "$role"
+  glob="$(send_worker_lock_glob_for_role "$role")"
+  find "$SEND_WORKER_RUNTIME_DIR" -maxdepth 1 -mindepth 1 -type d -name "$glob" 2>/dev/null | wc -l | tr -d ' '
+}
+
+acquire_send_worker_launch_lock() {
+  local waited=0 pid_file pid now_epoch mtime_epoch
+
+  mkdir -p "$RUNTIME_DIR" >/dev/null 2>&1 || return 1
+  pid_file="${SEND_WORKER_LAUNCH_LOCK_DIR}/pid"
+  while ! mkdir "$SEND_WORKER_LAUNCH_LOCK_DIR" 2>/dev/null; do
+    pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && ! process_alive "$pid"; then
+      rm -rf "$SEND_WORKER_LAUNCH_LOCK_DIR" >/dev/null 2>&1 || true
+      continue
+    fi
+    if [[ -z "$pid" ]]; then
+      now_epoch="$(date +%s)"
+      mtime_epoch="$(stat -c %Y "$SEND_WORKER_LAUNCH_LOCK_DIR" 2>/dev/null || stat -f %m "$SEND_WORKER_LAUNCH_LOCK_DIR" 2>/dev/null || echo "$now_epoch")"
+      [[ "$mtime_epoch" =~ ^[0-9]+$ ]] || mtime_epoch="$now_epoch"
+      if (( now_epoch - mtime_epoch > 300 )); then
+        rm -rf "$SEND_WORKER_LAUNCH_LOCK_DIR" >/dev/null 2>&1 || true
+        continue
+      fi
+    fi
+    (( waited >= 50 )) && return 1
+    waited=$((waited + 1))
+    sleep 0.05
+  done
+  printf '%s\n' "$$" > "$pid_file" 2>/dev/null || true
+  return 0
+}
+
+release_send_worker_launch_lock() {
+  rm -rf "$SEND_WORKER_LAUNCH_LOCK_DIR" >/dev/null 2>&1 || true
+}
+
+acquire_send_worker_launch_slot() {
+  local role="$1"
+  local max_workers="$2"
+  local result_var="$3"
+  local count prefix lock_dir
+
+  printf -v "$result_var" ''
+  [[ "$max_workers" =~ ^[0-9]+$ ]] || return 1
+  (( max_workers >= 1 )) || max_workers=1
+  mkdir -p "$SEND_WORKER_RUNTIME_DIR" >/dev/null 2>&1 || return 1
+  acquire_send_worker_launch_lock || return 1
+
+  count="$(send_worker_lock_count_for_role_locked "$role")"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  if (( count >= max_workers )); then
+    release_send_worker_launch_lock
+    return 1
+  fi
+
+  prefix="$(send_worker_lock_prefix_for_role "$role")"
+  lock_dir="${SEND_WORKER_RUNTIME_DIR}/${prefix}-launch-${$}-$(date +%s)-${RANDOM}.lockdir"
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    release_send_worker_launch_lock
+    return 1
+  fi
+  : > "${lock_dir}/pid" 2>/dev/null || true
+  printf -v "$result_var" '%s' "$lock_dir"
+
+  release_send_worker_launch_lock
+  return 0
+}
+
+release_send_worker_launch_slot() {
+  local lock_dir="$1"
+
+  [[ -n "$lock_dir" ]] || return 0
+  case "$lock_dir" in
+    "$SEND_WORKER_RUNTIME_DIR"/worker-*.lockdir|"$SEND_WORKER_RUNTIME_DIR"/pool-prep-*.lockdir)
+      rm -rf "$lock_dir" >/dev/null 2>&1 || true
+      ;;
+  esac
 }
 
 delete_worker_running() {
@@ -3099,14 +3220,14 @@ reconcile_stale_jobs() {
         job[PHASE]="snapshot_created"
         job[RETRY_AT]="0"
         job[WORKER_PID]=""
-        job[LAST_MESSAGE]="Recovered after an interrupted send worker. Re-queueing from the last safe checkpoint."
+        job[LAST_MESSAGE]="Recovered; queued retry."
         ;;
       deleting)
         job[STATE]="queued"
         job[PHASE]="queued"
         job[RETRY_AT]="0"
         job[WORKER_PID]=""
-        job[LAST_MESSAGE]="Recovered after an interrupted delete worker. Re-queueing delete operation."
+        job[LAST_MESSAGE]="Recovered; queued delete."
         ;;
       *)
         mark_job_failed_or_retry job "Worker exited unexpectedly while processing this job." "$now_epoch"

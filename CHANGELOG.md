@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.06 (Testing Branch Only)
+
+- Cleaned up `ZFS Send` queue status text so rows show short, accurate messages like waiting for space, calculating needed space, sending, verifying, or cleaning up instead of long noisy internal details.
+- Changed the `ZFS Send` queue table to keep each queue item on one line with ellipsis and hover text for the full raw message, preventing the queue from constantly expanding and contracting while jobs run.
+- Fixed the send-worker launch race so the configured parallel worker limit is reserved before spawning workers, preventing multiple queue kickers from overlaunching sends.
+
 ### 2026.04.24.05 (Testing Branch Only)
 
 - Fixed `ZFS Send` source checkpoint pruning so a failed send can no longer cause the last known-good common checkpoint to be deleted before a newer checkpoint is verified on the destination.

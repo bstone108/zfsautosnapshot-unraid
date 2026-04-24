@@ -5,11 +5,13 @@ set -Eeuo pipefail
 source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
 
 spawn_send_worker() {
-  nohup /usr/local/sbin/zfs_autosnapshot_send_worker >> "$LOG_FILE" 2>&1 < /dev/null &
+  local worker_lock_dir="$1"
+  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" nohup /usr/local/sbin/zfs_autosnapshot_send_worker >> "$LOG_FILE" 2>&1 < /dev/null &
 }
 
 spawn_pool_prep_worker() {
-  nohup /usr/local/sbin/zfs_autosnapshot_send_worker --pool-prep-only >> "$LOG_FILE" 2>&1 < /dev/null &
+  local worker_lock_dir="$1"
+  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" nohup /usr/local/sbin/zfs_autosnapshot_send_worker --pool-prep-only >> "$LOG_FILE" 2>&1 < /dev/null &
 }
 
 spawn_delete_worker() {
@@ -55,7 +57,7 @@ enqueue_all_scheduled_jobs_now() {
 }
 
 main() {
-  local now_epoch manual_now=0
+  local now_epoch manual_now=0 candidate_path worker_lock_dir max_send_workers
 
   while (( $# > 0 )); do
     case "$1" in
@@ -93,14 +95,21 @@ main() {
   while pool_prep_worker_slot_available; do
     claim_next_send_job "$now_epoch" candidate_path pool_prep || break
     [[ -n "$candidate_path" ]] || break
-    spawn_pool_prep_worker
+    worker_lock_dir=""
+    acquire_send_worker_launch_slot pool_prep 8 worker_lock_dir || break
+    spawn_pool_prep_worker "$worker_lock_dir"
     sleep 0.1
   done
 
+  max_send_workers="$SEND_MAX_PARALLEL"
+  [[ "$max_send_workers" =~ ^[0-9]+$ ]] || max_send_workers="$DEFAULT_SEND_MAX_PARALLEL"
+  (( max_send_workers >= 1 )) || max_send_workers=1
   while send_worker_slot_available; do
     claim_next_send_job "$now_epoch" candidate_path non_pool_prep || break
     [[ -n "$candidate_path" ]] || break
-    spawn_send_worker
+    worker_lock_dir=""
+    acquire_send_worker_launch_slot worker "$max_send_workers" worker_lock_dir || break
+    spawn_send_worker "$worker_lock_dir"
     sleep 0.1
   done
 

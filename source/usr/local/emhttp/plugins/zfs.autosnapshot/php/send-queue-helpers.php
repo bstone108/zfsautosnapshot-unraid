@@ -665,11 +665,24 @@ function zfsas_ops_send_job_state_label($job)
     }
 
     if ($state === 'running') {
-        return ucfirst(str_replace('_', ' ', $phase));
+        switch ($phase) {
+            case 'preparing':
+                return 'Preparing';
+            case 'snapshot_created':
+                return 'Ready';
+            case 'sending':
+                return 'Sending';
+            case 'verifying':
+                return 'Verifying';
+            case 'cleanup':
+                return 'Cleanup';
+            default:
+                return ucfirst(str_replace('_', ' ', $phase));
+        }
     }
 
     if ($state === 'retry_wait') {
-        return 'Retry waiting';
+        return 'Waiting';
     }
 
     return ucfirst(str_replace('_', ' ', $state));
@@ -696,10 +709,141 @@ function zfsas_ops_send_job_type_label($job)
         case 'cleanup_member':
             return 'Zero-change cleanup';
         case 'finalize':
-            return 'Finalize cleanup';
+            return 'Schedule finalizer';
         default:
             return 'Scheduled send';
     }
+}
+
+function zfsas_ops_send_compact_message($message, $maxLength = 96)
+{
+    $message = trim(preg_replace('/\s+/', ' ', (string) $message));
+    if ($message === '') {
+        return '';
+    }
+    if (strlen($message) <= $maxLength) {
+        return $message;
+    }
+    return rtrim(substr($message, 0, max(0, $maxLength - 3))) . '...';
+}
+
+function zfsas_ops_send_job_display_message($job)
+{
+    $state = (string) ($job['STATE'] ?? 'queued');
+    $phase = (string) ($job['PHASE'] ?? 'queued');
+    $action = (string) ($job['JOB_ACTION'] ?? '');
+    $mode = (string) ($job['JOB_MODE'] ?? '');
+    $message = (string) ($job['LAST_MESSAGE'] ?? '');
+    $error = (string) ($job['LAST_ERROR'] ?? '');
+    $raw = trim($error !== '' ? $error : $message);
+    $lower = strtolower($raw);
+
+    if ($state === 'failed') {
+        if ((string) ($job['CANCELLED_BY_USER'] ?? '0') === '1') {
+            return 'Canceled.';
+        }
+        return zfsas_ops_send_compact_message($raw !== '' ? $raw : 'Failed.', 110);
+    }
+
+    if ($state === 'queued') {
+        switch ($action) {
+            case 'pool_prep':
+                return 'Queued pool prep.';
+            case 'prepare':
+                return 'Queued snapshot prep.';
+            case 'send_member':
+                return 'Queued send.';
+            case 'finalize':
+                return 'Waiting for children.';
+            default:
+                return ($mode === 'manual_snapshot') ? 'Queued manual send.' : 'Queued.';
+        }
+    }
+
+    if ($state === 'retry_wait') {
+        if (strpos($lower, 'autosnapshot') !== false) {
+            return 'Waiting for autosnapshot.';
+        }
+        if (strpos($lower, 'array') !== false) {
+            return 'Waiting for array.';
+        }
+        if (strpos($lower, 'pool prep') !== false || strpos($lower, 'destination pool prep') !== false) {
+            return 'Waiting for pool prep.';
+        }
+        if (strpos($lower, 'turn') !== false || strpos($lower, 'earlier queued') !== false) {
+            return 'Waiting turn.';
+        }
+        if (strpos($lower, 'send slot') !== false || strpos($lower, 'transfer slot') !== false) {
+            return 'Waiting for send slot.';
+        }
+        if (strpos($lower, 'space') !== false) {
+            return 'Waiting for space.';
+        }
+        if (strpos($lower, 'child') !== false) {
+            return 'Waiting for children.';
+        }
+        if (strpos($lower, 'lock') !== false) {
+            return 'Waiting for lock.';
+        }
+        return zfsas_ops_send_compact_message($raw !== '' ? $raw : 'Waiting.', 80);
+    }
+
+    if (strpos($lower, 'calculating needed space') !== false) {
+        return 'Calculating needed space.';
+    }
+    if (strpos($lower, 'space estimate') !== false || strpos($lower, 'estimated ') !== false) {
+        return 'Space estimate ready.';
+    }
+
+    if ($state === 'running') {
+        if ($action === 'pool_prep') {
+            if (strpos($lower, 'retention') !== false) {
+                return 'Planning retention cleanup.';
+            }
+            if (strpos($lower, 'free-space') !== false || strpos($lower, 'free space') !== false) {
+                return 'Planning free-space cleanup.';
+            }
+            return 'Preparing pool.';
+        }
+        if ($action === 'finalize') {
+            return 'Waiting for children.';
+        }
+        switch ($phase) {
+            case 'preparing':
+                return 'Preparing send.';
+            case 'snapshot_created':
+                return ($action === 'prepare') ? 'Queueing child sends.' : 'Snapshot ready.';
+            case 'sending':
+                return 'Sending.';
+            case 'verifying':
+                return 'Verifying receive.';
+            case 'cleanup':
+                return (strpos($lower, 'zero-change') !== false) ? 'Queueing zero-change cleanup.' : 'Cleaning up.';
+        }
+    }
+
+    if ($state === 'complete') {
+        if ($action === 'pool_prep') {
+            return 'Pool prep done.';
+        }
+        if ($action === 'finalize') {
+            return 'Scheduled window complete.';
+        }
+        return zfsas_ops_send_compact_message($raw !== '' ? $raw : 'Done.', 80);
+    }
+
+    if ($state === 'skipped') {
+        return zfsas_ops_send_compact_message($raw !== '' ? $raw : 'Skipped.', 80);
+    }
+
+    return zfsas_ops_send_compact_message($raw !== '' ? $raw : zfsas_ops_send_job_state_label($job) . '.', 80);
+}
+
+function zfsas_ops_send_job_raw_message($job)
+{
+    $error = (string) ($job['LAST_ERROR'] ?? '');
+    $message = (string) ($job['LAST_MESSAGE'] ?? '');
+    return $error !== '' ? $error : $message;
 }
 
 function zfsas_ops_schedule_state_read()
@@ -871,7 +1015,7 @@ function zfsas_ops_dataset_send_activity_map()
                 'state' => $state,
                 'stateLabel' => zfsas_ops_send_job_state_label($job),
                 'progress' => zfsas_ops_send_job_progress_percent($job),
-                'message' => (string) ($job['LAST_MESSAGE'] ?? ''),
+                'message' => zfsas_ops_send_job_display_message($job),
                 'destination' => (string) ($job['DESTINATION_ROOT'] ?? $job['DESTINATION'] ?? ''),
                 'manual' => ((string) ($job['JOB_MODE'] ?? '') === 'manual_snapshot'),
             ];
@@ -1031,7 +1175,7 @@ function zfsas_ops_retry_send_job($jobId, &$error = null)
         $job['PHASE'] = 'queued';
         $job['RETRY_AT'] = '0';
         $job['LAST_ERROR'] = '';
-        $job['LAST_MESSAGE'] = 'Queued for manual retry.';
+        $job['LAST_MESSAGE'] = 'Queued retry.';
         $job['WORKER_PID'] = '';
         $job['PROGRESS_PERCENT'] = '5';
         if (!zfsas_ops_write_job_file($job['__path'], $job)) {
@@ -1135,7 +1279,7 @@ function zfsas_ops_mark_send_job_canceled($job, &$error = null)
     $job['WORKER_PID'] = '';
     $job['PROGRESS_PERCENT'] = '100';
     $job['LAST_ERROR'] = 'Canceled by user.';
-    $job['LAST_MESSAGE'] = 'Canceled by user.';
+    $job['LAST_MESSAGE'] = 'Canceled.';
     $job['CANCELLED_BY_USER'] = '1';
     $job['ATTEMPT_COUNT'] = (string) max(3, (int) ($job['ATTEMPT_COUNT'] ?? 0));
 
@@ -1304,7 +1448,7 @@ function zfsas_ops_enqueue_manual_send($dataset, $snapshot, $snapshotName, $dest
         'ATTEMPT_COUNT' => '0',
         'RETRY_AT' => '0',
         'LAST_ERROR' => '',
-        'LAST_MESSAGE' => 'Queued from Snapshot Manager.',
+        'LAST_MESSAGE' => 'Queued manual send.',
         'WORKER_PID' => '',
         'PROGRESS_PERCENT' => '5',
         'MEMBER_COUNT' => '0',
