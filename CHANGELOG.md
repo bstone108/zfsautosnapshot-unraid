@@ -5,6 +5,78 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.14 (Testing Branch Only)
+
+- Changed the `ZFS Send` queue status badge to show specific wait reasons like `Waiting for autosnapshot` instead of the generic `Waiting`.
+
+### 2026.04.24.13 (Testing Branch Only)
+
+- Fixed the `ZFS Send` queue display so jobs waiting for the autosnapshot process now show `Waiting` / `Waiting for autosnapshot.` instead of looking like they are still actively preparing.
+
+### 2026.04.24.12 (Testing Branch Only)
+
+- Changed the live `ZFS Send` queue handler to assign each spawned worker a specific queue item, preventing worker batches from racing for the same first row.
+- Cached the resolved send plan during preflight so transfer workers can reuse the chosen base snapshot, target snapshot, destination, and space estimate instead of repeating expensive preparation.
+
+### 2026.04.24.11 (Testing Branch Only)
+
+- Fixed `ZFS Send` queue fan-out so the live handler launches batches of eligible workers immediately instead of repeatedly peeking the same first queued row.
+- Added PID-backed job claim checks so workers skip jobs already claimed by another worker, which keeps the queue moving near the configured parallel limit.
+
+### 2026.04.24.10 (Testing Branch Only)
+
+- Fixed `ZFS Send` preflight dispatch so jobs that already finished snapshot/space preparation and are waiting for a send slot no longer block fresh queued children from preparing.
+- Fixed `ZFS Send` transfer-slot accounting so a job stays counted as active through verification, source checkpoint cleanup, and zero-change cleanup queueing instead of freeing a slot immediately after receive finishes.
+
+### 2026.04.24.09 (Testing Branch Only)
+
+- Changed the `ZFS Send` queue kicker so it only schedules work and starts a live queue handler; the handler now keeps launching send/delete workers in near real time until the queue drains instead of waiting for the next one-minute kicker pass.
+- Let extra `ZFS Send` workers keep preparing snapshots and estimating destination space ahead of the configured transfer limit, while actual send transfers still obey the parallel send setting and destination-space reservations.
+- Simplified `ZFS Send` queue source/destination display so each row shows the dataset name with the full path available on hover.
+
+### 2026.04.24.08 (Testing Branch Only)
+
+- Fixed `ZFS Send` queue streaming so newly fanned-out child jobs appear without manually refreshing the page, with stream heartbeat/reconnect handling and polling fallback still available.
+- Changed the `ZFS Send` queue progress column so it only shows an active progress bar during the real send stage, while keeping the column width stable during preparation, waiting, verification, and cleanup.
+- Added byte-based `ZFS Send` progress updates when the platform supports `dd status=progress`, and allowed extra send workers to prepare snapshots and calculate space needs without increasing the configured number of actual parallel transfers.
+- Fixed autosnapshot runs so configured datasets that were deleted are skipped and reported instead of causing the whole run to fail.
+
+### 2026.04.24.07 (Testing Branch Only)
+
+- Added a `Step` column to the `ZFS Send` queue so active rows show progress through the normal job flow as values like `3/7`.
+- Added live queue updates using browser Server-Sent Events, with the existing polling endpoint kept as a fallback if streaming is unavailable.
+- Improved active queue progress bars with a subtle moving fill while work is in progress, and changed long source/destination paths to truncate from the beginning so the dataset name at the end stays visible.
+
+### 2026.04.24.06 (Testing Branch Only)
+
+- Cleaned up `ZFS Send` queue status text so rows show short, accurate messages like waiting for space, calculating needed space, sending, verifying, or cleaning up instead of long noisy internal details.
+- Changed the `ZFS Send` queue table to keep each queue item on one line with ellipsis and hover text for the full raw message, preventing the queue from constantly expanding and contracting while jobs run.
+- Fixed the send-worker launch race so the configured parallel worker limit is reserved before spawning workers, preventing multiple queue kickers from overlaunching sends.
+
+### 2026.04.24.05 (Testing Branch Only)
+
+- Fixed `ZFS Send` source checkpoint pruning so a failed send can no longer cause the last known-good common checkpoint to be deleted before a newer checkpoint is verified on the destination.
+- Strengthened retention, low-space cleanup, and delete-worker guards so the latest common scheduled-send checkpoint is protected per dataset member, including partial recursive sends where some children failed.
+- Let extra send workers preflight snapshots and estimate required destination space ahead of the normal transfer limit, while actual sends still wait for safe FIFO space reservation and transfer slots.
+
+### 2026.04.24.04 (Testing Branch Only)
+
+- Changed completed destination-pool prep rows in the `ZFS Send` queue so they disappear from the WebUI immediately instead of hanging around while dependent child sends finish.
+- Added cleanup for completed pool-prep marker files: they are kept only while queued, running, or retry-wait send jobs still reference that prep run, then removed automatically so old markers cannot interfere with future runs.
+
+### 2026.04.24.03 (Testing Branch Only)
+
+- Changed scheduled `ZFS Send` prep so each destination pool now gets one shared prep stage for managed send targets instead of every due job running its own retention and low-space cleanup pass.
+- Added destination-pool space reservations for `ZFS Send` workers so parallel sends cannot accidentally claim the same free space at the same time; workers now wait in safe FIFO order per destination pool before starting the actual send.
+- Fixed a send-worker crash that could repeatedly recover the same queued jobs with a `JOB_ACTION: unbound variable` error while trying to fan out child send jobs.
+- Added a `Download Log` action to queued, running, and retry-wait send rows so logs are available while a job is looping or recovering, not only after it reaches final failed state.
+
+### 2026.04.24.02 (Testing Branch Only)
+
+- Sped up `ZFS Send` recursive prep by caching destination dataset lists, protected send checkpoint names, and snapshot cleanup bookkeeping during each worker pass.
+- Sped up recursive child-job fan-out by avoiding a full send-queue scan for every child job and writing generated child jobs in a fixed key order.
+- Added send-worker timing log lines for retention planning, low-space planning, and child-job fan-out so future slow prep stages are easier to pinpoint.
+
 ### 2026.04.24.01 (Testing Branch Only)
 
 - Marked `Dataset Migrator` as feature-stable and removed its unfinished preview warning from the plugin UI while leaving the unfinished warnings in place for `Recovery Tools` and `Snapshot Manager`.

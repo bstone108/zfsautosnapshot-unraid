@@ -545,7 +545,7 @@ delete_single_snapshot() {
 }
 
 process_send_checkpoint_delete() {
-  local snapshot basename schedule_job_id newest_basename source_root dest_root prefix delete_scope
+  local snapshot basename schedule_job_id source_root dest_root prefix delete_scope
   local -A job=()
 
   queue_load_job_assoc "$CURRENT_JOB_ID" job || return 1
@@ -566,9 +566,8 @@ process_send_checkpoint_delete() {
     return 0
   fi
 
-  latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_basename
-  if [[ -n "$newest_basename" && "$newest_basename" == "$basename" ]]; then
-    fail_delete_job "Cannot delete ${basename} because it is the newest scheduled-send checkpoint. Run another successful send first."
+  if checkpoint_basename_is_latest_common_for_schedule "$schedule_job_id" "$basename"; then
+    fail_delete_job "Cannot delete ${basename} because it is still the latest common scheduled-send checkpoint. Run another successful send first."
     return 0
   fi
 

@@ -1,0 +1,148 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+# shellcheck source=/dev/null
+source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
+
+spawn_send_worker() {
+  local worker_lock_dir="$1"
+  local claim_selector="$2"
+  local job_path="${3:-}"
+  local job_id=""
+
+  if [[ -n "$job_path" ]]; then
+    claim_send_job_path_for_launch "$job_path" job_id || return 1
+  fi
+  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" ZFSAS_CLAIM_SELECTOR="$claim_selector" ZFSAS_JOB_PATH="$job_path" ZFSAS_JOB_ID="$job_id" ZFSAS_LAUNCHER_PID="$$" nohup /usr/local/sbin/zfs_autosnapshot_send_worker >> "$LOG_FILE" 2>&1 < /dev/null &
+}
+
+spawn_pool_prep_worker() {
+  local worker_lock_dir="$1"
+  local job_path="${2:-}"
+  local job_id=""
+
+  if [[ -n "$job_path" ]]; then
+    claim_send_job_path_for_launch "$job_path" job_id || return 1
+  fi
+  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" ZFSAS_JOB_PATH="$job_path" ZFSAS_JOB_ID="$job_id" ZFSAS_LAUNCHER_PID="$$" nohup /usr/local/sbin/zfs_autosnapshot_send_worker --pool-prep-only >> "$LOG_FILE" 2>&1 < /dev/null &
+}
+
+spawn_delete_worker() {
+  nohup /usr/local/sbin/zfs_autosnapshot_delete_worker >> "$LOG_FILE" 2>&1 < /dev/null &
+}
+
+handler_cleanup() {
+  release_queue_manager_lock
+}
+
+spawn_available_workers() {
+  local now_epoch="$1"
+  local worker_lock_dir max_send_workers prep_extra_workers preflight_workers job_path
+  local -a ready_paths=()
+
+  mapfile -t ready_paths < <(list_ready_send_job_paths "$now_epoch" pool_prep 64)
+  for job_path in "${ready_paths[@]}"; do
+    pool_prep_worker_slot_available || break
+    [[ -n "$job_path" ]] || continue
+    worker_lock_dir=""
+    acquire_send_worker_launch_slot pool_prep 8 worker_lock_dir || break
+    spawn_pool_prep_worker "$worker_lock_dir" "$job_path" || {
+      release_send_worker_launch_slot "$worker_lock_dir"
+      continue
+    }
+    sleep 0.05
+  done
+
+  max_send_workers="$SEND_MAX_PARALLEL"
+  [[ "$max_send_workers" =~ ^[0-9]+$ ]] || max_send_workers="$DEFAULT_SEND_MAX_PARALLEL"
+  (( max_send_workers >= 1 )) || max_send_workers=1
+
+  prep_extra_workers="$SEND_PREP_EXTRA_WORKERS"
+  [[ "$prep_extra_workers" =~ ^[0-9]+$ ]] || prep_extra_workers="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
+  (( prep_extra_workers >= 0 )) || prep_extra_workers=0
+
+  mapfile -t ready_paths < <(list_ready_send_job_paths "$now_epoch" non_pool_prep_ready 256)
+  for job_path in "${ready_paths[@]}"; do
+    send_worker_role_slot_available transfer "$max_send_workers" || break
+    [[ -n "$job_path" ]] || continue
+    worker_lock_dir=""
+    acquire_send_worker_launch_slot transfer "$max_send_workers" worker_lock_dir || break
+    spawn_send_worker "$worker_lock_dir" non_pool_prep_ready "$job_path" || {
+      release_send_worker_launch_slot "$worker_lock_dir"
+      continue
+    }
+    sleep 0.05
+  done
+
+  preflight_workers="$prep_extra_workers"
+  if (( preflight_workers <= 0 )); then
+    preflight_workers="$max_send_workers"
+  fi
+  mapfile -t ready_paths < <(list_ready_send_job_paths "$now_epoch" non_pool_prep_preflight 512)
+  for job_path in "${ready_paths[@]}"; do
+    send_worker_role_slot_available preflight "$preflight_workers" || break
+    [[ -n "$job_path" ]] || continue
+    worker_lock_dir=""
+    acquire_send_worker_launch_slot preflight "$preflight_workers" worker_lock_dir || break
+    spawn_send_worker "$worker_lock_dir" non_pool_prep_preflight "$job_path" || {
+      release_send_worker_launch_slot "$worker_lock_dir"
+      continue
+    }
+    sleep 0.05
+  done
+
+  if ! delete_worker_running; then
+    if delete_queue_has_backlog; then
+      spawn_delete_worker
+    fi
+  fi
+}
+
+main() {
+  local now_epoch idle_since=0 idle_timeout=10
+
+  ensure_runtime_layout || exit 1
+  load_send_config
+  require_numeric_in_range "SEND_MAX_PARALLEL" "$SEND_MAX_PARALLEL" 1 8 || SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
+  require_numeric_in_range "SEND_PREP_EXTRA_WORKERS" "$SEND_PREP_EXTRA_WORKERS" 0 64 || SEND_PREP_EXTRA_WORKERS="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
+  parse_send_jobs_config
+
+  exec >> "$LOG_FILE" 2>&1
+  if ! acquire_queue_manager_lock; then
+    log "Queue handler already running; exiting."
+    exit 0
+  fi
+  trap handler_cleanup EXIT INT TERM
+
+  log "Queue handler $$ starting"
+  while :; do
+    now_epoch="$(date +%s)"
+    reconcile_stale_jobs
+    prune_old_jobs
+
+    if ! unraid_array_actionable; then
+      log "$(unraid_array_action_message). Queue handler is pausing until the next kick."
+      break
+    fi
+
+    spawn_available_workers "$now_epoch"
+
+    if send_or_delete_queue_has_active_work; then
+      idle_since=0
+      sleep 1
+      continue
+    fi
+
+    if (( idle_since == 0 )); then
+      idle_since="$now_epoch"
+    fi
+    if (( now_epoch - idle_since >= idle_timeout )); then
+      break
+    fi
+    sleep 1
+  done
+
+  log "Queue handler $$ finished"
+}
+
+main "$@"

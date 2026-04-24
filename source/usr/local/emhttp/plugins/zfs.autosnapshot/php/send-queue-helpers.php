@@ -566,6 +566,15 @@ function zfsas_ops_purge_expired_jobs()
             continue;
         }
 
+        if ((string) ($job['JOB_ACTION'] ?? '') === 'pool_prep') {
+            $prepJobId = (string) ($job['JOB_ID'] ?? '');
+            if ($prepJobId !== '' && zfsas_ops_pool_prep_has_active_dependents($prepJobId, $files)) {
+                continue;
+            }
+            @unlink($path);
+            continue;
+        }
+
         $purgeAfter = (int) ($job['PURGE_AFTER_EPOCH'] ?? 0);
         if ($purgeAfter > 0 && $purgeAfter <= $now) {
             @unlink($path);
@@ -579,6 +588,39 @@ function zfsas_ops_purge_expired_jobs()
             }
         }
     }
+}
+
+function zfsas_ops_pool_prep_has_active_dependents($prepJobId, $files = null)
+{
+    $prepJobId = (string) $prepJobId;
+    if ($prepJobId === '') {
+        return false;
+    }
+
+    if (!is_array($files)) {
+        $files = glob(zfsas_ops_jobs_dir() . '/*.job');
+    }
+    if (!is_array($files)) {
+        return false;
+    }
+
+    foreach ($files as $path) {
+        $job = zfsas_ops_parse_job_file($path);
+        if (!is_array($job)) {
+            continue;
+        }
+        if ((string) ($job['JOB_TYPE'] ?? '') !== 'send') {
+            continue;
+        }
+        if ((string) ($job['PREP_JOB_ID'] ?? '') !== $prepJobId) {
+            continue;
+        }
+        if (in_array((string) ($job['STATE'] ?? ''), ['queued', 'running', 'retry_wait'], true)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 function zfsas_ops_send_job_progress_percent($job)
@@ -613,6 +655,124 @@ function zfsas_ops_send_job_progress_percent($job)
     }
 }
 
+function zfsas_ops_send_job_progress_active($job)
+{
+    $state = (string) ($job['STATE'] ?? 'queued');
+    $phase = (string) ($job['PHASE'] ?? 'queued');
+    $progress = zfsas_ops_send_job_progress_percent($job);
+
+    return $state === 'running'
+        && $phase === 'sending'
+        && $progress >= 0
+        && $progress < 100;
+}
+
+function zfsas_ops_send_job_progress_visible($job)
+{
+    return (string) ($job['STATE'] ?? 'queued') === 'running'
+        && (string) ($job['PHASE'] ?? 'queued') === 'sending';
+}
+
+function zfsas_ops_send_job_step_parts($job)
+{
+    $state = (string) ($job['STATE'] ?? 'queued');
+    $phase = (string) ($job['PHASE'] ?? 'queued');
+    $action = (string) ($job['JOB_ACTION'] ?? '');
+    $mode = (string) ($job['JOB_MODE'] ?? '');
+    $raw = strtolower(trim((string) ($job['LAST_ERROR'] ?? '') . ' ' . (string) ($job['LAST_MESSAGE'] ?? '')));
+    $current = 1;
+    $total = 5;
+
+    $explicitTotal = (int) ($job['STEP_TOTAL'] ?? 0);
+    $explicitCurrent = (int) ($job['STEP_CURRENT'] ?? 0);
+    if ($explicitTotal > 0 && $explicitCurrent > 0) {
+        $total = max(1, $explicitTotal);
+        $current = max(1, min($total, $explicitCurrent));
+        return [
+            'current' => $current,
+            'total' => $total,
+            'label' => $current . '/' . $total,
+        ];
+    }
+
+    if ($action === 'pool_prep') {
+        $total = 4;
+        if (in_array($state, ['complete', 'skipped'], true)) {
+            $current = 4;
+        } elseif ($state === 'running' && (strpos($raw, 'free-space') !== false || strpos($raw, 'free space') !== false)) {
+            $current = 3;
+        } elseif ($state === 'running' && strpos($raw, 'retention') !== false) {
+            $current = 2;
+        } else {
+            $current = 1;
+        }
+    } elseif ($action === 'prepare') {
+        $total = 4;
+        if (in_array($state, ['complete', 'skipped'], true)) {
+            $current = 4;
+        } elseif ($phase === 'snapshot_created' || strpos($raw, 'queueing') !== false) {
+            $current = 4;
+        } elseif (strpos($raw, 'snapshot') !== false) {
+            $current = 3;
+        } elseif ($state === 'running') {
+            $current = 2;
+        } else {
+            $current = 1;
+        }
+    } elseif ($action === 'finalize') {
+        $total = 3;
+        if (in_array($state, ['complete', 'skipped'], true)) {
+            $current = 3;
+        } elseif ($state === 'queued') {
+            $current = 1;
+        } else {
+            $current = 2;
+        }
+    } elseif ($action === 'cleanup_member') {
+        $total = 3;
+        if (in_array($state, ['complete', 'skipped'], true)) {
+            $current = 3;
+        } elseif ($state === 'queued') {
+            $current = 1;
+        } else {
+            $current = 2;
+        }
+    } else {
+        $isManual = ($mode === 'manual_snapshot');
+        $total = $isManual ? 5 : 7;
+        if (in_array($state, ['complete', 'skipped'], true)) {
+            $current = $total;
+        } elseif ($phase === 'cleanup') {
+            $current = $isManual ? 5 : 7;
+        } elseif ($phase === 'verifying' || strpos($raw, 'verifying') !== false) {
+            $current = $isManual ? 5 : 6;
+        } elseif ($phase === 'sending' || strpos($raw, 'sending') !== false) {
+            $current = $isManual ? 4 : 5;
+        } elseif (strpos($raw, 'calculating') !== false || strpos($raw, 'estimate') !== false) {
+            $current = 3;
+        } elseif (strpos($raw, 'waiting') !== false || strpos($raw, 'send slot') !== false || strpos($raw, 'destination space') !== false || strpos($raw, 'pool prep') !== false || strpos($raw, 'turn') !== false) {
+            $current = $isManual ? 3 : 4;
+        } elseif ($phase === 'snapshot_created' || $state === 'running') {
+            $current = 2;
+        } else {
+            $current = 1;
+        }
+    }
+
+    $current = max(1, min($total, $current));
+    return [
+        'current' => $current,
+        'total' => $total,
+        'label' => $current . '/' . $total,
+    ];
+}
+
+function zfsas_ops_send_job_step_label($job)
+{
+    $parts = zfsas_ops_send_job_step_parts($job);
+    return (string) ($parts['label'] ?? '');
+}
+
 function zfsas_ops_send_job_state_label($job)
 {
     $state = (string) ($job['STATE'] ?? 'queued');
@@ -623,14 +783,87 @@ function zfsas_ops_send_job_state_label($job)
     }
 
     if ($state === 'running') {
-        return ucfirst(str_replace('_', ' ', $phase));
+        $raw = strtolower(trim((string) ($job['LAST_ERROR'] ?? '') . ' ' . (string) ($job['LAST_MESSAGE'] ?? '')));
+        if (strpos($raw, 'autosnapshot') !== false) {
+            return 'Waiting for autosnapshot';
+        }
+        if (strpos($raw, 'array') !== false) {
+            return 'Waiting for array';
+        }
+        if (strpos($raw, 'pool prep') !== false || strpos($raw, 'destination pool prep') !== false) {
+            return 'Waiting for pool prep';
+        }
+        if (strpos($raw, 'send slot') !== false || strpos($raw, 'transfer slot') !== false) {
+            return 'Waiting for send slot';
+        }
+        if (strpos($raw, 'space') !== false && strpos($raw, 'estimate') === false) {
+            return 'Waiting for space';
+        }
+
+        switch ($phase) {
+            case 'preparing':
+                return 'Preparing';
+            case 'snapshot_created':
+                return 'Ready';
+            case 'sending':
+                return 'Sending';
+            case 'verifying':
+                return 'Verifying';
+            case 'cleanup':
+                return 'Cleanup';
+            default:
+                return ucfirst(str_replace('_', ' ', $phase));
+        }
     }
 
     if ($state === 'retry_wait') {
-        return 'Retry waiting';
+        return 'Waiting';
     }
 
     return ucfirst(str_replace('_', ' ', $state));
+}
+
+function zfsas_ops_send_queue_status_payload($limit = 120)
+{
+    $rows = [];
+    foreach (zfsas_ops_recent_send_jobs($limit) as $job) {
+        $step = zfsas_ops_send_job_step_parts($job);
+        $rows[] = [
+            'id' => (string) ($job['JOB_ID'] ?? ''),
+            'mode' => (string) ($job['JOB_MODE'] ?? ''),
+            'action' => (string) ($job['JOB_ACTION'] ?? ''),
+            'typeLabel' => zfsas_ops_send_job_type_label($job),
+            'state' => (string) ($job['STATE'] ?? ''),
+            'phase' => (string) ($job['PHASE'] ?? ''),
+            'stateLabel' => zfsas_ops_send_job_state_label($job),
+            'source' => (string) ($job['SOURCE_ROOT'] ?? $job['DATASET'] ?? ''),
+            'destination' => (string) ($job['DESTINATION_ROOT'] ?? ''),
+            'includeChildren' => ((string) ($job['INCLUDE_CHILDREN'] ?? '0') === '1'),
+            'requestedAt' => (string) ($job['REQUESTED_AT'] ?? ''),
+            'lastMessage' => zfsas_ops_send_job_display_message($job),
+            'lastError' => (string) ($job['LAST_ERROR'] ?? ''),
+            'rawMessage' => zfsas_ops_send_job_raw_message($job),
+            'progress' => zfsas_ops_send_job_progress_percent($job),
+            'progressActive' => zfsas_ops_send_job_progress_active($job),
+            'progressVisible' => zfsas_ops_send_job_progress_visible($job),
+            'step' => (string) ($step['label'] ?? ''),
+            'stepCurrent' => (int) ($step['current'] ?? 0),
+            'stepTotal' => (int) ($step['total'] ?? 0),
+            'retryAt' => (string) ($job['RETRY_AT'] ?? '0'),
+            'canRetry' => ((string) ($job['STATE'] ?? '') === 'failed' && (string) ($job['CANCELLED_BY_USER'] ?? '0') !== '1'),
+            'canClear' => ((string) ($job['STATE'] ?? '') === 'failed'),
+            'canCancel' => in_array((string) ($job['STATE'] ?? ''), ['queued', 'running', 'retry_wait'], true),
+            'logDownloadUrl' => ((string) ($job['JOB_ID'] ?? '') !== '')
+                ? zfsas_ops_failed_send_log_download_url((string) ($job['JOB_ID'] ?? ''))
+                : '',
+        ];
+    }
+
+    return [
+        'ok' => true,
+        'jobs' => $rows,
+        'pendingDeleteCount' => zfsas_ops_pending_delete_job_count(),
+    ];
 }
 
 function zfsas_ops_send_job_type_label($job)
@@ -643,6 +876,8 @@ function zfsas_ops_send_job_type_label($job)
     }
 
     switch ($action) {
+        case 'pool_prep':
+            return 'Pool prep';
         case 'prepare':
             return ((string) ($job['INCLUDE_CHILDREN'] ?? '0') === '1')
                 ? 'Recursive prep'
@@ -652,10 +887,156 @@ function zfsas_ops_send_job_type_label($job)
         case 'cleanup_member':
             return 'Zero-change cleanup';
         case 'finalize':
-            return 'Finalize cleanup';
+            return 'Schedule finalizer';
         default:
             return 'Scheduled send';
     }
+}
+
+function zfsas_ops_send_compact_message($message, $maxLength = 96)
+{
+    $message = trim(preg_replace('/\s+/', ' ', (string) $message));
+    if ($message === '') {
+        return '';
+    }
+    if (strlen($message) <= $maxLength) {
+        return $message;
+    }
+    return rtrim(substr($message, 0, max(0, $maxLength - 3))) . '...';
+}
+
+function zfsas_ops_send_job_display_message($job)
+{
+    $state = (string) ($job['STATE'] ?? 'queued');
+    $phase = (string) ($job['PHASE'] ?? 'queued');
+    $action = (string) ($job['JOB_ACTION'] ?? '');
+    $mode = (string) ($job['JOB_MODE'] ?? '');
+    $message = (string) ($job['LAST_MESSAGE'] ?? '');
+    $error = (string) ($job['LAST_ERROR'] ?? '');
+    $raw = trim($error !== '' ? $error : $message);
+    $lower = strtolower($raw);
+
+    if ($state === 'failed') {
+        if ((string) ($job['CANCELLED_BY_USER'] ?? '0') === '1') {
+            return 'Canceled.';
+        }
+        return zfsas_ops_send_compact_message($raw !== '' ? $raw : 'Failed.', 110);
+    }
+
+    if ($state === 'queued') {
+        switch ($action) {
+            case 'pool_prep':
+                return 'Queued pool prep.';
+            case 'prepare':
+                return 'Queued snapshot prep.';
+            case 'send_member':
+                return 'Queued send.';
+            case 'finalize':
+                return 'Waiting for children.';
+            default:
+                return ($mode === 'manual_snapshot') ? 'Queued manual send.' : 'Queued.';
+        }
+    }
+
+    if ($state === 'retry_wait') {
+        if (strpos($lower, 'autosnapshot') !== false) {
+            return 'Waiting for autosnapshot.';
+        }
+        if (strpos($lower, 'array') !== false) {
+            return 'Waiting for array.';
+        }
+        if (strpos($lower, 'pool prep') !== false || strpos($lower, 'destination pool prep') !== false) {
+            return 'Waiting for pool prep.';
+        }
+        if (strpos($lower, 'turn') !== false || strpos($lower, 'earlier queued') !== false) {
+            return 'Waiting turn.';
+        }
+        if (strpos($lower, 'send slot') !== false || strpos($lower, 'transfer slot') !== false) {
+            return 'Waiting for send slot.';
+        }
+        if (strpos($lower, 'space') !== false) {
+            return 'Waiting for space.';
+        }
+        if (strpos($lower, 'child') !== false) {
+            return 'Waiting for children.';
+        }
+        if (strpos($lower, 'lock') !== false) {
+            return 'Waiting for lock.';
+        }
+        return zfsas_ops_send_compact_message($raw !== '' ? $raw : 'Waiting.', 80);
+    }
+
+    if (strpos($lower, 'calculating needed space') !== false) {
+        return 'Calculating needed space.';
+    }
+    if (strpos($lower, 'space estimate') !== false || strpos($lower, 'estimated ') !== false) {
+        return 'Space estimate ready.';
+    }
+
+    if ($state === 'running') {
+        if (strpos($lower, 'autosnapshot') !== false) {
+            return 'Waiting for autosnapshot.';
+        }
+        if (strpos($lower, 'array') !== false) {
+            return 'Waiting for array.';
+        }
+        if (strpos($lower, 'pool prep') !== false || strpos($lower, 'destination pool prep') !== false) {
+            return 'Waiting for pool prep.';
+        }
+        if (strpos($lower, 'send slot') !== false || strpos($lower, 'transfer slot') !== false) {
+            return 'Waiting for send slot.';
+        }
+        if (strpos($lower, 'space') !== false && strpos($lower, 'estimate') === false) {
+            return 'Waiting for space.';
+        }
+        if ($action === 'pool_prep') {
+            if (strpos($lower, 'retention') !== false) {
+                return 'Planning retention cleanup.';
+            }
+            if (strpos($lower, 'free-space') !== false || strpos($lower, 'free space') !== false) {
+                return 'Planning free-space cleanup.';
+            }
+            return 'Preparing pool.';
+        }
+        if ($action === 'finalize') {
+            return 'Waiting for children.';
+        }
+        switch ($phase) {
+            case 'preparing':
+                return 'Preparing send.';
+            case 'snapshot_created':
+                return ($action === 'prepare') ? 'Queueing child sends.' : 'Snapshot ready.';
+            case 'sending':
+                return 'Sending.';
+            case 'verifying':
+                return 'Verifying receive.';
+            case 'cleanup':
+                return (strpos($lower, 'zero-change') !== false) ? 'Queueing zero-change cleanup.' : 'Cleaning up.';
+        }
+    }
+
+    if ($state === 'complete') {
+        if ($action === 'pool_prep') {
+            return 'Pool prep done.';
+        }
+        if ($action === 'finalize') {
+            return 'Scheduled window complete.';
+        }
+        return zfsas_ops_send_compact_message($raw !== '' ? $raw : 'Done.', 80);
+    }
+
+    if ($state === 'skipped') {
+        return zfsas_ops_send_compact_message($raw !== '' ? $raw : 'Skipped.', 80);
+    }
+
+    return zfsas_ops_send_compact_message($raw !== '' ? $raw : zfsas_ops_send_job_state_label($job) . '.', 80);
+}
+
+function zfsas_ops_send_job_raw_message($job)
+{
+    $error = (string) ($job['LAST_ERROR'] ?? '');
+    $message = (string) ($job['LAST_MESSAGE'] ?? '');
+    return $error !== '' ? $error : $message;
 }
 
 function zfsas_ops_schedule_state_read()
@@ -827,7 +1208,7 @@ function zfsas_ops_dataset_send_activity_map()
                 'state' => $state,
                 'stateLabel' => zfsas_ops_send_job_state_label($job),
                 'progress' => zfsas_ops_send_job_progress_percent($job),
-                'message' => (string) ($job['LAST_MESSAGE'] ?? ''),
+                'message' => zfsas_ops_send_job_display_message($job),
                 'destination' => (string) ($job['DESTINATION_ROOT'] ?? $job['DESTINATION'] ?? ''),
                 'manual' => ((string) ($job['JOB_MODE'] ?? '') === 'manual_snapshot'),
             ];
@@ -948,6 +1329,12 @@ function zfsas_ops_find_matching_manual_send_job($snapshot, $destination)
 function zfsas_ops_recent_send_jobs($limit = 100)
 {
     $jobs = zfsas_ops_list_jobs(['send']);
+    $jobs = array_values(array_filter($jobs, function ($job) {
+        if ((string) ($job['JOB_ACTION'] ?? '') !== 'pool_prep') {
+            return true;
+        }
+        return !in_array((string) ($job['STATE'] ?? ''), ['complete', 'skipped'], true);
+    }));
     usort($jobs, function ($a, $b) {
         $leftSort = (int) ($a['QUEUE_SORT'] ?? PHP_INT_MAX);
         $rightSort = (int) ($b['QUEUE_SORT'] ?? PHP_INT_MAX);
@@ -981,7 +1368,7 @@ function zfsas_ops_retry_send_job($jobId, &$error = null)
         $job['PHASE'] = 'queued';
         $job['RETRY_AT'] = '0';
         $job['LAST_ERROR'] = '';
-        $job['LAST_MESSAGE'] = 'Queued for manual retry.';
+        $job['LAST_MESSAGE'] = 'Queued retry.';
         $job['WORKER_PID'] = '';
         $job['PROGRESS_PERCENT'] = '5';
         if (!zfsas_ops_write_job_file($job['__path'], $job)) {
@@ -1085,7 +1472,7 @@ function zfsas_ops_mark_send_job_canceled($job, &$error = null)
     $job['WORKER_PID'] = '';
     $job['PROGRESS_PERCENT'] = '100';
     $job['LAST_ERROR'] = 'Canceled by user.';
-    $job['LAST_MESSAGE'] = 'Canceled by user.';
+    $job['LAST_MESSAGE'] = 'Canceled.';
     $job['CANCELLED_BY_USER'] = '1';
     $job['ATTEMPT_COUNT'] = (string) max(3, (int) ($job['ATTEMPT_COUNT'] ?? 0));
 
@@ -1254,7 +1641,7 @@ function zfsas_ops_enqueue_manual_send($dataset, $snapshot, $snapshotName, $dest
         'ATTEMPT_COUNT' => '0',
         'RETRY_AT' => '0',
         'LAST_ERROR' => '',
-        'LAST_MESSAGE' => 'Queued from Snapshot Manager.',
+        'LAST_MESSAGE' => 'Queued manual send.',
         'WORKER_PID' => '',
         'PROGRESS_PERCENT' => '5',
         'MEMBER_COUNT' => '0',

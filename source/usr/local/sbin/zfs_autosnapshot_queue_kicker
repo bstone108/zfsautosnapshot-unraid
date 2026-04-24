@@ -4,56 +4,58 @@ set -Eeuo pipefail
 # shellcheck source=/dev/null
 source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
 
-spawn_send_worker() {
-  nohup /usr/local/sbin/zfs_autosnapshot_send_worker >> "$LOG_FILE" 2>&1 < /dev/null &
-}
+start_queue_handler() {
+  local handler="/usr/local/sbin/zfs_autosnapshot_queue_handler"
 
-spawn_delete_worker() {
-  nohup /usr/local/sbin/zfs_autosnapshot_delete_worker >> "$LOG_FILE" 2>&1 < /dev/null &
+  if queue_manager_running; then
+    log "Queue handler is already running."
+    return 0
+  fi
+
+  if [[ ! -x "$handler" ]]; then
+    log "Queue handler is missing or not executable: ${handler}"
+    return 1
+  fi
+
+  nohup "$handler" >> "$LOG_FILE" 2>&1 < /dev/null &
+  log "Queue handler started."
 }
 
 # shellcheck disable=SC2034
 enqueue_all_scheduled_jobs_now() {
   local now_epoch="$1"
-  local requested_at job_id job_file
-  # shellcheck disable=SC2034
-  local -A job=()
+  local requested_at job_id dest_pool run_group_id prep_job_id pool
+  local -a run_jobs=()
+  local -a run_pools=()
+  local -A run_pool=()
+  local -A pool_schedule_ids=()
+  local -A seen_pool=()
 
   requested_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ' -r "$now_epoch" 2>/dev/null || date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  run_group_id="manual-${now_epoch}"
 
   for job_id in "${SCHEDULE_JOB_IDS[@]}"; do
     schedule_job_blocked "$job_id" && continue
+    dest_pool="$(schedule_destination_pool "$job_id" || true)"
+    [[ -n "$dest_pool" ]] || continue
+    run_jobs+=("$job_id")
+    run_pool["$job_id"]="$dest_pool"
+    pool_schedule_ids["$dest_pool"]="${pool_schedule_ids[$dest_pool]:-}${job_id} "
+    if [[ -z "${seen_pool[$dest_pool]:-}" ]]; then
+      seen_pool["$dest_pool"]=1
+      run_pools+=("$dest_pool")
+    fi
+  done
 
-    job=()
-    job[JOB_ID]="send-${job_id}-manual-${now_epoch}"
-    job[JOB_TYPE]="send"
-    job[JOB_MODE]="scheduled"
-    job[JOB_ACTION]="prepare"
-    job[STATE]="queued"
-    job[PHASE]="queued"
-    job[REQUESTED_EPOCH]="$now_epoch"
-    job[REQUESTED_AT]="$requested_at"
-    job[QUEUE_SORT]="$now_epoch"
-    job[WINDOW_KEY]="manual-${now_epoch}"
-    job[SCHEDULE_JOB_ID]="$job_id"
-    job[SOURCE_ROOT]="${SCHEDULE_SOURCE_ROOT[$job_id]}"
-    job[DESTINATION_ROOT]="${SCHEDULE_DEST_ROOT[$job_id]}"
-    job[INCLUDE_CHILDREN]="${SCHEDULE_INCLUDE_CHILDREN[$job_id]}"
-    job[FREQUENCY]="${SCHEDULE_FREQUENCY[$job_id]}"
-    job[THRESHOLD]="${SCHEDULE_THRESHOLD_RAW[$job_id]}"
-    job[THRESHOLD_BYTES]="${SCHEDULE_THRESHOLD_BYTES[$job_id]}"
-    job[SNAPSHOT_PREFIX_BASE]="$SEND_SNAPSHOT_PREFIX"
-    job[SNAPSHOT_PREFIX]="$(job_prefix_for_schedule "$job_id")"
-    job[ATTEMPT_COUNT]="0"
-    job[RETRY_AT]="0"
-    job[LAST_ERROR]=""
-    job[LAST_MESSAGE]="Queued by manual run request."
-    job[WORKER_PID]=""
-    job[PROGRESS_PERCENT]="5"
-    job[MEMBER_COUNT]="0"
-    job[COMPLETES_SCHEDULE_WINDOW]="0"
-    job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$now_epoch" "send-${job_id}-manual-${now_epoch}")"
-    job_write "$job_file" job || true
+  for pool in "${run_pools[@]}"; do
+    enqueue_pool_prep_job "$pool" "$run_group_id" "$now_epoch" "$requested_at" "${pool_schedule_ids[$pool]}" || true
+  done
+
+  for job_id in "${run_jobs[@]}"; do
+    pool="${run_pool[$job_id]}"
+    prep_job_id="$(pool_prep_job_id_for_group "$pool" "$run_group_id")"
+    enqueue_scheduled_prepare_job "$job_id" "manual-${now_epoch}" "$now_epoch" "$requested_at" \
+      "$prep_job_id" "$pool" "$run_group_id" "0" "Queued by manual run request." || true
   done
 }
 
@@ -72,6 +74,7 @@ main() {
   ensure_runtime_layout || exit 1
   load_send_config
   require_numeric_in_range "SEND_MAX_PARALLEL" "$SEND_MAX_PARALLEL" 1 8 || SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
+  require_numeric_in_range "SEND_PREP_EXTRA_WORKERS" "$SEND_PREP_EXTRA_WORKERS" 0 64 || SEND_PREP_EXTRA_WORKERS="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
   parse_send_jobs_config
 
   compact_shared_send_log_if_safe || true
@@ -93,17 +96,10 @@ main() {
     exit 0
   fi
 
-  while send_worker_slot_available; do
-    claim_next_send_job "$now_epoch" candidate_path || break
-    [[ -n "$candidate_path" ]] || break
-    spawn_send_worker
-    sleep 0.1
-  done
-
-  if ! delete_worker_running; then
-    if delete_queue_has_backlog; then
-      spawn_delete_worker
-    fi
+  if send_or_delete_queue_has_active_work; then
+    start_queue_handler || true
+  else
+    log "No queue work is pending."
   fi
 
   log "Queue kicker $$ finished"

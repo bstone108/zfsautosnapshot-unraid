@@ -287,7 +287,7 @@ trap - EXIT
 refresh_cron_runtime
 
 if [[ -n "$CRON_SCHEDULE_EFFECTIVE" ]]; then
-	echo "Cron schedule applied: $CRON_SCHEDULE_EFFECTIVE (queue kicker runs every minute)"
+	echo "Cron schedule applied: $CRON_SCHEDULE_EFFECTIVE (queue kicker checks every minute and starts the live queue handler when needed)"
 else
-	echo "Main autosnapshot schedule disabled; queue kicker still runs every minute for send/delete queue processing."
+	echo "Main autosnapshot schedule disabled; queue kicker still checks every minute and starts the live queue handler when needed."
 fi
