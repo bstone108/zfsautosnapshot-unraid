@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.12 (Testing Branch Only)
+
+- Changed the live `ZFS Send` queue handler to assign each spawned worker a specific queue item, preventing worker batches from racing for the same first row.
+- Cached the resolved send plan during preflight so transfer workers can reuse the chosen base snapshot, target snapshot, destination, and space estimate instead of repeating expensive preparation.
+
 ### 2026.04.24.11 (Testing Branch Only)
 
 - Fixed `ZFS Send` queue fan-out so the live handler launches batches of eligible workers immediately instead of repeatedly peeking the same first queued row.

@@ -1317,6 +1317,38 @@ release_job_claim() {
   rm -rf "$lock_dir" >/dev/null 2>&1 || true
 }
 
+take_over_job_claim() {
+  local job_id="$1"
+  local expected_pid="${2:-}"
+  local lock_dir pid
+
+  lock_dir="$(job_lock_dir_for_id "$job_id")"
+  pid="$(sed -n '1p' "${lock_dir}/pid" 2>/dev/null || true)"
+  if [[ -n "$expected_pid" && "$pid" == "$expected_pid" ]]; then
+    printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
+    return 0
+  fi
+  if [[ "$pid" == "$$" ]]; then
+    return 0
+  fi
+  acquire_job_claim "$job_id"
+}
+
+claim_send_job_path_for_launch() {
+  local path="$1"
+  local result_job_id_var="$2"
+  local job_id
+  local -A launch_job=()
+
+  printf -v "$result_job_id_var" ''
+  job_load "$path" launch_job || return 1
+  job_id="$(job_get launch_job JOB_ID)"
+  [[ -n "$job_id" ]] || return 1
+  acquire_job_claim "$job_id" || return 1
+  printf -v "$result_job_id_var" '%s' "$job_id"
+  return 0
+}
+
 job_claim_active() {
   local job_id="$1"
   local lock_dir pid_file pid now_epoch mtime_epoch
@@ -3436,6 +3468,33 @@ count_ready_send_jobs() {
   done < <(list_job_files)
 
   printf '%s' "$count"
+}
+
+list_ready_send_job_paths() {
+  local now_epoch="$1"
+  local selector="${2:-any}"
+  local limit="${3:-0}"
+  local file sort_key
+  local -A job=()
+
+  [[ "$limit" =~ ^[0-9]+$ ]] || limit=0
+
+  while IFS= read -r file; do
+    job_load "$file" job || continue
+    send_job_ready_for_selector job "$selector" "$now_epoch" || continue
+    sort_key="$(job_get job QUEUE_SORT 0)"
+    [[ "$sort_key" =~ ^[0-9]+$ ]] || sort_key=0
+    printf '%s\t%s\n' "$sort_key" "$file"
+  done < <(list_job_files) \
+    | sort -n -k1,1 \
+    | {
+        if (( limit > 0 )); then
+          head -n "$limit"
+        else
+          cat
+        fi
+      } \
+    | cut -f2-
 }
 
 claim_next_send_job() {

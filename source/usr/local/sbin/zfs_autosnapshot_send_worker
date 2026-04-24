@@ -7,6 +7,9 @@ source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
 
 WORKER_ROLE="send"
 CLAIM_SELECTOR="${ZFSAS_CLAIM_SELECTOR:-non_pool_prep}"
+ASSIGNED_JOB_PATH="${ZFSAS_JOB_PATH:-}"
+ASSIGNED_JOB_ID="${ZFSAS_JOB_ID:-}"
+LAUNCHER_PID="${ZFSAS_LAUNCHER_PID:-}"
 WORKER_LOCK_DIR=""
 CURRENT_JOB_ID=""
 CURRENT_JOB_PATH=""
@@ -160,6 +163,39 @@ clear_active_send_datasets() {
 
 preflight_only_worker() {
   [[ "$CLAIM_SELECTOR" == "non_pool_prep_preflight" ]]
+}
+
+assigned_job_path_is_valid() {
+  local path="$1"
+  [[ -n "$path" ]] || return 1
+  case "$path" in
+    "$OPS_JOBS_DIR"/*.job) [[ -f "$path" ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+cache_current_send_plan() {
+  local description="$1"
+  local base_snapshot="$2"
+  local snapshot="$3"
+  local destination="$4"
+
+  job[SEND_PLAN_DESCRIPTION]="$description"
+  job[SEND_PLAN_BASE_SNAPSHOT]="$base_snapshot"
+  job[SEND_PLAN_SNAPSHOT]="$snapshot"
+  job[SEND_PLAN_DESTINATION]="$destination"
+  persist_job || true
+}
+
+current_send_plan_matches() {
+  local snapshot="$1"
+  local destination="$2"
+
+  [[ "$(job_get job SEND_PLAN_SNAPSHOT)" == "$snapshot" ]] || return 1
+  [[ "$(job_get job SEND_PLAN_DESTINATION)" == "$destination" ]] || return 1
+  [[ -n "$(job_get job SPACE_ESTIMATE_KEY)" ]] || return 1
+  [[ "$(job_get job SPACE_REQUIRED_BYTES 0)" =~ ^[0-9]+$ ]] || return 1
+  return 0
 }
 
 effective_job_action() {
@@ -443,6 +479,7 @@ run_pipeline_with_space_reservation() {
   local send_progress="${5:-}"
   local rc required_bytes
 
+  cache_current_send_plan "$description" "$base_snapshot" "$snapshot" "$destination"
   estimate_destination_space_for_current_send "$destination" "$base_snapshot" "$snapshot" || return 1
   if preflight_only_worker; then
     defer_current_job "Waiting for send slot." 0
@@ -801,7 +838,7 @@ queue_child_send_jobs() {
 send_member_snapshot() {
   local member_index="$1"
   local member_count="$2"
-  local source_dataset destination snapshot basename latest_common description progress failure_message
+  local source_dataset destination snapshot basename latest_common description progress failure_message base_snapshot
   local destination_parent source_exists=0 destination_exists=0 parent_exists=0
   local source_type="" destination_type=""
 
@@ -849,6 +886,23 @@ send_member_snapshot() {
   fi
 
   progress=$((30 + (member_index * 40 / (member_count == 0 ? 1 : member_count))))
+  if ! preflight_only_worker && current_send_plan_matches "$snapshot" "$destination"; then
+    base_snapshot="$(job_get job SEND_PLAN_BASE_SNAPSHOT)"
+    description="$(job_get job SEND_PLAN_DESCRIPTION)"
+    if [[ -z "$description" ]]; then
+      if [[ -n "$base_snapshot" ]]; then
+        description="Incremental send ${base_snapshot} -> ${snapshot} -> ${destination}"
+      else
+        description="Full send ${snapshot} -> ${destination}"
+      fi
+    fi
+    set_job_progress "snapshot_created" "$progress" "Waiting for send slot."
+    run_pipeline_with_space_reservation "$description" "$base_snapshot" "$snapshot" "$destination" "$progress" || return $?
+    set_job_progress "verifying" "$((progress + 15))" "Verifying receive."
+    snapshot_exists "${destination}@${basename}"
+    return $?
+  fi
+
   set_job_progress "preparing" "$progress" "Preparing send."
 
   if [[ "$(job_get job JOB_MODE)" == "scheduled" ]]; then
@@ -1148,10 +1202,18 @@ process_send_job() {
       ;;
   esac
 
-  set_job_progress "preparing" "5" "Preparing."
+  if ! preflight_only_worker && ! send_job_needs_preflight job; then
+    set_job_progress "snapshot_created" "30" "Waiting for send slot."
+  else
+    set_job_progress "preparing" "5" "Preparing."
+  fi
   wait_for_unraid_array_to_be_actionable_for_current_job
   wait_for_autosnapshot_to_finish
-  set_job_progress "preparing" "15" "Preparing."
+  if ! preflight_only_worker && ! send_job_needs_preflight job; then
+    set_job_progress "snapshot_created" "30" "Waiting for send slot."
+  else
+    set_job_progress "preparing" "15" "Preparing."
+  fi
 
   case "$mode:$action" in
     scheduled:pool_prep)
@@ -1227,7 +1289,7 @@ process_send_job() {
 }
 
 main() {
-  local now_epoch candidate_path result=0
+  local now_epoch candidate_path result=0 single_job=0
   while (( $# > 0 )); do
     case "$1" in
       --pool-prep-only)
@@ -1247,6 +1309,10 @@ main() {
   esac
   if [[ "$WORKER_ROLE" == "pool_prep" ]]; then
     CLAIM_SELECTOR="pool_prep"
+  fi
+  if [[ -n "$ASSIGNED_JOB_PATH" ]]; then
+    assigned_job_path_is_valid "$ASSIGNED_JOB_PATH" || exit 0
+    single_job=1
   fi
 
   ensure_runtime_layout || exit 1
@@ -1290,7 +1356,11 @@ main() {
     wait_for_unraid_array_to_be_actionable_for_send_queue
     now_epoch="$(date +%s)"
     candidate_path=""
-    claim_next_send_job "$now_epoch" candidate_path "$CLAIM_SELECTOR" || break
+    if (( single_job == 1 )); then
+      candidate_path="$ASSIGNED_JOB_PATH"
+    else
+      claim_next_send_job "$now_epoch" candidate_path "$CLAIM_SELECTOR" || break
+    fi
     [[ -n "$candidate_path" ]] || break
 
     # shellcheck disable=SC2034
@@ -1300,9 +1370,22 @@ main() {
     CURRENT_JOB_ID="$(job_get job JOB_ID)"
     CURRENT_JOB_PATH="$candidate_path"
 
-    if ! acquire_job_claim "$CURRENT_JOB_ID"; then
+    if (( single_job == 1 )) && [[ -n "$ASSIGNED_JOB_ID" && "$ASSIGNED_JOB_ID" != "$CURRENT_JOB_ID" ]]; then
       CURRENT_JOB_ID=""
       CURRENT_JOB_PATH=""
+      break
+    fi
+
+    if (( single_job == 1 )) && [[ -n "$LAUNCHER_PID" ]]; then
+      take_over_job_claim "$CURRENT_JOB_ID" "$LAUNCHER_PID" || {
+        CURRENT_JOB_ID=""
+        CURRENT_JOB_PATH=""
+        break
+      }
+    elif ! acquire_job_claim "$CURRENT_JOB_ID"; then
+      CURRENT_JOB_ID=""
+      CURRENT_JOB_PATH=""
+      (( single_job == 1 )) && break
       continue
     fi
 
@@ -1310,13 +1393,15 @@ main() {
       release_job_claim "$CURRENT_JOB_ID"
       CURRENT_JOB_ID=""
       CURRENT_JOB_PATH=""
+      (( single_job == 1 )) && break
       continue
     }
 
-    if ! job_is_retry_ready "$(job_get job STATE)" "$(job_get job RETRY_AT 0)" "$now_epoch"; then
+    if ! send_job_matches_selector job "$CLAIM_SELECTOR" || ! job_is_retry_ready "$(job_get job STATE)" "$(job_get job RETRY_AT 0)" "$now_epoch"; then
       release_job_claim "$CURRENT_JOB_ID"
       CURRENT_JOB_ID=""
       CURRENT_JOB_PATH=""
+      (( single_job == 1 )) && break
       continue
     fi
 
@@ -1342,6 +1427,7 @@ main() {
     release_job_claim "$CURRENT_JOB_ID"
     CURRENT_JOB_ID=""
     CURRENT_JOB_PATH=""
+    (( single_job == 1 )) && break
   done
 
   log "Send worker $$ finished (${WORKER_ROLE}:${CLAIM_SELECTOR})"

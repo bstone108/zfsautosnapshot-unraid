@@ -7,12 +7,24 @@ source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
 spawn_send_worker() {
   local worker_lock_dir="$1"
   local claim_selector="$2"
-  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" ZFSAS_CLAIM_SELECTOR="$claim_selector" nohup /usr/local/sbin/zfs_autosnapshot_send_worker >> "$LOG_FILE" 2>&1 < /dev/null &
+  local job_path="${3:-}"
+  local job_id=""
+
+  if [[ -n "$job_path" ]]; then
+    claim_send_job_path_for_launch "$job_path" job_id || return 1
+  fi
+  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" ZFSAS_CLAIM_SELECTOR="$claim_selector" ZFSAS_JOB_PATH="$job_path" ZFSAS_JOB_ID="$job_id" ZFSAS_LAUNCHER_PID="$$" nohup /usr/local/sbin/zfs_autosnapshot_send_worker >> "$LOG_FILE" 2>&1 < /dev/null &
 }
 
 spawn_pool_prep_worker() {
   local worker_lock_dir="$1"
-  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" nohup /usr/local/sbin/zfs_autosnapshot_send_worker --pool-prep-only >> "$LOG_FILE" 2>&1 < /dev/null &
+  local job_path="${2:-}"
+  local job_id=""
+
+  if [[ -n "$job_path" ]]; then
+    claim_send_job_path_for_launch "$job_path" job_id || return 1
+  fi
+  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" ZFSAS_JOB_PATH="$job_path" ZFSAS_JOB_ID="$job_id" ZFSAS_LAUNCHER_PID="$$" nohup /usr/local/sbin/zfs_autosnapshot_send_worker --pool-prep-only >> "$LOG_FILE" 2>&1 < /dev/null &
 }
 
 spawn_delete_worker() {
@@ -25,16 +37,19 @@ handler_cleanup() {
 
 spawn_available_workers() {
   local now_epoch="$1"
-  local worker_lock_dir max_send_workers prep_extra_workers preflight_workers ready_count launched
+  local worker_lock_dir max_send_workers prep_extra_workers preflight_workers job_path
+  local -a ready_paths=()
 
-  ready_count="$(count_ready_send_jobs "$now_epoch" pool_prep)"
-  launched=0
-  while pool_prep_worker_slot_available; do
-    (( launched < ready_count )) || break
+  mapfile -t ready_paths < <(list_ready_send_job_paths "$now_epoch" pool_prep 64)
+  for job_path in "${ready_paths[@]}"; do
+    pool_prep_worker_slot_available || break
+    [[ -n "$job_path" ]] || continue
     worker_lock_dir=""
     acquire_send_worker_launch_slot pool_prep 8 worker_lock_dir || break
-    spawn_pool_prep_worker "$worker_lock_dir"
-    launched=$((launched + 1))
+    spawn_pool_prep_worker "$worker_lock_dir" "$job_path" || {
+      release_send_worker_launch_slot "$worker_lock_dir"
+      continue
+    }
     sleep 0.05
   done
 
@@ -46,14 +61,16 @@ spawn_available_workers() {
   [[ "$prep_extra_workers" =~ ^[0-9]+$ ]] || prep_extra_workers="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
   (( prep_extra_workers >= 0 )) || prep_extra_workers=0
 
-  ready_count="$(count_ready_send_jobs "$now_epoch" non_pool_prep_ready)"
-  launched=0
-  while send_worker_role_slot_available transfer "$max_send_workers"; do
-    (( launched < ready_count )) || break
+  mapfile -t ready_paths < <(list_ready_send_job_paths "$now_epoch" non_pool_prep_ready 256)
+  for job_path in "${ready_paths[@]}"; do
+    send_worker_role_slot_available transfer "$max_send_workers" || break
+    [[ -n "$job_path" ]] || continue
     worker_lock_dir=""
     acquire_send_worker_launch_slot transfer "$max_send_workers" worker_lock_dir || break
-    spawn_send_worker "$worker_lock_dir" non_pool_prep_ready
-    launched=$((launched + 1))
+    spawn_send_worker "$worker_lock_dir" non_pool_prep_ready "$job_path" || {
+      release_send_worker_launch_slot "$worker_lock_dir"
+      continue
+    }
     sleep 0.05
   done
 
@@ -61,14 +78,16 @@ spawn_available_workers() {
   if (( preflight_workers <= 0 )); then
     preflight_workers="$max_send_workers"
   fi
-  ready_count="$(count_ready_send_jobs "$now_epoch" non_pool_prep_preflight)"
-  launched=0
-  while send_worker_role_slot_available preflight "$preflight_workers"; do
-    (( launched < ready_count )) || break
+  mapfile -t ready_paths < <(list_ready_send_job_paths "$now_epoch" non_pool_prep_preflight 512)
+  for job_path in "${ready_paths[@]}"; do
+    send_worker_role_slot_available preflight "$preflight_workers" || break
+    [[ -n "$job_path" ]] || continue
     worker_lock_dir=""
     acquire_send_worker_launch_slot preflight "$preflight_workers" worker_lock_dir || break
-    spawn_send_worker "$worker_lock_dir" non_pool_prep_preflight
-    launched=$((launched + 1))
+    spawn_send_worker "$worker_lock_dir" non_pool_prep_preflight "$job_path" || {
+      release_send_worker_launch_slot "$worker_lock_dir"
+      continue
+    }
     sleep 0.05
   done
 
