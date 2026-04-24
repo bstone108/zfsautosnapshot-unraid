@@ -1,10 +1,10 @@
 <?xml version='1.0' standalone='yes'?>
 <!-- Generated release manifest. Edit VERSION and zfs.autosnapshot.plg.in; GitHub Actions stamps and publishes zfs.autosnapshot.plg. -->
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.18.02" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.04.24.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.04.18.02 (2026-04-18)
-- Reworked plugin logging so active logs stay detailed, older routine chatter is compacted into archived history, and busy tools no longer have to choose between “too little history” and “fill RAM forever.”
-- Moved the Recovery Tools and Dataset Migrator runtime logs into RAM-backed `/var/log`, expanded downloadable log history, and toned down delete-queue success spam so failures stand out more clearly on busy systems.
+### 2026.04.24.01 (2026-04-24)
+- Marked `Dataset Migrator` as feature-stable and removed its unfinished warning while keeping preview warnings for `Recovery Tools` and `Snapshot Manager`.
+- Fixed a bug where plugin log preparation could damage `/var/log` permissions, and added upgrade-time repair so affected systems reset `/var/log` back to `root:root` and `0755`.
 
   </CHANGES>
 
@@ -14,9 +14,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.18.02-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.04.18.02-noarch-1.txz</URL>
-    <MD5>6fc09a9abd780787cc529b7a0f1f8525</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.04.24.01-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.04.24.01-noarch-1.txz</URL>
+    <MD5>9e60cb5d39ee4e447ee639aedbb06b35</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -24,10 +24,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.04.18.02-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.04.24.01-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="6fc09a9abd780787cc529b7a0f1f8525"
+PKG_MD5="9e60cb5d39ee4e447ee639aedbb06b35"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
