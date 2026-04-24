@@ -655,6 +655,118 @@ function zfsas_ops_send_job_progress_percent($job)
     }
 }
 
+function zfsas_ops_send_job_progress_active($job)
+{
+    $state = (string) ($job['STATE'] ?? 'queued');
+    $phase = (string) ($job['PHASE'] ?? 'queued');
+    $progress = zfsas_ops_send_job_progress_percent($job);
+
+    return $state === 'running'
+        && !in_array($phase, ['complete', 'failed'], true)
+        && $progress > 0
+        && $progress < 100;
+}
+
+function zfsas_ops_send_job_step_parts($job)
+{
+    $state = (string) ($job['STATE'] ?? 'queued');
+    $phase = (string) ($job['PHASE'] ?? 'queued');
+    $action = (string) ($job['JOB_ACTION'] ?? '');
+    $mode = (string) ($job['JOB_MODE'] ?? '');
+    $raw = strtolower(trim((string) ($job['LAST_ERROR'] ?? '') . ' ' . (string) ($job['LAST_MESSAGE'] ?? '')));
+    $current = 1;
+    $total = 5;
+
+    $explicitTotal = (int) ($job['STEP_TOTAL'] ?? 0);
+    $explicitCurrent = (int) ($job['STEP_CURRENT'] ?? 0);
+    if ($explicitTotal > 0 && $explicitCurrent > 0) {
+        $total = max(1, $explicitTotal);
+        $current = max(1, min($total, $explicitCurrent));
+        return [
+            'current' => $current,
+            'total' => $total,
+            'label' => $current . '/' . $total,
+        ];
+    }
+
+    if ($action === 'pool_prep') {
+        $total = 4;
+        if (in_array($state, ['complete', 'skipped'], true)) {
+            $current = 4;
+        } elseif ($state === 'running' && (strpos($raw, 'free-space') !== false || strpos($raw, 'free space') !== false)) {
+            $current = 3;
+        } elseif ($state === 'running' && strpos($raw, 'retention') !== false) {
+            $current = 2;
+        } else {
+            $current = 1;
+        }
+    } elseif ($action === 'prepare') {
+        $total = 4;
+        if (in_array($state, ['complete', 'skipped'], true)) {
+            $current = 4;
+        } elseif ($phase === 'snapshot_created' || strpos($raw, 'queueing') !== false) {
+            $current = 4;
+        } elseif (strpos($raw, 'snapshot') !== false) {
+            $current = 3;
+        } elseif ($state === 'running') {
+            $current = 2;
+        } else {
+            $current = 1;
+        }
+    } elseif ($action === 'finalize') {
+        $total = 3;
+        if (in_array($state, ['complete', 'skipped'], true)) {
+            $current = 3;
+        } elseif ($state === 'queued') {
+            $current = 1;
+        } else {
+            $current = 2;
+        }
+    } elseif ($action === 'cleanup_member') {
+        $total = 3;
+        if (in_array($state, ['complete', 'skipped'], true)) {
+            $current = 3;
+        } elseif ($state === 'queued') {
+            $current = 1;
+        } else {
+            $current = 2;
+        }
+    } else {
+        $isManual = ($mode === 'manual_snapshot');
+        $total = $isManual ? 5 : 7;
+        if (in_array($state, ['complete', 'skipped'], true)) {
+            $current = $total;
+        } elseif ($phase === 'cleanup') {
+            $current = $isManual ? 5 : 7;
+        } elseif ($phase === 'verifying' || strpos($raw, 'verifying') !== false) {
+            $current = $isManual ? 5 : 6;
+        } elseif ($phase === 'sending' || strpos($raw, 'sending') !== false) {
+            $current = $isManual ? 4 : 5;
+        } elseif (strpos($raw, 'calculating') !== false || strpos($raw, 'estimate') !== false) {
+            $current = 3;
+        } elseif (strpos($raw, 'waiting') !== false || strpos($raw, 'send slot') !== false || strpos($raw, 'destination space') !== false || strpos($raw, 'pool prep') !== false || strpos($raw, 'turn') !== false) {
+            $current = $isManual ? 3 : 4;
+        } elseif ($phase === 'snapshot_created' || $state === 'running') {
+            $current = 2;
+        } else {
+            $current = 1;
+        }
+    }
+
+    $current = max(1, min($total, $current));
+    return [
+        'current' => $current,
+        'total' => $total,
+        'label' => $current . '/' . $total,
+    ];
+}
+
+function zfsas_ops_send_job_step_label($job)
+{
+    $parts = zfsas_ops_send_job_step_parts($job);
+    return (string) ($parts['label'] ?? '');
+}
+
 function zfsas_ops_send_job_state_label($job)
 {
     $state = (string) ($job['STATE'] ?? 'queued');
@@ -686,6 +798,48 @@ function zfsas_ops_send_job_state_label($job)
     }
 
     return ucfirst(str_replace('_', ' ', $state));
+}
+
+function zfsas_ops_send_queue_status_payload($limit = 120)
+{
+    $rows = [];
+    foreach (zfsas_ops_recent_send_jobs($limit) as $job) {
+        $step = zfsas_ops_send_job_step_parts($job);
+        $rows[] = [
+            'id' => (string) ($job['JOB_ID'] ?? ''),
+            'mode' => (string) ($job['JOB_MODE'] ?? ''),
+            'action' => (string) ($job['JOB_ACTION'] ?? ''),
+            'typeLabel' => zfsas_ops_send_job_type_label($job),
+            'state' => (string) ($job['STATE'] ?? ''),
+            'phase' => (string) ($job['PHASE'] ?? ''),
+            'stateLabel' => zfsas_ops_send_job_state_label($job),
+            'source' => (string) ($job['SOURCE_ROOT'] ?? $job['DATASET'] ?? ''),
+            'destination' => (string) ($job['DESTINATION_ROOT'] ?? ''),
+            'includeChildren' => ((string) ($job['INCLUDE_CHILDREN'] ?? '0') === '1'),
+            'requestedAt' => (string) ($job['REQUESTED_AT'] ?? ''),
+            'lastMessage' => zfsas_ops_send_job_display_message($job),
+            'lastError' => (string) ($job['LAST_ERROR'] ?? ''),
+            'rawMessage' => zfsas_ops_send_job_raw_message($job),
+            'progress' => zfsas_ops_send_job_progress_percent($job),
+            'progressActive' => zfsas_ops_send_job_progress_active($job),
+            'step' => (string) ($step['label'] ?? ''),
+            'stepCurrent' => (int) ($step['current'] ?? 0),
+            'stepTotal' => (int) ($step['total'] ?? 0),
+            'retryAt' => (string) ($job['RETRY_AT'] ?? '0'),
+            'canRetry' => ((string) ($job['STATE'] ?? '') === 'failed' && (string) ($job['CANCELLED_BY_USER'] ?? '0') !== '1'),
+            'canClear' => ((string) ($job['STATE'] ?? '') === 'failed'),
+            'canCancel' => in_array((string) ($job['STATE'] ?? ''), ['queued', 'running', 'retry_wait'], true),
+            'logDownloadUrl' => ((string) ($job['JOB_ID'] ?? '') !== '')
+                ? zfsas_ops_failed_send_log_download_url((string) ($job['JOB_ID'] ?? ''))
+                : '',
+        ];
+    }
+
+    return [
+        'ok' => true,
+        'jobs' => $rows,
+        'pendingDeleteCount' => zfsas_ops_pending_delete_job_count(),
+    ];
 }
 
 function zfsas_ops_send_job_type_label($job)

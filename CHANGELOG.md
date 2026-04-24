@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.07 (Testing Branch Only)
+
+- Added a `Step` column to the `ZFS Send` queue so active rows show progress through the normal job flow as values like `3/7`.
+- Added live queue updates using browser Server-Sent Events, with the existing polling endpoint kept as a fallback if streaming is unavailable.
+- Improved active queue progress bars with a subtle moving fill while work is in progress, and changed long source/destination paths to truncate from the beginning so the dataset name at the end stays visible.
+
 ### 2026.04.24.06 (Testing Branch Only)
 
 - Cleaned up `ZFS Send` queue status text so rows show short, accurate messages like waiting for space, calculating needed space, sending, verifying, or cleaning up instead of long noisy internal details.
