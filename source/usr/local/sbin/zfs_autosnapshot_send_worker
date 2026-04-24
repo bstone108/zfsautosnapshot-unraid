@@ -6,6 +6,7 @@ set -Eeuo pipefail
 source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
 
 WORKER_ROLE="send"
+CLAIM_SELECTOR="${ZFSAS_CLAIM_SELECTOR:-non_pool_prep}"
 WORKER_LOCK_DIR=""
 CURRENT_JOB_ID=""
 CURRENT_JOB_PATH=""
@@ -155,6 +156,10 @@ clear_active_send_datasets() {
     rm -f "$CURRENT_ACTIVE_DATASETS_FILE" >/dev/null 2>&1 || true
     CURRENT_ACTIVE_DATASETS_FILE=""
   fi
+}
+
+preflight_only_worker() {
+  [[ "$CLAIM_SELECTOR" == "non_pool_prep_preflight" ]]
 }
 
 effective_job_action() {
@@ -439,6 +444,10 @@ run_pipeline_with_space_reservation() {
   local rc required_bytes
 
   estimate_destination_space_for_current_send "$destination" "$base_snapshot" "$snapshot" || return 1
+  if preflight_only_worker; then
+    defer_current_job "Waiting for send slot." 0
+    return 2
+  fi
   wait_for_pool_prep_for_current_job || return $?
   reserve_destination_space_for_current_send "$destination" "$base_snapshot" "$snapshot" || return $?
   required_bytes="$(job_get job SPACE_REQUIRED_BYTES 0)"
@@ -450,8 +459,6 @@ run_pipeline_with_space_reservation() {
   else
     rc=$?
   fi
-  release_current_space_reservation
-  release_current_send_transfer_slot
   return "$rc"
 }
 
@@ -1220,16 +1227,27 @@ process_send_job() {
 }
 
 main() {
-  local now_epoch candidate_path result=0 claim_selector="non_pool_prep"
+  local now_epoch candidate_path result=0
   while (( $# > 0 )); do
     case "$1" in
       --pool-prep-only)
         WORKER_ROLE="pool_prep"
-        claim_selector="pool_prep"
+        CLAIM_SELECTOR="pool_prep"
         ;;
     esac
     shift
   done
+
+  case "$CLAIM_SELECTOR" in
+    non_pool_prep|non_pool_prep_preflight|non_pool_prep_ready|pool_prep)
+      ;;
+    *)
+      CLAIM_SELECTOR="non_pool_prep"
+      ;;
+  esac
+  if [[ "$WORKER_ROLE" == "pool_prep" ]]; then
+    CLAIM_SELECTOR="pool_prep"
+  fi
 
   ensure_runtime_layout || exit 1
   load_send_config
@@ -1266,13 +1284,13 @@ main() {
   printf '%s\n' "$$" > "${WORKER_LOCK_DIR}/pid" 2>/dev/null || true
 
   exec >> "$LOG_FILE" 2>&1
-  log "Send worker $$ starting (${WORKER_ROLE})"
+  log "Send worker $$ starting (${WORKER_ROLE}:${CLAIM_SELECTOR})"
 
   while :; do
     wait_for_unraid_array_to_be_actionable_for_send_queue
     now_epoch="$(date +%s)"
     candidate_path=""
-    claim_next_send_job "$now_epoch" candidate_path "$claim_selector" || break
+    claim_next_send_job "$now_epoch" candidate_path "$CLAIM_SELECTOR" || break
     [[ -n "$candidate_path" ]] || break
 
     # shellcheck disable=SC2034
@@ -1319,13 +1337,14 @@ main() {
 
     release_current_prep_pool_lock
     release_current_space_reservation
+    release_current_send_transfer_slot
     clear_active_send_datasets
     release_job_claim "$CURRENT_JOB_ID"
     CURRENT_JOB_ID=""
     CURRENT_JOB_PATH=""
   done
 
-  log "Send worker $$ finished (${WORKER_ROLE})"
+  log "Send worker $$ finished (${WORKER_ROLE}:${CLAIM_SELECTOR})"
 }
 
 main "$@"

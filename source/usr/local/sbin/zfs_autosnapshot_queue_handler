@@ -6,7 +6,8 @@ source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
 
 spawn_send_worker() {
   local worker_lock_dir="$1"
-  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" nohup /usr/local/sbin/zfs_autosnapshot_send_worker >> "$LOG_FILE" 2>&1 < /dev/null &
+  local claim_selector="$2"
+  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" ZFSAS_CLAIM_SELECTOR="$claim_selector" nohup /usr/local/sbin/zfs_autosnapshot_send_worker >> "$LOG_FILE" 2>&1 < /dev/null &
 }
 
 spawn_pool_prep_worker() {
@@ -24,7 +25,7 @@ handler_cleanup() {
 
 spawn_available_workers() {
   local now_epoch="$1"
-  local candidate_path worker_lock_dir max_send_workers max_send_worker_processes prep_extra_workers
+  local candidate_path worker_lock_dir max_send_workers prep_extra_workers preflight_workers
 
   while pool_prep_worker_slot_available; do
     claim_next_send_job "$now_epoch" candidate_path pool_prep || break
@@ -43,13 +44,25 @@ spawn_available_workers() {
   [[ "$prep_extra_workers" =~ ^[0-9]+$ ]] || prep_extra_workers="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
   (( prep_extra_workers >= 0 )) || prep_extra_workers=0
 
-  max_send_worker_processes=$((max_send_workers + prep_extra_workers))
-  while send_worker_slot_available "$max_send_worker_processes"; do
-    claim_next_send_job "$now_epoch" candidate_path non_pool_prep || break
+  while send_worker_role_slot_available transfer "$max_send_workers"; do
+    claim_next_send_job "$now_epoch" candidate_path non_pool_prep_ready || break
     [[ -n "$candidate_path" ]] || break
     worker_lock_dir=""
-    acquire_send_worker_launch_slot worker "$max_send_worker_processes" worker_lock_dir || break
-    spawn_send_worker "$worker_lock_dir"
+    acquire_send_worker_launch_slot transfer "$max_send_workers" worker_lock_dir || break
+    spawn_send_worker "$worker_lock_dir" non_pool_prep_ready
+    sleep 0.05
+  done
+
+  preflight_workers="$prep_extra_workers"
+  if (( preflight_workers <= 0 )); then
+    preflight_workers="$max_send_workers"
+  fi
+  while send_worker_role_slot_available preflight "$preflight_workers"; do
+    claim_next_send_job "$now_epoch" candidate_path non_pool_prep_preflight || break
+    [[ -n "$candidate_path" ]] || break
+    worker_lock_dir=""
+    acquire_send_worker_launch_slot preflight "$preflight_workers" worker_lock_dir || break
+    spawn_send_worker "$worker_lock_dir" non_pool_prep_preflight
     sleep 0.05
   done
 

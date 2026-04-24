@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.10 (Testing Branch Only)
+
+- Fixed `ZFS Send` preflight dispatch so jobs that already finished snapshot/space preparation and are waiting for a send slot no longer block fresh queued children from preparing.
+- Fixed `ZFS Send` transfer-slot accounting so a job stays counted as active through verification, source checkpoint cleanup, and zero-change cleanup queueing instead of freeing a slot immediately after receive finishes.
+
 ### 2026.04.24.09 (Testing Branch Only)
 
 - Changed the `ZFS Send` queue kicker so it only schedules work and starts a live queue handler; the handler now keeps launching send/delete workers in near real time until the queue drains instead of waiting for the next one-minute kicker pass.

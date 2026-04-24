@@ -1547,6 +1547,18 @@ send_worker_slot_available() {
   (( count < max_workers ))
 }
 
+send_worker_role_slot_available() {
+  local role="$1"
+  local max_workers="$2"
+  local count
+
+  [[ "$max_workers" =~ ^[0-9]+$ ]] || max_workers="$DEFAULT_SEND_MAX_PARALLEL"
+  (( max_workers >= 1 )) || max_workers=1
+  count="$(send_worker_lock_count_for_role_locked "$role")"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  (( count < max_workers ))
+}
+
 pool_prep_worker_lock_count() {
   cleanup_stale_send_worker_locks pool_prep
   find "$SEND_WORKER_RUNTIME_DIR" -maxdepth 1 -mindepth 1 -type d -name 'pool-prep-*.lockdir' 2>/dev/null | wc -l | tr -d ' '
@@ -1563,6 +1575,8 @@ send_worker_lock_glob_for_role() {
   local role="$1"
   case "$role" in
     pool_prep) printf 'pool-prep-*.lockdir' ;;
+    preflight) printf 'worker-preflight-*.lockdir' ;;
+    transfer) printf 'worker-transfer-*.lockdir' ;;
     *) printf 'worker-*.lockdir' ;;
   esac
 }
@@ -1571,6 +1585,8 @@ send_worker_lock_prefix_for_role() {
   local role="$1"
   case "$role" in
     pool_prep) printf 'pool-prep' ;;
+    preflight) printf 'worker-preflight' ;;
+    transfer) printf 'worker-transfer' ;;
     *) printf 'worker' ;;
   esac
 }
@@ -3285,6 +3301,36 @@ mark_job_failed_or_retry() {
   fi
 }
 
+send_job_needs_preflight() {
+  local assoc_name="$1"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+  local mode action estimate_key required_bytes
+
+  mode="${job_ref[JOB_MODE]:-}"
+  action="${job_ref[JOB_ACTION]:-}"
+
+  case "$mode:$action" in
+    scheduled:pool_prep|scheduled:finalize)
+      return 1
+      ;;
+    scheduled:prepare|scheduled:)
+      return 0
+      ;;
+  esac
+
+  case "$mode" in
+    manual_snapshot|scheduled)
+      estimate_key="${job_ref[SPACE_ESTIMATE_KEY]:-}"
+      required_bytes="${job_ref[SPACE_REQUIRED_BYTES]:-}"
+      [[ -z "$estimate_key" || ! "$required_bytes" =~ ^[0-9]+$ ]]
+      return
+      ;;
+  esac
+
+  return 1
+}
+
 claim_next_send_job() {
   local now_epoch="$1"
   local result_path_var="$2"
@@ -3306,6 +3352,14 @@ claim_next_send_job() {
         ;;
       non_pool_prep)
         [[ "$action" != "pool_prep" ]] || continue
+        ;;
+      non_pool_prep_preflight)
+        [[ "$action" != "pool_prep" ]] || continue
+        send_job_needs_preflight job || continue
+        ;;
+      non_pool_prep_ready)
+        [[ "$action" != "pool_prep" ]] || continue
+        ! send_job_needs_preflight job || continue
         ;;
     esac
     state="$(job_get job STATE)"
