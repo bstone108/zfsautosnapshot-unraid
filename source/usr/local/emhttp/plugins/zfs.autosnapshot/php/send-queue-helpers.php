@@ -662,9 +662,15 @@ function zfsas_ops_send_job_progress_active($job)
     $progress = zfsas_ops_send_job_progress_percent($job);
 
     return $state === 'running'
-        && !in_array($phase, ['complete', 'failed'], true)
-        && $progress > 0
+        && $phase === 'sending'
+        && $progress >= 0
         && $progress < 100;
+}
+
+function zfsas_ops_send_job_progress_visible($job)
+{
+    return (string) ($job['STATE'] ?? 'queued') === 'running'
+        && (string) ($job['PHASE'] ?? 'queued') === 'sending';
 }
 
 function zfsas_ops_send_job_step_parts($job)
@@ -822,6 +828,7 @@ function zfsas_ops_send_queue_status_payload($limit = 120)
             'rawMessage' => zfsas_ops_send_job_raw_message($job),
             'progress' => zfsas_ops_send_job_progress_percent($job),
             'progressActive' => zfsas_ops_send_job_progress_active($job),
+            'progressVisible' => zfsas_ops_send_job_progress_visible($job),
             'step' => (string) ($step['label'] ?? ''),
             'stepCurrent' => (int) ($step['current'] ?? 0),
             'stepTotal' => (int) ($step['total'] ?? 0),

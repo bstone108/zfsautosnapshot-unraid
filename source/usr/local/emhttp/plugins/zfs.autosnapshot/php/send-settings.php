@@ -1,4 +1,29 @@
 <?php
+function zfsas_send_queue_path_display($path, $maxLength = 34)
+{
+    $path = (string) $path;
+    $maxLength = max(12, (int) $maxLength);
+    if (strlen($path) <= $maxLength) {
+        return $path;
+    }
+
+    $segments = explode('/', $path);
+    $display = array_pop($segments);
+    while (!empty($segments)) {
+        $candidate = array_pop($segments) . '/' . $display;
+        if (strlen('...' . $candidate) > $maxLength) {
+            break;
+        }
+        $display = $candidate;
+    }
+
+    if ($display === '') {
+        return '...' . substr($path, -($maxLength - 3));
+    }
+
+    return '...' . $display;
+}
+
 $pluginName = 'zfs.autosnapshot';
 $configDir = "/boot/config/plugins/{$pluginName}";
 $configFile = "{$configDir}/zfs_send.conf";
@@ -290,7 +315,13 @@ if ($isPostRequest) {
         transition: width 180ms ease;
       }
 
+      .zfsas-send-progress.idle .zfsas-send-progress-track,
+      .zfsas-send-progress.idle .zfsas-send-progress-text {
+        visibility: hidden;
+      }
+
       .zfsas-send-progress.active .zfsas-send-progress-fill {
+        min-width: 18px;
         background-image:
           repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.38) 0, rgba(255, 255, 255, 0.38) 7px, transparent 7px, transparent 14px),
           linear-gradient(90deg, #4e8ef7, #2db6a3);
@@ -334,9 +365,7 @@ if ($isPostRequest) {
     }
 
     .zfsas-send-queue-path {
-      direction: rtl;
       text-align: left;
-      unicode-bidi: plaintext;
     }
 
     .zfsas-send-queue-table th:nth-child(1),
@@ -668,9 +697,11 @@ if ($isPostRequest) {
               </tr>
           <?php else : ?>
             <?php foreach ($queueJobs as $queueJob) : ?>
+              <?php $queueSourcePath = (string) ($queueJob['SOURCE_ROOT'] ?? $queueJob['DATASET'] ?? ''); ?>
+              <?php $queueDestinationPath = (string) ($queueJob['DESTINATION_ROOT'] ?? ''); ?>
               <tr data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">
-                <td title="<?php echo zfsas_send_h($queueJob['SOURCE_ROOT'] ?? $queueJob['DATASET'] ?? ''); ?>"><code class="zfsas-send-queue-path"><?php echo zfsas_send_h($queueJob['SOURCE_ROOT'] ?? $queueJob['DATASET'] ?? ''); ?></code></td>
-                <td title="<?php echo zfsas_send_h($queueJob['DESTINATION_ROOT'] ?? ''); ?>"><code class="zfsas-send-queue-path"><?php echo zfsas_send_h($queueJob['DESTINATION_ROOT'] ?? ''); ?></code></td>
+                <td title="<?php echo zfsas_send_h($queueSourcePath); ?>"><code class="zfsas-send-queue-path"><?php echo zfsas_send_h(zfsas_send_queue_path_display($queueSourcePath)); ?></code></td>
+                <td title="<?php echo zfsas_send_h($queueDestinationPath); ?>"><code class="zfsas-send-queue-path"><?php echo zfsas_send_h(zfsas_send_queue_path_display($queueDestinationPath)); ?></code></td>
                 <td>
                   <span class="zfsas-send-queue-badge"><?php echo zfsas_send_h(zfsas_ops_send_job_type_label($queueJob)); ?></span>
                 </td>
@@ -681,9 +712,9 @@ if ($isPostRequest) {
                   </td>
                   <td><span class="zfsas-send-step"><?php echo zfsas_send_h(zfsas_ops_send_job_step_label($queueJob)); ?></span></td>
                   <td>
-                    <div class="zfsas-send-progress<?php echo zfsas_ops_send_job_progress_active($queueJob) ? ' active' : ''; ?>">
+                    <div class="zfsas-send-progress<?php echo zfsas_ops_send_job_progress_visible($queueJob) ? '' : ' idle'; ?><?php echo zfsas_ops_send_job_progress_active($queueJob) ? ' active' : ''; ?>">
                       <div class="zfsas-send-progress-track"><div class="zfsas-send-progress-fill" style="width: <?php echo (int) zfsas_ops_send_job_progress_percent($queueJob); ?>%;"></div></div>
-                      <div class="zfsas-send-progress-text"><?php echo (int) zfsas_ops_send_job_progress_percent($queueJob); ?>%</div>
+                      <div class="zfsas-send-progress-text"><?php echo zfsas_ops_send_job_progress_visible($queueJob) ? ((int) zfsas_ops_send_job_progress_percent($queueJob) . '%') : '&nbsp;'; ?></div>
                   </div>
                 </td>
                 <?php $queueDisplayMessage = zfsas_ops_send_job_display_message($queueJob); ?>
@@ -739,6 +770,8 @@ if ($isPostRequest) {
     var queueStream = null;
     var queueStreamErrorCount = 0;
     var queueStreamLastMessageAt = 0;
+    var queueStreamWatchdogTimer = null;
+    var queueStreamReconnectTimer = null;
 
   function escapeHtml(text) {
     return String(text)
@@ -885,7 +918,7 @@ if ($isPostRequest) {
     return '<span class="zfsas-send-queue-badge' + (isError ? ' error' : '') + '">' + escapeHtml(label) + '</span>';
   }
 
-    function queueProgressHtml(progress, active) {
+    function queueProgressHtml(progress, active, visible) {
       var percent = parseInt(progress, 10);
       if (isNaN(percent) || percent < 0) {
         percent = 0;
@@ -895,19 +928,50 @@ if ($isPostRequest) {
     }
 
       return ''
-        + '<div class="zfsas-send-progress' + (active ? ' active' : '') + '">'
+        + '<div class="zfsas-send-progress' + (visible ? '' : ' idle') + (active ? ' active' : '') + '">'
         + '<div class="zfsas-send-progress-track"><div class="zfsas-send-progress-fill" style="width: ' + percent + '%;"></div></div>'
-        + '<div class="zfsas-send-progress-text">' + percent + '%</div>'
+        + '<div class="zfsas-send-progress-text">' + (visible ? (percent + '%') : '&nbsp;') + '</div>'
         + '</div>';
     }
 
-    function queueStepHtml(job) {
-      var label = String(job && job.step ? job.step : '');
-      if (label === '') {
-        label = '-';
-      }
-      return '<span class="zfsas-send-step">' + escapeHtml(label) + '</span>';
+  function queueStepHtml(job) {
+    var label = String(job && job.step ? job.step : '');
+    if (label === '') {
+      label = '-';
     }
+    return '<span class="zfsas-send-step">' + escapeHtml(label) + '</span>';
+  }
+
+  function queuePathDisplay(path, maxLength) {
+    var value = String(path || '');
+    var limit = parseInt(maxLength, 10);
+    var segments;
+    var display;
+    var candidate;
+
+    if (isNaN(limit) || limit < 12) {
+      limit = 34;
+    }
+    if (value.length <= limit) {
+      return value;
+    }
+
+    segments = value.split('/');
+    display = segments.pop() || '';
+    while (segments.length > 0) {
+      candidate = segments.pop() + '/' + display;
+      if (('...' + candidate).length > limit) {
+        break;
+      }
+      display = candidate;
+    }
+
+    if (display === '') {
+      return '...' + value.slice(-(limit - 3));
+    }
+
+    return '...' + display;
+  }
 
   function buildQueueLogDownloadUrl(jobId) {
     var normalizedJobId = String(jobId || '').trim();
@@ -923,12 +987,12 @@ if ($isPostRequest) {
       var typeLabel = job.typeLabel || ((job.mode === 'manual_snapshot') ? 'Manual send' : 'Scheduled send');
       var html = '';
 
-      html += '<td title="' + escapeHtml(job.source || '') + '"><code class="zfsas-send-queue-path">' + escapeHtml(job.source || '') + '</code></td>';
-      html += '<td title="' + escapeHtml(job.destination || '') + '"><code class="zfsas-send-queue-path">' + escapeHtml(job.destination || '') + '</code></td>';
+      html += '<td title="' + escapeHtml(job.source || '') + '"><code class="zfsas-send-queue-path">' + escapeHtml(queuePathDisplay(job.source || '', 34)) + '</code></td>';
+      html += '<td title="' + escapeHtml(job.destination || '') + '"><code class="zfsas-send-queue-path">' + escapeHtml(queuePathDisplay(job.destination || '', 34)) + '</code></td>';
       html += '<td>' + queueBadge(typeLabel, false) + '</td>';
       html += '<td>' + queueBadge(job.stateLabel || job.state || 'Queued', job.state === 'failed') + '</td>';
       html += '<td>' + queueStepHtml(job) + '</td>';
-      html += '<td>' + queueProgressHtml(job.progress, !!job.progressActive) + '</td>';
+      html += '<td>' + queueProgressHtml(job.progress, !!job.progressActive, !!job.progressVisible) + '</td>';
       html += '<td title="' + escapeHtml(rawMessage) + '"><span class="zfsas-send-queue-message">' + escapeHtml(message) + '</span></td>';
       html += '<td><div class="zfsas-send-queue-actions">';
       if (job.canCancel) {
@@ -1030,6 +1094,14 @@ if ($isPostRequest) {
         queueStream.close();
         queueStream = null;
       }
+      if (queueStreamWatchdogTimer !== null) {
+        window.clearInterval(queueStreamWatchdogTimer);
+        queueStreamWatchdogTimer = null;
+      }
+      if (queueStreamReconnectTimer !== null) {
+        window.clearTimeout(queueStreamReconnectTimer);
+        queueStreamReconnectTimer = null;
+      }
     }
 
     function startQueuePolling() {
@@ -1041,7 +1113,20 @@ if ($isPostRequest) {
       queuePollTimer = window.setInterval(loadQueueJobs, 5000);
     }
 
-    function startQueueStreaming() {
+    function scheduleQueueStreamReconnect() {
+      queueStreamErrorCount += 1;
+      loadQueueJobs();
+      stopQueueStreaming();
+      if (queueStreamErrorCount >= 3) {
+        startQueuePolling();
+        return;
+      }
+      queueStreamReconnectTimer = window.setTimeout(function () {
+        startQueueStreaming(false);
+      }, Math.min(5000, 1000 * queueStreamErrorCount));
+    }
+
+    function startQueueStreaming(resetErrors) {
       if (!window.EventSource) {
         return false;
       }
@@ -1052,9 +1137,16 @@ if ($isPostRequest) {
       }
       stopQueueStreaming();
 
-      queueStreamErrorCount = 0;
+      if (resetErrors !== false) {
+        queueStreamErrorCount = 0;
+      }
       queueStreamLastMessageAt = Date.now();
+      loadQueueJobs();
       queueStream = new EventSource(queueStreamApiUrl + '?_=' + Date.now());
+      queueStream.onopen = function () {
+        queueStreamLastMessageAt = Date.now();
+        loadQueueJobs();
+      };
       queueStream.addEventListener('queue', function (event) {
         var payload;
         try {
@@ -1070,15 +1162,20 @@ if ($isPostRequest) {
         queueStreamErrorCount = 0;
         queueStreamLastMessageAt = Date.now();
       });
+      queueStream.addEventListener('heartbeat', function () {
+        queueStreamLastMessageAt = Date.now();
+      });
       queueStream.onerror = function () {
-        if (Date.now() - queueStreamLastMessageAt < 10000) {
+        if (Date.now() - queueStreamLastMessageAt < 3000) {
           return;
         }
-        queueStreamErrorCount += 1;
-        if (queueStreamErrorCount >= 3) {
-          startQueuePolling();
-        }
+        scheduleQueueStreamReconnect();
       };
+      queueStreamWatchdogTimer = window.setInterval(function () {
+        if (Date.now() - queueStreamLastMessageAt > 30000) {
+          scheduleQueueStreamReconnect();
+        }
+      }, 5000);
       return true;
     }
 

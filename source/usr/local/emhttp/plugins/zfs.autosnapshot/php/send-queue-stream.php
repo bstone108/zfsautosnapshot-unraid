@@ -55,9 +55,10 @@ while (!connection_aborted()) {
         $lastHash = $hash;
         $lastHeartbeat = $now;
     } elseif (($now - $lastHeartbeat) >= 15) {
-        echo ": heartbeat\n\n";
-        @ob_flush();
-        flush();
+        zfsas_send_stream_emit('heartbeat', [
+            'ok' => true,
+            'ts' => $now,
+        ]);
         $lastHeartbeat = $now;
     }
 

@@ -65,6 +65,7 @@ RUN_STARTED_AT_EPOCH=0
 RUN_STARTED_AT_HUMAN=""
 RUN_MODE="normal"
 RUN_DATASET_COUNT=0
+RUN_ACTIVE_DATASET_COUNT=0
 RUN_POOL_COUNT=0
 RUN_ERROR_CONTEXT=""
 RUN_USER_ERROR=""
@@ -83,6 +84,7 @@ COUNT_DELETED_SPACE=0
 COUNT_DELETED_ZERO_CHANGE=0
 COUNT_SKIPPED_HELD=0
 COUNT_SKIPPED_NON_RECLAIMABLE=0
+COUNT_SKIPPED_MISSING_DATASETS=0
 COUNT_LOW_SPACE_UNRESOLVED=0
 
 # shellcheck disable=SC2034  # tracked through indirect helpers
@@ -91,6 +93,8 @@ ACTIVE_LEASE_SNAPSHOTS=$'\n'
 SKIPPED_HELD_SNAPSHOTS=$'\n'
 # shellcheck disable=SC2034  # tracked through indirect helpers
 SKIPPED_NON_RECLAIMABLE_SNAPSHOTS=$'\n'
+# shellcheck disable=SC2034  # tracked through indirect helpers
+SKIPPED_MISSING_DATASETS=$'\n'
 # shellcheck disable=SC2034  # tracked through indirect helpers
 LOW_SPACE_UNRESOLVED_POOLS=$'\n'
 # shellcheck disable=SC2034  # used through nameref/default helper path
@@ -695,6 +699,17 @@ record_skipped_non_reclaimable_snapshot() {
 	return 1
 }
 
+record_skipped_missing_dataset() {
+	local dataset="$1"
+
+	if remember_newline_entry SKIPPED_MISSING_DATASETS "$dataset"; then
+		COUNT_SKIPPED_MISSING_DATASETS=$((COUNT_SKIPPED_MISSING_DATASETS + 1))
+		return 0
+	fi
+
+	return 1
+}
+
 remember_protected_latest_snapshot() {
 	local snap="$1"
 	remember_newline_entry PROTECTED_LATEST_SNAPSHOTS "$snap" >/dev/null 2>&1 || true
@@ -1100,6 +1115,11 @@ get_dataset_avail() {
 	[[ "$value" =~ ^[0-9]+$ ]] && echo "$value" || echo ""
 }
 
+dataset_exists() {
+	local dataset="$1"
+	zfs list -H -o name -t filesystem,volume "$dataset" >/dev/null 2>&1
+}
+
 get_dataset_numeric_property() {
 	local dataset="$1"
 	local property="$2"
@@ -1452,6 +1472,7 @@ write_run_summary() {
 		fi
 
 		echo "Datasets configured: ${RUN_DATASET_COUNT}"
+		echo "Datasets active this run: ${RUN_ACTIVE_DATASET_COUNT}"
 		echo "Pools evaluated: ${RUN_POOL_COUNT}"
 		echo
 		echo "${created_label}: ${COUNT_CREATED}"
@@ -1463,7 +1484,17 @@ write_run_summary() {
 		echo "  Deleted as zero-change housekeeping: ${COUNT_DELETED_ZERO_CHANGE}"
 		echo "Skipped because held or leased: ${COUNT_SKIPPED_HELD}"
 			echo "Skipped because snapshot had no immediate reclaim path: ${COUNT_SKIPPED_NON_RECLAIMABLE}"
+		echo "Configured datasets skipped because missing: ${COUNT_SKIPPED_MISSING_DATASETS}"
 		echo "Datasets left below target because reclaim is blocked: ${COUNT_LOW_SPACE_UNRESOLVED}"
+
+		if ((COUNT_SKIPPED_MISSING_DATASETS > 0)); then
+			echo
+			echo "Missing configured datasets:"
+			while IFS= read -r dataset; do
+				[[ -n "$dataset" ]] || continue
+				echo "  ${dataset}"
+			done <<<"$(emit_newline_entries "$SKIPPED_MISSING_DATASETS")"
+		fi
 
 		if ((COUNT_LOW_SPACE_UNRESOLVED > 0)); then
 			echo
@@ -1749,6 +1780,7 @@ done
 if ((${#pairs[@]} == 0)); then
 	fail_config "No datasets are configured." "Select at least one dataset in settings, then save."
 fi
+RUN_DATASET_COUNT="${#pairs[@]}"
 
 NOW_EPOCH="$(date +%s)"
 KEEP_ALL_FOR_SECONDS=$((KEEP_ALL_FOR_DAYS * 86400))
@@ -1765,6 +1797,26 @@ log "Post-delete recheck(seconds): wait=${POST_DELETE_RECHECK_WAIT_SECONDS} inte
 log "Logs: debug='${LOG_FILE}' summary='${SUMMARY_LOG_FILE}'"
 if [[ -f "$LEASE_STATE_FILE" ]]; then
 	log "Leases: active snapshot-manager leases loaded from '${LEASE_STATE_FILE}'"
+fi
+
+declare -a active_pairs=()
+for pair in "${pairs[@]}"; do
+	ds="${pair%:*}"
+	if dataset_exists "$ds"; then
+		active_pairs+=("$pair")
+		continue
+	fi
+
+	log "Configured dataset '${ds}' no longer exists; skipping it for this run."
+	record_skipped_missing_dataset "$ds" >/dev/null 2>&1 || true
+done
+pairs=("${active_pairs[@]}")
+RUN_ACTIVE_DATASET_COUNT="${#pairs[@]}"
+
+if ((${#pairs[@]} == 0)); then
+	log "No configured datasets currently exist; nothing to snapshot."
+	log "Snapshot management complete."
+	exit 0
 fi
 
 declare -a pool_names=()
@@ -1787,9 +1839,8 @@ for pair in "${pairs[@]}"; do
 	fi
 done
 
-RUN_DATASET_COUNT="${#pairs[@]}"
 RUN_POOL_COUNT="${#pool_names[@]}"
-log "Prepared ${RUN_DATASET_COUNT} dataset entries across ${RUN_POOL_COUNT} pool(s)."
+log "Prepared ${RUN_ACTIVE_DATASET_COUNT} active dataset entries across ${RUN_POOL_COUNT} pool(s)."
 
 # Phase B: low-space cleanup using whichever capacity constraints currently limit
 # the low dataset. If multiple constraints tie, any dataset that can improve any

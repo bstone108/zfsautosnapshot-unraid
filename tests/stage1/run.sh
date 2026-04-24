@@ -209,6 +209,21 @@ snapshot_dataset() {
   printf '%s\n' "${snap%@*}"
 }
 
+dataset_exists() {
+  local dataset="$1"
+
+  if [[ -s "$datasets_file" ]]; then
+    awk -F '\t' -v dataset="$dataset" '$1 == dataset { found = 1 } END { exit(found ? 0 : 1) }' "$datasets_file"
+    return $?
+  fi
+
+  if awk -F '\t' -v dataset="$dataset" '$2 == dataset || index($2, dataset "/") == 1 { found = 1 } END { exit(found ? 0 : 1) }' "$snaps_file"; then
+    return 0
+  fi
+
+  awk -F '\t' -v dataset="$dataset" '$1 == dataset { found = 1 } END { exit(found ? 0 : 1) }' "$pools_file"
+}
+
 update_pool_avail() {
   local pool="$1"
   local delta="$2"
@@ -262,6 +277,15 @@ case "$cmd" in
     ;;
   list)
     args=" $* "
+    if [[ "$args" == *" -o name "* && "$args" == *" -t filesystem,volume "* ]]; then
+      dataset="${@: -1}"
+      if dataset_exists "$dataset"; then
+        printf '%s\n' "$dataset"
+        exit 0
+      fi
+      exit 1
+    fi
+
     if [[ "$args" == *" -o avail "* ]]; then
       dataset="${@: -1}"
       apply_pending_reclaims
@@ -326,6 +350,10 @@ case "$cmd" in
   snapshot)
     snap="${1:?missing snapshot name}"
     dataset="$(snapshot_dataset "$snap")"
+    if ! dataset_exists "$dataset"; then
+      echo "cannot open '${dataset}': dataset does not exist" >&2
+      exit 1
+    fi
     creation="${MOCK_NOW_EPOCH:-2000000000}"
     printf "%s\t%s\t%s\t0\t0\t0\t0\n" "$snap" "$dataset" "$creation" >> "$snaps_file"
     ;;
@@ -664,6 +692,28 @@ EOF
   assert_file_contains "${case_dir}/log/summary.log" "Datasets left below target because reclaim is blocked: 1"
 }
 
+test_missing_configured_dataset_is_skipped() {
+  local case_dir
+  case_dir="$(new_case missing_configured_dataset)"
+
+  write_config "${case_dir}" "tank/missing:100G,tank/live:100G"
+  cat > "${case_dir}/state/pools.tsv" <<'EOF'
+tank	500000000000	0	1000000000000	500000000000	50%	ONLINE
+EOF
+  cat > "${case_dir}/state/datasets.tsv" <<'EOF'
+tank	500000000000	0	0	0	0
+tank/live	500000000000	0	0	0	0
+EOF
+
+  run_case "${case_dir}"
+
+  assert_file_contains "${case_dir}/stdout.log" "Configured dataset 'tank/missing' no longer exists; skipping it for this run."
+  assert_file_contains "${case_dir}/stdout.log" "Creating snapshot: tank/live@autosnapshot-"
+  assert_file_not_contains "${case_dir}/stdout.log" "Creating snapshot: tank/missing@autosnapshot-"
+  assert_file_contains "${case_dir}/log/summary.log" "Configured datasets skipped because missing: 1"
+  assert_file_contains "${case_dir}/log/summary.log" "Result: Success"
+}
+
 main() {
   test_zero_change_housekeeping
   echo "PASS: zero-change housekeeping"
@@ -694,6 +744,9 @@ main() {
 
   test_low_space_never_deletes_newest_snapshot
   echo "PASS: low-space never deletes newest snapshot"
+
+  test_missing_configured_dataset_is_skipped
+  echo "PASS: missing configured datasets are skipped"
 
   echo "All Stage 1 tests passed."
 }

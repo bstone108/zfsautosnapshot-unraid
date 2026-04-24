@@ -43,6 +43,7 @@ SEND_LOG_ARCHIVE_MAX_BYTES="${SEND_LOG_ARCHIVE_MAX_BYTES:-4194304}"
 
 DEFAULT_SEND_SNAPSHOT_PREFIX="zfs-send-"
 DEFAULT_SEND_MAX_PARALLEL="1"
+DEFAULT_SEND_PREP_EXTRA_WORKERS="4"
 DEFAULT_SEND_KEEP_ALL_FOR_DAYS="14"
 DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS="30"
 DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS="183"
@@ -54,6 +55,7 @@ DELETE_QUEUE_IDLE_TIMEOUT_SECONDS="${DELETE_QUEUE_IDLE_TIMEOUT_SECONDS:-30}"
 
 SEND_SNAPSHOT_PREFIX="$DEFAULT_SEND_SNAPSHOT_PREFIX"
 SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
+SEND_PREP_EXTRA_WORKERS="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
 SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
 SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
 SEND_KEEP_WEEKLY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS"
@@ -593,6 +595,7 @@ load_send_config() {
 
   SEND_SNAPSHOT_PREFIX="$DEFAULT_SEND_SNAPSHOT_PREFIX"
   SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
+  SEND_PREP_EXTRA_WORKERS="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
   SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
   SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
   SEND_KEEP_WEEKLY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS"
@@ -609,7 +612,7 @@ load_send_config() {
       raw="${BASH_REMATCH[2]}"
       value="$(parse_config_value "$raw")"
       case "$key" in
-        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_JOBS)
+        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_JOBS)
           printf -v "$key" '%s' "$value"
           ;;
       esac
@@ -1534,10 +1537,10 @@ send_worker_lock_count() {
 }
 
 send_worker_slot_available() {
-  local count max_workers
+  local count max_workers="${1:-}"
   count="$(send_worker_lock_count)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
-  max_workers="$SEND_MAX_PARALLEL"
+  [[ -n "$max_workers" ]] || max_workers="$SEND_MAX_PARALLEL"
   [[ "$max_workers" =~ ^[0-9]+$ ]] || max_workers="$DEFAULT_SEND_MAX_PARALLEL"
   (( max_workers >= 1 )) || max_workers=1
   (( count < max_workers ))
@@ -2230,14 +2233,69 @@ format_constraint_list() {
   printf '%s' "$joined"
 }
 
+dd_status_progress_supported() {
+  local help
+  command -v dd >/dev/null 2>&1 || return 1
+  help="$(dd --help 2>&1 || true)"
+  [[ "$help" == *"status="* && "$help" == *"progress"* ]]
+}
+
+report_zfs_send_progress_bytes() {
+  local copied_bytes="$1"
+  local total_bytes="$2"
+  local start_percent="$3"
+  local end_percent="$4"
+  local span percent
+
+  [[ "$copied_bytes" =~ ^[0-9]+$ ]] || return 0
+  [[ "$total_bytes" =~ ^[0-9]+$ ]] || return 0
+  (( total_bytes > 0 )) || return 0
+  [[ "$start_percent" =~ ^[0-9]+$ ]] || start_percent=0
+  [[ "$end_percent" =~ ^[0-9]+$ ]] || end_percent=99
+  (( end_percent > start_percent )) || end_percent=$((start_percent + 1))
+
+  span=$((end_percent - start_percent))
+  percent=$((start_percent + (copied_bytes * span / total_bytes)))
+  (( percent < start_percent )) && percent="$start_percent"
+  (( percent > end_percent )) && percent="$end_percent"
+
+  if declare -F set_job_progress >/dev/null 2>&1; then
+    set_job_progress "sending" "$percent" "Sending."
+  fi
+}
+
+monitor_dd_zfs_send_progress() {
+  local total_bytes="$1"
+  local start_percent="$2"
+  local end_percent="$3"
+  local line copied_bytes percent last_percent=-1
+
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*([0-9]+)[[:space:]]+bytes ]] || continue
+    copied_bytes="${BASH_REMATCH[1]}"
+    [[ "$total_bytes" =~ ^[0-9]+$ && "$total_bytes" != "0" ]] || continue
+    percent=$((start_percent + (copied_bytes * (end_percent - start_percent) / total_bytes)))
+    (( percent < start_percent )) && percent="$start_percent"
+    (( percent > end_percent )) && percent="$end_percent"
+    (( percent == last_percent )) && continue
+    last_percent="$percent"
+    report_zfs_send_progress_bytes "$copied_bytes" "$total_bytes" "$start_percent" "$end_percent"
+  done < <(tr '\r' '\n')
+}
+
 run_pipeline_with_status() {
   local description="$1"
   local base_snapshot="$2"
   local snapshot="$3"
   local destination="$4"
+  local progress_total_bytes="${5:-0}"
+  local progress_start_percent="${6:-0}"
+  local progress_end_percent="${7:-99}"
   local pipeline_rc=0
   local send_rc=0
+  local meter_rc=0
   local receive_rc=0
+  local progress_supported=0
 
   is_valid_snapshot_name "$snapshot" || {
     log "Refusing pipeline for invalid snapshot name: $snapshot"
@@ -2255,22 +2313,42 @@ run_pipeline_with_status() {
   fi
 
   log "$description"
+  if [[ "$progress_total_bytes" =~ ^[0-9]+$ ]] && (( progress_total_bytes > 0 )) && dd_status_progress_supported; then
+    progress_supported=1
+  fi
+
   if [[ -n "$base_snapshot" ]]; then
-    zfs send -I "$base_snapshot" "$snapshot" | zfs receive -uF "$destination"
-    pipeline_rc=$?
-    send_rc=${PIPESTATUS[0]:-0}
-    receive_rc=${PIPESTATUS[1]:-0}
+    if (( progress_supported == 1 )); then
+      zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | zfs receive -uF "$destination"
+      pipeline_rc=$?
+      send_rc=${PIPESTATUS[0]:-0}
+      meter_rc=${PIPESTATUS[1]:-0}
+      receive_rc=${PIPESTATUS[2]:-0}
+    else
+      zfs send -I "$base_snapshot" "$snapshot" | zfs receive -uF "$destination"
+      pipeline_rc=$?
+      send_rc=${PIPESTATUS[0]:-0}
+      receive_rc=${PIPESTATUS[1]:-0}
+    fi
     if (( pipeline_rc != 0 )); then
-      log "Send pipeline failed: mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} receive_exit=${receive_rc}"
+      log "Send pipeline failed: mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
       return 1
     fi
   else
-    zfs send "$snapshot" | zfs receive -uF "$destination"
-    pipeline_rc=$?
-    send_rc=${PIPESTATUS[0]:-0}
-    receive_rc=${PIPESTATUS[1]:-0}
+    if (( progress_supported == 1 )); then
+      zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | zfs receive -uF "$destination"
+      pipeline_rc=$?
+      send_rc=${PIPESTATUS[0]:-0}
+      meter_rc=${PIPESTATUS[1]:-0}
+      receive_rc=${PIPESTATUS[2]:-0}
+    else
+      zfs send "$snapshot" | zfs receive -uF "$destination"
+      pipeline_rc=$?
+      send_rc=${PIPESTATUS[0]:-0}
+      receive_rc=${PIPESTATUS[1]:-0}
+    fi
     if (( pipeline_rc != 0 )); then
-      log "Send pipeline failed: mode=full snapshot=${snapshot} destination=${destination} send_exit=${send_rc} receive_exit=${receive_rc}"
+      log "Send pipeline failed: mode=full snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
       return 1
     fi
   fi

@@ -5,6 +5,13 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.08 (Testing Branch Only)
+
+- Fixed `ZFS Send` queue streaming so newly fanned-out child jobs appear without manually refreshing the page, with stream heartbeat/reconnect handling and polling fallback still available.
+- Changed the `ZFS Send` queue progress column so it only shows an active progress bar during the real send stage, while keeping the column width stable during preparation, waiting, verification, and cleanup.
+- Added byte-based `ZFS Send` progress updates when the platform supports `dd status=progress`, and allowed extra send workers to prepare snapshots and calculate space needs without increasing the configured number of actual parallel transfers.
+- Fixed autosnapshot runs so configured datasets that were deleted are skipped and reported instead of causing the whole run to fail.
+
 ### 2026.04.24.07 (Testing Branch Only)
 
 - Added a `Step` column to the `ZFS Send` queue so active rows show progress through the normal job flow as values like `3/7`.

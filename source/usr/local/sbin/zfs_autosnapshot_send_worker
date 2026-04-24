@@ -489,15 +489,16 @@ run_pipeline_with_space_reservation() {
   local snapshot="$3"
   local destination="$4"
   local send_progress="${5:-}"
-  local rc
+  local rc required_bytes
 
   estimate_destination_space_for_current_send "$destination" "$base_snapshot" "$snapshot" || return 1
   wait_for_pool_prep_for_current_job || return $?
   reserve_destination_space_for_current_send "$destination" "$base_snapshot" "$snapshot" || return $?
+  required_bytes="$(job_get job SPACE_REQUIRED_BYTES 0)"
   if [[ -n "$send_progress" ]]; then
-    set_job_progress "sending" "$send_progress" "Sending."
+    set_job_progress "sending" "0" "Sending."
   fi
-  if run_pipeline_with_status "$description" "$base_snapshot" "$snapshot" "$destination"; then
+  if run_pipeline_with_status "$description" "$base_snapshot" "$snapshot" "$destination" "$required_bytes" 0 99; then
     rc=0
   else
     rc=$?
