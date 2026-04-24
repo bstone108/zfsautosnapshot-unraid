@@ -2747,7 +2747,7 @@ enqueue_scheduled_send_jobs_due() {
 
 prune_old_jobs() {
   local keep_completed=100
-  local now_epoch purge_after state file_mtime
+  local now_epoch purge_after state file_mtime action prep_job_id
   local file
   local -A job=()
   local complete_files=()
@@ -2760,6 +2760,16 @@ prune_old_jobs() {
     state="$(job_get job STATE)"
     case "$state" in
       complete|skipped)
+        action="$(job_get job JOB_ACTION)"
+        if [[ "$action" == "pool_prep" ]]; then
+          prep_job_id="$(job_get job JOB_ID)"
+          if send_pool_prep_has_active_dependents "$prep_job_id"; then
+            continue
+          fi
+          rm -f "$file" >/dev/null 2>&1 || true
+          continue
+        fi
+
         purge_after="$(job_get job PURGE_AFTER_EPOCH 0)"
         if [[ "$purge_after" =~ ^[0-9]+$ ]] && (( purge_after > 0 )) && (( purge_after <= now_epoch )); then
           rm -f "$file" >/dev/null 2>&1 || true
@@ -2785,6 +2795,27 @@ prune_old_jobs() {
   for file in "${complete_files[@]:0:count}"; do
     rm -f "$file" >/dev/null 2>&1 || true
   done
+}
+
+send_pool_prep_has_active_dependents() {
+  local prep_job_id="$1"
+  local file state
+  local -A dependent_job=()
+
+  [[ -n "$prep_job_id" ]] || return 1
+  while IFS= read -r file; do
+    # shellcheck disable=SC2034
+    dependent_job=()
+    job_load "$file" dependent_job || continue
+    [[ "$(job_get dependent_job JOB_TYPE)" == "send" ]] || continue
+    [[ "$(job_get dependent_job PREP_JOB_ID)" == "$prep_job_id" ]] || continue
+    state="$(job_get dependent_job STATE)"
+    if job_state_is_active "$state"; then
+      return 0
+    fi
+  done < <(list_job_files)
+
+  return 1
 }
 
 retry_delay_for_attempt() {

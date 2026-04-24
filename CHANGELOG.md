@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.04 (Testing Branch Only)
+
+- Changed completed destination-pool prep rows in the `ZFS Send` queue so they disappear from the WebUI immediately instead of hanging around while dependent child sends finish.
+- Added cleanup for completed pool-prep marker files: they are kept only while queued, running, or retry-wait send jobs still reference that prep run, then removed automatically so old markers cannot interfere with future runs.
+
 ### 2026.04.24.03 (Testing Branch Only)
 
 - Changed scheduled `ZFS Send` prep so each destination pool now gets one shared prep stage for managed send targets instead of every due job running its own retention and low-space cleanup pass.

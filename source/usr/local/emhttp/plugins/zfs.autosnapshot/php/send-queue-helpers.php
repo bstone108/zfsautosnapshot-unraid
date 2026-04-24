@@ -566,6 +566,15 @@ function zfsas_ops_purge_expired_jobs()
             continue;
         }
 
+        if ((string) ($job['JOB_ACTION'] ?? '') === 'pool_prep') {
+            $prepJobId = (string) ($job['JOB_ID'] ?? '');
+            if ($prepJobId !== '' && zfsas_ops_pool_prep_has_active_dependents($prepJobId, $files)) {
+                continue;
+            }
+            @unlink($path);
+            continue;
+        }
+
         $purgeAfter = (int) ($job['PURGE_AFTER_EPOCH'] ?? 0);
         if ($purgeAfter > 0 && $purgeAfter <= $now) {
             @unlink($path);
@@ -579,6 +588,39 @@ function zfsas_ops_purge_expired_jobs()
             }
         }
     }
+}
+
+function zfsas_ops_pool_prep_has_active_dependents($prepJobId, $files = null)
+{
+    $prepJobId = (string) $prepJobId;
+    if ($prepJobId === '') {
+        return false;
+    }
+
+    if (!is_array($files)) {
+        $files = glob(zfsas_ops_jobs_dir() . '/*.job');
+    }
+    if (!is_array($files)) {
+        return false;
+    }
+
+    foreach ($files as $path) {
+        $job = zfsas_ops_parse_job_file($path);
+        if (!is_array($job)) {
+            continue;
+        }
+        if ((string) ($job['JOB_TYPE'] ?? '') !== 'send') {
+            continue;
+        }
+        if ((string) ($job['PREP_JOB_ID'] ?? '') !== $prepJobId) {
+            continue;
+        }
+        if (in_array((string) ($job['STATE'] ?? ''), ['queued', 'running', 'retry_wait'], true)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 function zfsas_ops_send_job_progress_percent($job)
@@ -950,6 +992,12 @@ function zfsas_ops_find_matching_manual_send_job($snapshot, $destination)
 function zfsas_ops_recent_send_jobs($limit = 100)
 {
     $jobs = zfsas_ops_list_jobs(['send']);
+    $jobs = array_values(array_filter($jobs, function ($job) {
+        if ((string) ($job['JOB_ACTION'] ?? '') !== 'pool_prep') {
+            return true;
+        }
+        return !in_array((string) ($job['STATE'] ?? ''), ['complete', 'skipped'], true);
+    }));
     usort($jobs, function ($a, $b) {
         $leftSort = (int) ($a['QUEUE_SORT'] ?? PHP_INT_MAX);
         $rightSort = (int) ($b['QUEUE_SORT'] ?? PHP_INT_MAX);
