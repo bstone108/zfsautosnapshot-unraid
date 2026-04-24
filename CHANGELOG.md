@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.02 (Testing Branch Only)
+
+- Sped up `ZFS Send` recursive prep by caching destination dataset lists, protected send checkpoint names, and snapshot cleanup bookkeeping during each worker pass.
+- Sped up recursive child-job fan-out by avoiding a full send-queue scan for every child job and writing generated child jobs in a fixed key order.
+- Added send-worker timing log lines for retention planning, low-space planning, and child-job fan-out so future slow prep stages are easier to pinpoint.
+
 ### 2026.04.24.01 (Testing Branch Only)
 
 - Marked `Dataset Migrator` as feature-stable and removed its unfinished preview warning from the plugin UI while leaving the unfinished warnings in place for `Recovery Tools` and `Snapshot Manager`.

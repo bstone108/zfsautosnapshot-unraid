@@ -10,6 +10,24 @@ CURRENT_JOB_ID=""
 CURRENT_JOB_PATH=""
 CURRENT_ACTIVE_DATASETS_FILE=""
 CURRENT_PREP_POOL=""
+SEND_JOB_ID_CACHE_LOADED=0
+declare -A SEND_JOB_ID_PATH_CACHE=()
+
+SEND_CHILD_JOB_WRITE_KEYS=(
+  JOB_ID JOB_TYPE JOB_MODE JOB_ACTION STATE PHASE REQUESTED_EPOCH REQUESTED_AT QUEUE_SORT
+  WINDOW_KEY SCHEDULE_JOB_ID PARENT_RUN_ID MEMBER_INDEX SOURCE_ROOT DESTINATION_ROOT INCLUDE_CHILDREN
+  FREQUENCY THRESHOLD THRESHOLD_BYTES SNAPSHOT_PREFIX_BASE SNAPSHOT_PREFIX SOURCE_SNAPSHOT
+  SOURCE_SNAPSHOT_NAME PREVIOUS_SNAPSHOT_NAME ATTEMPT_COUNT RETRY_AT LAST_ERROR LAST_MESSAGE
+  WORKER_PID PROGRESS_PERCENT MEMBER_COUNT MEMBER_0_SOURCE MEMBER_0_DESTINATION MEMBER_0_SNAPSHOT
+  COMPLETES_SCHEDULE_WINDOW
+)
+
+SEND_FINALIZE_JOB_WRITE_KEYS=(
+  JOB_ID JOB_TYPE JOB_MODE JOB_ACTION STATE PHASE REQUESTED_EPOCH REQUESTED_AT QUEUE_SORT
+  WINDOW_KEY SCHEDULE_JOB_ID PARENT_RUN_ID SOURCE_ROOT DESTINATION_ROOT SNAPSHOT_PREFIX
+  SOURCE_SNAPSHOT_NAME PREVIOUS_SNAPSHOT_NAME ATTEMPT_COUNT RETRY_AT LAST_ERROR LAST_MESSAGE
+  WORKER_PID PROGRESS_PERCENT COMPLETES_SCHEDULE_WINDOW
+)
 
 cleanup() {
   local exit_code="$?"
@@ -262,23 +280,69 @@ find_existing_job_path_by_id() {
   return 1
 }
 
+load_existing_send_job_id_cache() {
+  local file job_id
+  # shellcheck disable=SC2034
+  local -A existing_job=()
+
+  (( SEND_JOB_ID_CACHE_LOADED == 1 )) && return 0
+
+  SEND_JOB_ID_PATH_CACHE=()
+  while IFS= read -r file; do
+    # shellcheck disable=SC2034
+    existing_job=()
+    job_load "$file" existing_job || continue
+    job_id="$(job_get existing_job JOB_ID)"
+    [[ -n "$job_id" ]] || continue
+    SEND_JOB_ID_PATH_CACHE["$job_id"]="$file"
+  done < <(list_job_files)
+
+  SEND_JOB_ID_CACHE_LOADED=1
+}
+
+write_send_job_file() {
+  local path="$1"
+  local assoc_name="$2"
+  # shellcheck disable=SC2178
+  local -n payload_ref="$assoc_name"
+
+  case "${payload_ref[JOB_ACTION]:-}" in
+    send_member)
+      job_write_ordered "$path" payload_ref "${SEND_CHILD_JOB_WRITE_KEYS[@]}"
+      ;;
+    finalize)
+      job_write_ordered "$path" payload_ref "${SEND_FINALIZE_JOB_WRITE_KEYS[@]}"
+      ;;
+    *)
+      job_write "$path" payload_ref
+      ;;
+  esac
+}
+
 ensure_send_job_file() {
   local assoc_name="$1"
   local requested_epoch="$2"
-  # shellcheck disable=SC2034
-  local path existing_path job_id
+  local path job_id
   # shellcheck disable=SC2178
   local -n payload_ref="$assoc_name"
 
   job_id="${payload_ref[JOB_ID]:-}"
   [[ -n "$job_id" ]] || return 1
 
-  if find_existing_job_path_by_id "$job_id" existing_path; then
+  path="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "$job_id")"
+  if [[ -f "$path" ]]; then
     return 0
   fi
 
-  path="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "$job_id")"
-  job_write "$path" payload_ref
+  load_existing_send_job_id_cache
+  if [[ -n "${SEND_JOB_ID_PATH_CACHE[$job_id]:-}" ]]; then
+    return 0
+  fi
+
+  [[ -f "$path" ]] && return 0
+  write_send_job_file "$path" payload_ref || return 1
+  SEND_JOB_ID_PATH_CACHE["$job_id"]="$path"
+  return 0
 }
 
 prepare_scheduled_job_snapshot() {
@@ -387,11 +451,13 @@ build_resume_members_for_current_job() {
 
 queue_child_send_jobs() {
   local member_count requested_epoch base_sort snapshot_basename schedule_job_id prefix previous_basename run_root_id
-  local index source_dataset destination_dataset snapshot sort_key child_job_id finalize_job_id
+  local requested_at window_key frequency threshold threshold_bytes snapshot_prefix_base source_root destination_root completes_schedule_window
+  local index source_dataset destination_dataset snapshot sort_key child_job_id finalize_job_id fanout_started fanout_elapsed
   # shellcheck disable=SC2034
   local -A queued_job=()
   local resume_only=0
 
+  fanout_started="$(date +%s)"
   member_count="$(job_get job MEMBER_COUNT 0)"
   [[ "$member_count" =~ ^[0-9]+$ ]] || member_count=0
   resume_only="$(job_get job RESUME_ONLY 0)"
@@ -408,6 +474,15 @@ queue_child_send_jobs() {
   prefix="$(job_get job SNAPSHOT_PREFIX)"
   previous_basename="$(job_get job PREVIOUS_SNAPSHOT_NAME)"
   run_root_id="$(job_get job JOB_ID)"
+  requested_at="$(job_get job REQUESTED_AT)"
+  window_key="$(job_get job WINDOW_KEY)"
+  frequency="$(job_get job FREQUENCY)"
+  threshold="$(job_get job THRESHOLD)"
+  threshold_bytes="$(job_get job THRESHOLD_BYTES)"
+  snapshot_prefix_base="$(job_get job SNAPSHOT_PREFIX_BASE)"
+  source_root="$(job_get job SOURCE_ROOT)"
+  destination_root="$(job_get job DESTINATION_ROOT)"
+  completes_schedule_window="$(job_get job COMPLETES_SCHEDULE_WINDOW 1)"
 
   for ((index = 0; index < member_count; index++)); do
     source_dataset="$(job_get job MEMBER_${index}_SOURCE)"
@@ -425,19 +500,19 @@ queue_child_send_jobs() {
     queued_job[STATE]="queued"
     queued_job[PHASE]="queued"
     queued_job[REQUESTED_EPOCH]="$requested_epoch"
-    queued_job[REQUESTED_AT]="$(job_get job REQUESTED_AT)"
+    queued_job[REQUESTED_AT]="$requested_at"
     queued_job[QUEUE_SORT]="$sort_key"
-    queued_job[WINDOW_KEY]="$(job_get job WINDOW_KEY)"
+    queued_job[WINDOW_KEY]="$window_key"
     queued_job[SCHEDULE_JOB_ID]="$schedule_job_id"
     queued_job[PARENT_RUN_ID]="$run_root_id"
     queued_job[MEMBER_INDEX]="$index"
     queued_job[SOURCE_ROOT]="$source_dataset"
     queued_job[DESTINATION_ROOT]="$destination_dataset"
     queued_job[INCLUDE_CHILDREN]="0"
-    queued_job[FREQUENCY]="$(job_get job FREQUENCY)"
-    queued_job[THRESHOLD]="$(job_get job THRESHOLD)"
-    queued_job[THRESHOLD_BYTES]="$(job_get job THRESHOLD_BYTES)"
-    queued_job[SNAPSHOT_PREFIX_BASE]="$(job_get job SNAPSHOT_PREFIX_BASE)"
+    queued_job[FREQUENCY]="$frequency"
+    queued_job[THRESHOLD]="$threshold"
+    queued_job[THRESHOLD_BYTES]="$threshold_bytes"
+    queued_job[SNAPSHOT_PREFIX_BASE]="$snapshot_prefix_base"
     queued_job[SNAPSHOT_PREFIX]="$prefix"
     queued_job[SOURCE_SNAPSHOT]="$snapshot"
     queued_job[SOURCE_SNAPSHOT_NAME]="$snapshot_basename"
@@ -469,13 +544,13 @@ queue_child_send_jobs() {
   queued_job[STATE]="queued"
   queued_job[PHASE]="queued"
   queued_job[REQUESTED_EPOCH]="$requested_epoch"
-  queued_job[REQUESTED_AT]="$(job_get job REQUESTED_AT)"
+  queued_job[REQUESTED_AT]="$requested_at"
   queued_job[QUEUE_SORT]="$(finalize_sort_key "$base_sort")"
-  queued_job[WINDOW_KEY]="$(job_get job WINDOW_KEY)"
+  queued_job[WINDOW_KEY]="$window_key"
   queued_job[SCHEDULE_JOB_ID]="$schedule_job_id"
   queued_job[PARENT_RUN_ID]="$run_root_id"
-  queued_job[SOURCE_ROOT]="$(job_get job SOURCE_ROOT)"
-  queued_job[DESTINATION_ROOT]="$(job_get job DESTINATION_ROOT)"
+  queued_job[SOURCE_ROOT]="$source_root"
+  queued_job[DESTINATION_ROOT]="$destination_root"
   queued_job[SNAPSHOT_PREFIX]="$prefix"
   queued_job[SOURCE_SNAPSHOT_NAME]="$snapshot_basename"
   queued_job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
@@ -490,9 +565,11 @@ queue_child_send_jobs() {
   queued_job[WORKER_PID]=""
   queued_job[PROGRESS_PERCENT]="5"
   # shellcheck disable=SC2034
-  queued_job[COMPLETES_SCHEDULE_WINDOW]="$(job_get job COMPLETES_SCHEDULE_WINDOW 1)"
+  queued_job[COMPLETES_SCHEDULE_WINDOW]="$completes_schedule_window"
   ensure_send_job_file queued_job "$requested_epoch" || return 1
 
+  fanout_elapsed=$(( $(date +%s) - fanout_started ))
+  log "Queued ${member_count} child send job(s) for ${run_root_id} in ${fanout_elapsed}s"
   return 0
 }
 
@@ -768,6 +845,7 @@ process_finalize_job() {
 
 run_scheduled_prepare_phase() {
   local schedule_job_id dest_root dest_pool capacity_dataset planned_effective threshold
+  local retention_started retention_elapsed space_started space_elapsed
   # shellcheck disable=SC2034
   local -A planned_reclaim=()
 
@@ -793,8 +871,12 @@ run_scheduled_prepare_phase() {
   [[ -n "$capacity_dataset" ]] || return 1
 
   set_job_progress "preparing" "18" "Queueing retention cleanup for ZFS Send datasets on pool ${dest_pool}."
+  retention_started="$(date +%s)"
   queue_pool_retention_cleanup "$dest_pool" "$capacity_dataset" planned_reclaim || true
+  retention_elapsed=$(( $(date +%s) - retention_started ))
+  log "Retention cleanup planning for pool ${dest_pool} completed in ${retention_elapsed}s"
 
+  space_started="$(date +%s)"
   if ! queue_pool_free_space_cleanup_for_schedule "$schedule_job_id" "$capacity_dataset" planned_reclaim; then
     planned_effective="$(get_dataset_effective_avail "$capacity_dataset" planned_reclaim || true)"
     if [[ "$planned_effective" =~ ^[0-9]+$ ]] && (( planned_effective < threshold )); then
@@ -803,6 +885,8 @@ run_scheduled_prepare_phase() {
       return 1
     fi
   fi
+  space_elapsed=$(( $(date +%s) - space_started ))
+  log "Low-space cleanup planning for schedule ${schedule_job_id} completed in ${space_elapsed}s"
 
   if pool_has_active_delete_jobs "$dest_pool"; then
     release_current_prep_pool_lock
