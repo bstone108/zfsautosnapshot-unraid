@@ -6,6 +6,27 @@ zfsas_log_apply_owner() {
   chgrp users "$path" >/dev/null 2>&1 || true
 }
 
+zfsas_log_dir_is_plugin_owned() {
+  local dir="$1"
+
+  case "$dir" in
+    /var/log/zfs_autosnapshot*|/var/run/zfs-autosnapshot*|/tmp/zfs-autosnapshot*|/boot/config/plugins/zfs.autosnapshot/*)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+zfsas_log_repair_system_dir_if_needed() {
+  local dir="$1"
+
+  [[ "$dir" == "/var/log" ]] || return 0
+  chmod 0755 "$dir" >/dev/null 2>&1 || true
+  chown root "$dir" >/dev/null 2>&1 || true
+  chgrp root "$dir" >/dev/null 2>&1 || true
+}
+
 zfsas_log_ensure_file() {
   local path="$1"
   local mode="${2:-0640}"
@@ -13,8 +34,12 @@ zfsas_log_ensure_file() {
 
   dir="$(dirname "$path")"
   mkdir -p "$dir" >/dev/null 2>&1 || return 1
-  chmod 0775 "$dir" >/dev/null 2>&1 || true
-  zfsas_log_apply_owner "$dir"
+  if zfsas_log_dir_is_plugin_owned "$dir"; then
+    chmod 0775 "$dir" >/dev/null 2>&1 || true
+    zfsas_log_apply_owner "$dir"
+  else
+    zfsas_log_repair_system_dir_if_needed "$dir"
+  fi
 
   touch "$path" >/dev/null 2>&1 || return 1
   chmod "$mode" "$path" >/dev/null 2>&1 || true
