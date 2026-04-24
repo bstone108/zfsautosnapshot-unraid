@@ -46,6 +46,15 @@ apply_owner() {
   fi
 }
 
+repair_system_log_dir_if_needed() {
+  local dir_path="$1"
+
+  [[ "$dir_path" == "/var/log" ]] || return 0
+  chmod 0755 "$dir_path" >/dev/null 2>&1 || true
+  chown root "$dir_path" >/dev/null 2>&1 || true
+  chgrp root "$dir_path" >/dev/null 2>&1 || true
+}
+
 ensure_dir() {
   local dir_path="$1"
 
@@ -104,5 +113,6 @@ ensure_executable "/usr/local/sbin/zfs_autosnapshot_delete_worker"
 ensure_executable "/usr/local/sbin/zfs_autosnapshot_snapshot_manager_worker"
 ensure_executable "/usr/local/sbin/zfs_autosnapshot_recovery_scan"
 ensure_executable "/usr/local/sbin/zfs_autosnapshot_migrate_datasets"
+repair_system_log_dir_if_needed "/var/log"
 
 echo "Normalized plugin config ownership and permissions under $BOOT_PLUGIN_DIR"
