@@ -23,6 +23,7 @@ PERSISTED_DELETE_QUEUE_FILE="${PERSISTED_QUEUE_DIR}/delete-queue.persist"
 FAILED_SEND_LOGS_DIR="${CONFIG_DIR}/failed_send_logs"
 SEND_SCHEDULE_STATE_FILE="${CONFIG_DIR}/send_schedule_state.state"
 RUNTIME_DIR="/var/run/zfs-autosnapshot-ops"
+QUEUE_MANAGER_LOCK_DIR="${RUNTIME_DIR}/queue-manager.lockdir"
 SEND_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/send-workers"
 SEND_WORKER_LAUNCH_LOCK_DIR="${RUNTIME_DIR}/send-workers.launch.lockdir"
 SEND_TRANSFER_RUNTIME_DIR="${RUNTIME_DIR}/send-transfer-slots"
@@ -43,7 +44,7 @@ SEND_LOG_ARCHIVE_MAX_BYTES="${SEND_LOG_ARCHIVE_MAX_BYTES:-4194304}"
 
 DEFAULT_SEND_SNAPSHOT_PREFIX="zfs-send-"
 DEFAULT_SEND_MAX_PARALLEL="1"
-DEFAULT_SEND_PREP_EXTRA_WORKERS="4"
+DEFAULT_SEND_PREP_EXTRA_WORKERS="16"
 DEFAULT_SEND_KEEP_ALL_FOR_DAYS="14"
 DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS="30"
 DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS="183"
@@ -1698,6 +1699,81 @@ shared_send_log_safe_to_compact() {
 compact_shared_send_log_if_safe() {
   shared_send_log_safe_to_compact || return 0
   zfsas_log_prepare_for_append "$LOG_FILE" "$LOG_ARCHIVE_FILE" "$SEND_LOG_MAX_BYTES" 800 20 "$SEND_LOG_ARCHIVE_MAX_BYTES"
+}
+
+acquire_queue_manager_lock() {
+  local pid_file pid now_epoch mtime_epoch
+
+  mkdir -p "$RUNTIME_DIR" >/dev/null 2>&1 || return 1
+  pid_file="${QUEUE_MANAGER_LOCK_DIR}/pid"
+  if mkdir "$QUEUE_MANAGER_LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$pid_file" 2>/dev/null || true
+    return 0
+  fi
+
+  pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && process_alive "$pid"; then
+    return 1
+  fi
+
+  if [[ -z "$pid" ]]; then
+    now_epoch="$(date +%s)"
+    mtime_epoch="$(stat -c %Y "$QUEUE_MANAGER_LOCK_DIR" 2>/dev/null || stat -f %m "$QUEUE_MANAGER_LOCK_DIR" 2>/dev/null || echo "$now_epoch")"
+    [[ "$mtime_epoch" =~ ^[0-9]+$ ]] || mtime_epoch="$now_epoch"
+    if (( now_epoch - mtime_epoch <= 300 )); then
+      return 1
+    fi
+  fi
+
+  rm -rf "$QUEUE_MANAGER_LOCK_DIR" >/dev/null 2>&1 || true
+  if mkdir "$QUEUE_MANAGER_LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$pid_file" 2>/dev/null || true
+    return 0
+  fi
+
+  return 1
+}
+
+queue_manager_running() {
+  local pid
+  pid="$(sed -n '1p' "${QUEUE_MANAGER_LOCK_DIR}/pid" 2>/dev/null || true)"
+  [[ -n "$pid" ]] && process_alive "$pid"
+}
+
+release_queue_manager_lock() {
+  local pid
+  pid="$(sed -n '1p' "${QUEUE_MANAGER_LOCK_DIR}/pid" 2>/dev/null || true)"
+  [[ "$pid" == "$$" ]] || return 0
+  rm -rf "$QUEUE_MANAGER_LOCK_DIR" >/dev/null 2>&1 || true
+}
+
+send_queue_has_active_work() {
+  local file state job_type
+  local -A queued_job=()
+
+  while IFS= read -r file; do
+    queued_job=()
+    job_load "$file" queued_job || continue
+    job_type="$(job_get queued_job JOB_TYPE)"
+    [[ "$job_type" == "send" ]] || continue
+    state="$(job_get queued_job STATE)"
+    case "$state" in
+      queued|running|retry_wait)
+        return 0
+        ;;
+    esac
+  done < <(list_job_files)
+
+  return 1
+}
+
+send_or_delete_queue_has_active_work() {
+  send_queue_has_active_work && return 0
+  delete_queue_has_backlog && return 0
+  delete_worker_running && return 0
+  (( $(send_worker_lock_count) > 0 )) && return 0
+  (( $(pool_prep_worker_lock_count) > 0 )) && return 0
+  return 1
 }
 
 prep_lock_dir_for_pool() {

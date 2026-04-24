@@ -4,18 +4,21 @@ set -Eeuo pipefail
 # shellcheck source=/dev/null
 source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
 
-spawn_send_worker() {
-  local worker_lock_dir="$1"
-  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" nohup /usr/local/sbin/zfs_autosnapshot_send_worker >> "$LOG_FILE" 2>&1 < /dev/null &
-}
+start_queue_handler() {
+  local handler="/usr/local/sbin/zfs_autosnapshot_queue_handler"
 
-spawn_pool_prep_worker() {
-  local worker_lock_dir="$1"
-  ZFSAS_WORKER_LOCK_DIR="$worker_lock_dir" nohup /usr/local/sbin/zfs_autosnapshot_send_worker --pool-prep-only >> "$LOG_FILE" 2>&1 < /dev/null &
-}
+  if queue_manager_running; then
+    log "Queue handler is already running."
+    return 0
+  fi
 
-spawn_delete_worker() {
-  nohup /usr/local/sbin/zfs_autosnapshot_delete_worker >> "$LOG_FILE" 2>&1 < /dev/null &
+  if [[ ! -x "$handler" ]]; then
+    log "Queue handler is missing or not executable: ${handler}"
+    return 1
+  fi
+
+  nohup "$handler" >> "$LOG_FILE" 2>&1 < /dev/null &
+  log "Queue handler started."
 }
 
 # shellcheck disable=SC2034
@@ -57,7 +60,7 @@ enqueue_all_scheduled_jobs_now() {
 }
 
 main() {
-  local now_epoch manual_now=0 candidate_path worker_lock_dir max_send_workers max_send_worker_processes prep_extra_workers
+  local now_epoch manual_now=0
 
   while (( $# > 0 )); do
     case "$1" in
@@ -71,7 +74,7 @@ main() {
   ensure_runtime_layout || exit 1
   load_send_config
   require_numeric_in_range "SEND_MAX_PARALLEL" "$SEND_MAX_PARALLEL" 1 8 || SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
-  require_numeric_in_range "SEND_PREP_EXTRA_WORKERS" "$SEND_PREP_EXTRA_WORKERS" 0 8 || SEND_PREP_EXTRA_WORKERS="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
+  require_numeric_in_range "SEND_PREP_EXTRA_WORKERS" "$SEND_PREP_EXTRA_WORKERS" 0 64 || SEND_PREP_EXTRA_WORKERS="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
   parse_send_jobs_config
 
   compact_shared_send_log_if_safe || true
@@ -93,35 +96,10 @@ main() {
     exit 0
   fi
 
-  while pool_prep_worker_slot_available; do
-    claim_next_send_job "$now_epoch" candidate_path pool_prep || break
-    [[ -n "$candidate_path" ]] || break
-    worker_lock_dir=""
-    acquire_send_worker_launch_slot pool_prep 8 worker_lock_dir || break
-    spawn_pool_prep_worker "$worker_lock_dir"
-    sleep 0.1
-  done
-
-  max_send_workers="$SEND_MAX_PARALLEL"
-  [[ "$max_send_workers" =~ ^[0-9]+$ ]] || max_send_workers="$DEFAULT_SEND_MAX_PARALLEL"
-  (( max_send_workers >= 1 )) || max_send_workers=1
-  prep_extra_workers="$SEND_PREP_EXTRA_WORKERS"
-  [[ "$prep_extra_workers" =~ ^[0-9]+$ ]] || prep_extra_workers="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
-  (( prep_extra_workers >= 0 )) || prep_extra_workers=0
-  max_send_worker_processes=$((max_send_workers + prep_extra_workers))
-  while send_worker_slot_available "$max_send_worker_processes"; do
-    claim_next_send_job "$now_epoch" candidate_path non_pool_prep || break
-    [[ -n "$candidate_path" ]] || break
-    worker_lock_dir=""
-    acquire_send_worker_launch_slot worker "$max_send_worker_processes" worker_lock_dir || break
-    spawn_send_worker "$worker_lock_dir"
-    sleep 0.1
-  done
-
-  if ! delete_worker_running; then
-    if delete_queue_has_backlog; then
-      spawn_delete_worker
-    fi
+  if send_or_delete_queue_has_active_work; then
+    start_queue_handler || true
+  else
+    log "No queue work is pending."
   fi
 
   log "Queue kicker $$ finished"

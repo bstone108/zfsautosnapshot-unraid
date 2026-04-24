@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.09 (Testing Branch Only)
+
+- Changed the `ZFS Send` queue kicker so it only schedules work and starts a live queue handler; the handler now keeps launching send/delete workers in near real time until the queue drains instead of waiting for the next one-minute kicker pass.
+- Let extra `ZFS Send` workers keep preparing snapshots and estimating destination space ahead of the configured transfer limit, while actual send transfers still obey the parallel send setting and destination-space reservations.
+- Simplified `ZFS Send` queue source/destination display so each row shows the dataset name with the full path available on hover.
+
 ### 2026.04.24.08 (Testing Branch Only)
 
 - Fixed `ZFS Send` queue streaming so newly fanned-out child jobs appear without manually refreshing the page, with stream heartbeat/reconnect handling and polling fallback still available.

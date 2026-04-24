@@ -30,6 +30,7 @@ OPS_LOCK_FILE="${OPS_RUNTIME_DIR}/queue.lock"
 OPS_LOCK_DIR="${OPS_RUNTIME_DIR}/queue.lockdir"
 OPS_CHILD_PID_FILE="${OPS_RUNTIME_DIR}/queue.child.pid"
 OPS_KICKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_queue_kicker'
+OPS_HANDLER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_queue_handler'
 OPS_SEND_WORKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_send_worker'
 OPS_DELETE_WORKER_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_delete_worker'
 OPS_JOB_LOCKS_DIR="${OPS_RUNTIME_DIR}/job-locks"
@@ -292,10 +293,11 @@ STOP_FILE="$OPS_STOP_FILE"
 SNAPSHOT_PREFIX='zfs-send-'
 TARGET_CFG="$TARGET_SEND_CFG"
 ALLOW_ORPHAN_DESTROY_MATCHES=0
-for RUN_MATCH in "$OPS_KICKER_RUN_MATCH" "$OPS_SEND_WORKER_RUN_MATCH" "$OPS_DELETE_WORKER_RUN_MATCH"; do
+for RUN_MATCH in "$OPS_KICKER_RUN_MATCH" "$OPS_HANDLER_RUN_MATCH" "$OPS_SEND_WORKER_RUN_MATCH" "$OPS_DELETE_WORKER_RUN_MATCH"; do
   stop_running_jobs
 done
 rm -rf "$OPS_JOB_LOCKS_DIR" >/dev/null 2>&1 || true
+rm -rf "${OPS_RUNTIME_DIR}/queue-manager.lockdir" >/dev/null 2>&1 || true
 rm -rf "$LEGACY_OPS_QUEUE_DIR" >/dev/null 2>&1 || true
 rm -rf "$TMP_OPS_QUEUE_DIR" >/dev/null 2>&1 || true
 

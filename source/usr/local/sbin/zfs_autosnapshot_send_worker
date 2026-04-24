@@ -333,13 +333,8 @@ reserve_destination_space_for_current_send() {
   required_bytes="$(job_get job SPACE_REQUIRED_BYTES 0)"
 
   buffer_bytes="$(send_space_buffer_bytes "$required_bytes")"
-  if earlier_send_job_waiting_for_pool "$dest_pool"; then
-    defer_current_job "Waiting turn on ${dest_pool}."
-    return 2
-  fi
-
   if ! acquire_send_transfer_slot "$CURRENT_JOB_ID" "$$" transfer_slot_dir; then
-    defer_current_job "Waiting for send slot."
+    defer_current_job "Waiting for send slot." 3
     return 2
   fi
   CURRENT_SEND_TRANSFER_SLOT_DIR="$transfer_slot_dir"
@@ -361,7 +356,7 @@ reserve_destination_space_for_current_send() {
     fi
     rerun_space_cleanup_for_waiting_send "$schedule_job_id" "$dest_pool" "$capacity_dataset" "$cleanup_target" || true
     if ! acquire_send_transfer_slot "$CURRENT_JOB_ID" "$$" transfer_slot_dir; then
-      defer_current_job "Waiting for send slot."
+      defer_current_job "Waiting for send slot." 3
       return 2
     fi
     CURRENT_SEND_TRANSFER_SLOT_DIR="$transfer_slot_dir"
@@ -373,56 +368,8 @@ reserve_destination_space_for_current_send() {
   fi
 
   release_current_send_transfer_slot
-  defer_current_job "Waiting for destination space."
+  defer_current_job "Waiting for destination space." 5
   return 2
-}
-
-earlier_send_job_waiting_for_pool() {
-  local dest_pool="$1"
-  local current_sort other_sort file state action other_dest other_pool other_job_id
-  local -A other_job=()
-
-  current_sort="$(job_get job QUEUE_SORT 0)"
-  [[ "$current_sort" =~ ^[0-9]+$ ]] || current_sort=0
-
-  while IFS= read -r file; do
-    # shellcheck disable=SC2034
-    other_job=()
-    job_load "$file" other_job || continue
-    [[ "$(job_get other_job JOB_TYPE)" == "send" ]] || continue
-    other_job_id="$(job_get other_job JOB_ID)"
-    [[ "$other_job_id" != "$CURRENT_JOB_ID" ]] || continue
-    action="$(job_get other_job JOB_ACTION)"
-    case "$action" in
-      send_member|"")
-        ;;
-      *)
-        continue
-        ;;
-    esac
-    state="$(job_get other_job STATE)"
-    case "$state" in
-      queued|retry_wait)
-        ;;
-      running)
-        send_space_reservation_exists_for_job "$other_job_id" && continue
-        ;;
-      *)
-        continue
-        ;;
-    esac
-    other_dest="$(job_get other_job DESTINATION_ROOT)"
-    [[ -n "$other_dest" ]] || continue
-    other_pool="${other_dest%%/*}"
-    [[ "$other_pool" == "$dest_pool" ]] || continue
-    other_sort="$(job_get other_job QUEUE_SORT 0)"
-    [[ "$other_sort" =~ ^[0-9]+$ ]] || other_sort=0
-    if (( other_sort < current_sort )); then
-      return 0
-    fi
-  done < <(list_job_files)
-
-  return 1
 }
 
 estimate_destination_space_for_current_send() {
@@ -475,7 +422,7 @@ wait_for_pool_prep_for_current_job() {
       return 1
       ;;
     queued|running|retry_wait)
-      defer_current_job "Waiting for pool prep."
+      defer_current_job "Waiting for pool prep." 3
       return 2
       ;;
   esac
@@ -1152,7 +1099,7 @@ process_pool_prep_job() {
   }
 
   if ! acquire_pool_prep_lock "$dest_pool"; then
-    defer_current_job "Waiting for pool prep lock." 15
+    defer_current_job "Waiting for pool prep lock." 5
     return 2
   fi
   CURRENT_PREP_POOL="$dest_pool"

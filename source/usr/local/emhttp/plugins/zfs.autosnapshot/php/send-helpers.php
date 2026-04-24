@@ -121,6 +121,18 @@ function zfsas_send_normalize_parallel_limit($value)
     return (string) $value;
 }
 
+function zfsas_send_normalize_prep_extra_workers($value)
+{
+    $value = (int) $value;
+    if ($value < 0) {
+        $value = 0;
+    }
+    if ($value > 64) {
+        $value = 64;
+    }
+    return (string) $value;
+}
+
 function zfsas_send_normalize_retention_days($value, $default)
 {
     $value = (int) $value;
@@ -138,6 +150,7 @@ function zfsas_send_defaults()
     return [
         'SEND_SNAPSHOT_PREFIX' => 'zfs-send-',
         'SEND_MAX_PARALLEL' => '1',
+        'SEND_PREP_EXTRA_WORKERS' => '16',
         'SEND_KEEP_ALL_FOR_DAYS' => '14',
         'SEND_KEEP_DAILY_UNTIL_DAYS' => '30',
         'SEND_KEEP_WEEKLY_UNTIL_DAYS' => '183',
@@ -512,6 +525,9 @@ function zfsas_send_render_config($config)
     $lines[] = '# Maximum number of queued ZFS send jobs allowed to transfer in parallel.';
     $lines[] = 'SEND_MAX_PARALLEL=' . zfsas_send_normalize_parallel_limit($config['SEND_MAX_PARALLEL']);
     $lines[] = '';
+    $lines[] = '# Extra queue worker processes allowed to prepare snapshots, estimate space, and wait before transfer slots open.';
+    $lines[] = 'SEND_PREP_EXTRA_WORKERS=' . zfsas_send_normalize_prep_extra_workers($config['SEND_PREP_EXTRA_WORKERS'] ?? '16');
+    $lines[] = '';
     $lines[] = '# Scheduled-send retention windows for snapshots stored on the destination tree.';
     $lines[] = '# The newest successful send checkpoint is always protected even if it falls outside these windows.';
     $lines[] = 'SEND_KEEP_ALL_FOR_DAYS=' . zfsas_send_normalize_retention_days($config['SEND_KEEP_ALL_FOR_DAYS'], 14);
@@ -537,6 +553,7 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
     $submitted = $config;
     $submitted['SEND_SNAPSHOT_PREFIX'] = zfsas_send_trim($post['send_snapshot_prefix'] ?? $submitted['SEND_SNAPSHOT_PREFIX']);
     $submitted['SEND_MAX_PARALLEL'] = zfsas_send_normalize_parallel_limit($post['send_max_parallel'] ?? $submitted['SEND_MAX_PARALLEL']);
+    $submitted['SEND_PREP_EXTRA_WORKERS'] = zfsas_send_normalize_prep_extra_workers($post['send_prep_extra_workers'] ?? ($submitted['SEND_PREP_EXTRA_WORKERS'] ?? '16'));
     $submitted['SEND_KEEP_ALL_FOR_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_all_for_days'] ?? $submitted['SEND_KEEP_ALL_FOR_DAYS'], 14);
     $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_daily_until_days'] ?? $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'], 30);
     $submitted['SEND_KEEP_WEEKLY_UNTIL_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_weekly_until_days'] ?? $submitted['SEND_KEEP_WEEKLY_UNTIL_DAYS'], 183);

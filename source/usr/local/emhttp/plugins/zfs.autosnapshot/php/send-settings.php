@@ -1,27 +1,13 @@
 <?php
-function zfsas_send_queue_path_display($path, $maxLength = 34)
+function zfsas_send_queue_path_display($path)
 {
-    $path = (string) $path;
-    $maxLength = max(12, (int) $maxLength);
-    if (strlen($path) <= $maxLength) {
-        return $path;
+    $path = rtrim((string) $path, '/');
+    if ($path === '') {
+        return '';
     }
 
     $segments = explode('/', $path);
-    $display = array_pop($segments);
-    while (!empty($segments)) {
-        $candidate = array_pop($segments) . '/' . $display;
-        if (strlen('...' . $candidate) > $maxLength) {
-            break;
-        }
-        $display = $candidate;
-    }
-
-    if ($display === '') {
-        return '...' . substr($path, -($maxLength - 3));
-    }
-
-    return '...' . $display;
+    return (string) end($segments);
 }
 
 $pluginName = 'zfs.autosnapshot';
@@ -942,35 +928,16 @@ if ($isPostRequest) {
     return '<span class="zfsas-send-step">' + escapeHtml(label) + '</span>';
   }
 
-  function queuePathDisplay(path, maxLength) {
-    var value = String(path || '');
-    var limit = parseInt(maxLength, 10);
+  function queuePathDisplay(path) {
+    var value = String(path || '').replace(/\/+$/g, '');
     var segments;
-    var display;
-    var candidate;
 
-    if (isNaN(limit) || limit < 12) {
-      limit = 34;
-    }
-    if (value.length <= limit) {
-      return value;
+    if (value === '') {
+      return '';
     }
 
     segments = value.split('/');
-    display = segments.pop() || '';
-    while (segments.length > 0) {
-      candidate = segments.pop() + '/' + display;
-      if (('...' + candidate).length > limit) {
-        break;
-      }
-      display = candidate;
-    }
-
-    if (display === '') {
-      return '...' + value.slice(-(limit - 3));
-    }
-
-    return '...' + display;
+    return segments.pop() || value;
   }
 
   function buildQueueLogDownloadUrl(jobId) {
@@ -987,8 +954,8 @@ if ($isPostRequest) {
       var typeLabel = job.typeLabel || ((job.mode === 'manual_snapshot') ? 'Manual send' : 'Scheduled send');
       var html = '';
 
-      html += '<td title="' + escapeHtml(job.source || '') + '"><code class="zfsas-send-queue-path">' + escapeHtml(queuePathDisplay(job.source || '', 34)) + '</code></td>';
-      html += '<td title="' + escapeHtml(job.destination || '') + '"><code class="zfsas-send-queue-path">' + escapeHtml(queuePathDisplay(job.destination || '', 34)) + '</code></td>';
+      html += '<td title="' + escapeHtml(job.source || '') + '"><code class="zfsas-send-queue-path">' + escapeHtml(queuePathDisplay(job.source || '')) + '</code></td>';
+      html += '<td title="' + escapeHtml(job.destination || '') + '"><code class="zfsas-send-queue-path">' + escapeHtml(queuePathDisplay(job.destination || '')) + '</code></td>';
       html += '<td>' + queueBadge(typeLabel, false) + '</td>';
       html += '<td>' + queueBadge(job.stateLabel || job.state || 'Queued', job.state === 'failed') + '</td>';
       html += '<td>' + queueStepHtml(job) + '</td>';
