@@ -229,10 +229,6 @@ $csrfToken = zfsas_get_csrf_token();
     </div>
   </div>
 
-  <div class="zfsas-alert zfsas-alert-warn">
-    <code>Dataset Migrator</code> is still unfinished and may not work correctly yet. Use it only if you are prepared to verify each migrated folder manually before trusting the result.
-  </div>
-
   <div class="zfsas-dm-grid">
     <div class="zfsas-dm-card">
       <h3 style="margin-top:0;">Before You Start</h3>
