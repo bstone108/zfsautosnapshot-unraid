@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.01 (Testing Branch Only)
+
+- Marked `Dataset Migrator` as feature-stable and removed its unfinished preview warning from the plugin UI while leaving the unfinished warnings in place for `Recovery Tools` and `Snapshot Manager`.
+- Fixed a logging-permissions bug that could wrongly change `/var/log` itself to `nobody:users` with group-writable permissions while preparing plugin log files.
+- Added an upgrade-time repair step so affected systems reset `/var/log` back to the expected `root:root` ownership and `0755` mode during plugin install or upgrade.
+
 ### 2026.04.18.02
 
 - Promoted the current testing stack toward general release with clearer guardrails around what is ready now versus what is still preview-only.

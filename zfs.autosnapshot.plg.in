@@ -2,8 +2,8 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Reworked plugin logging so active logs stay detailed, older routine chatter is compacted into archived history, and busy tools no longer have to choose between “too little history” and “fill RAM forever.”
-- Moved the Recovery Tools and Dataset Migrator runtime logs into RAM-backed `/var/log`, expanded downloadable log history, and toned down delete-queue success spam so failures stand out more clearly on busy systems.
+- Marked `Dataset Migrator` as feature-stable and removed its unfinished warning while keeping preview warnings for `Recovery Tools` and `Snapshot Manager`.
+- Fixed a bug where plugin log preparation could damage `/var/log` permissions, and added upgrade-time repair so affected systems reset `/var/log` back to `root:root` and `0755`.
 
   </CHANGES>
 
