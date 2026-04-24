@@ -783,6 +783,23 @@ function zfsas_ops_send_job_state_label($job)
     }
 
     if ($state === 'running') {
+        $raw = strtolower(trim((string) ($job['LAST_ERROR'] ?? '') . ' ' . (string) ($job['LAST_MESSAGE'] ?? '')));
+        if (strpos($raw, 'autosnapshot') !== false) {
+            return 'Waiting';
+        }
+        if (strpos($raw, 'array') !== false) {
+            return 'Waiting';
+        }
+        if (strpos($raw, 'pool prep') !== false || strpos($raw, 'destination pool prep') !== false) {
+            return 'Waiting';
+        }
+        if (strpos($raw, 'send slot') !== false || strpos($raw, 'transfer slot') !== false) {
+            return 'Waiting';
+        }
+        if (strpos($raw, 'space') !== false && strpos($raw, 'estimate') === false) {
+            return 'Waiting';
+        }
+
         switch ($phase) {
             case 'preparing':
                 return 'Preparing';
@@ -957,6 +974,21 @@ function zfsas_ops_send_job_display_message($job)
     }
 
     if ($state === 'running') {
+        if (strpos($lower, 'autosnapshot') !== false) {
+            return 'Waiting for autosnapshot.';
+        }
+        if (strpos($lower, 'array') !== false) {
+            return 'Waiting for array.';
+        }
+        if (strpos($lower, 'pool prep') !== false || strpos($lower, 'destination pool prep') !== false) {
+            return 'Waiting for pool prep.';
+        }
+        if (strpos($lower, 'send slot') !== false || strpos($lower, 'transfer slot') !== false) {
+            return 'Waiting for send slot.';
+        }
+        if (strpos($lower, 'space') !== false && strpos($lower, 'estimate') === false) {
+            return 'Waiting for space.';
+        }
         if ($action === 'pool_prep') {
             if (strpos($lower, 'retention') !== false) {
                 return 'Planning retention cleanup.';

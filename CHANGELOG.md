@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.13 (Testing Branch Only)
+
+- Fixed the `ZFS Send` queue display so jobs waiting for the autosnapshot process now show `Waiting` / `Waiting for autosnapshot.` instead of looking like they are still actively preparing.
+
 ### 2026.04.24.12 (Testing Branch Only)
 
 - Changed the live `ZFS Send` queue handler to assign each spawned worker a specific queue item, preventing worker batches from racing for the same first row.
