@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.14 (Testing Branch Only)
+
+- Changed the `ZFS Send` queue status badge to show specific wait reasons like `Waiting for autosnapshot` instead of the generic `Waiting`.
+
 ### 2026.04.24.13 (Testing Branch Only)
 
 - Fixed the `ZFS Send` queue display so jobs waiting for the autosnapshot process now show `Waiting` / `Waiting for autosnapshot.` instead of looking like they are still actively preparing.

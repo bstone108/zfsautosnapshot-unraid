@@ -785,19 +785,19 @@ function zfsas_ops_send_job_state_label($job)
     if ($state === 'running') {
         $raw = strtolower(trim((string) ($job['LAST_ERROR'] ?? '') . ' ' . (string) ($job['LAST_MESSAGE'] ?? '')));
         if (strpos($raw, 'autosnapshot') !== false) {
-            return 'Waiting';
+            return 'Waiting for autosnapshot';
         }
         if (strpos($raw, 'array') !== false) {
-            return 'Waiting';
+            return 'Waiting for array';
         }
         if (strpos($raw, 'pool prep') !== false || strpos($raw, 'destination pool prep') !== false) {
-            return 'Waiting';
+            return 'Waiting for pool prep';
         }
         if (strpos($raw, 'send slot') !== false || strpos($raw, 'transfer slot') !== false) {
-            return 'Waiting';
+            return 'Waiting for send slot';
         }
         if (strpos($raw, 'space') !== false && strpos($raw, 'estimate') === false) {
-            return 'Waiting';
+            return 'Waiting for space';
         }
 
         switch ($phase) {
