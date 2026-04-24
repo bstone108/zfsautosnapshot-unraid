@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.05 (Testing Branch Only)
+
+- Fixed `ZFS Send` source checkpoint pruning so a failed send can no longer cause the last known-good common checkpoint to be deleted before a newer checkpoint is verified on the destination.
+- Strengthened retention, low-space cleanup, and delete-worker guards so the latest common scheduled-send checkpoint is protected per dataset member, including partial recursive sends where some children failed.
+- Let extra send workers preflight snapshots and estimate required destination space ahead of the normal transfer limit, while actual sends still wait for safe FIFO space reservation and transfer slots.
+
 ### 2026.04.24.04 (Testing Branch Only)
 
 - Changed completed destination-pool prep rows in the `ZFS Send` queue so they disappear from the WebUI immediately instead of hanging around while dependent child sends finish.
