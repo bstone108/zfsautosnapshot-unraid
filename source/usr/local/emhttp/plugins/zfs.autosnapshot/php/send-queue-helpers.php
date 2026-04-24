@@ -643,6 +643,8 @@ function zfsas_ops_send_job_type_label($job)
     }
 
     switch ($action) {
+        case 'pool_prep':
+            return 'Pool prep';
         case 'prepare':
             return ((string) ($job['INCLUDE_CHILDREN'] ?? '0') === '1')
                 ? 'Recursive prep'

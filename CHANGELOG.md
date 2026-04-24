@@ -5,6 +5,13 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.03 (Testing Branch Only)
+
+- Changed scheduled `ZFS Send` prep so each destination pool now gets one shared prep stage for managed send targets instead of every due job running its own retention and low-space cleanup pass.
+- Added destination-pool space reservations for `ZFS Send` workers so parallel sends cannot accidentally claim the same free space at the same time; workers now wait in safe FIFO order per destination pool before starting the actual send.
+- Fixed a send-worker crash that could repeatedly recover the same queued jobs with a `JOB_ACTION: unbound variable` error while trying to fan out child send jobs.
+- Added a `Download Log` action to queued, running, and retry-wait send rows so logs are available while a job is looping or recovering, not only after it reaches final failed state.
+
 ### 2026.04.24.02 (Testing Branch Only)
 
 - Sped up `ZFS Send` recursive prep by caching destination dataset lists, protected send checkpoint names, and snapshot cleanup bookkeeping during each worker pass.

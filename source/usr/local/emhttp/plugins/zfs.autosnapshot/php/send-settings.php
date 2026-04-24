@@ -839,6 +839,7 @@ if ($isPostRequest) {
       html += '<td><div class="zfsas-send-queue-actions">';
       if (job.canCancel) {
         html += '<button type="button" class="btn zfsas-send-cancel-job" data-job-id="' + escapeHtml(job.id || '') + '">Cancel</button>';
+        html += '<a class="btn" href="' + escapeHtml(job.logDownloadUrl || buildQueueLogDownloadUrl(job.id || '')) + '">Download Log</a>';
       } else if (job.canRetry) {
         html += '<a class="btn" href="' + escapeHtml(job.logDownloadUrl || buildQueueLogDownloadUrl(job.id || '')) + '">Download Log</a>';
         html += '<button type="button" class="btn zfsas-send-retry-job" data-job-id="' + escapeHtml(job.id || '') + '">Retry</button>';

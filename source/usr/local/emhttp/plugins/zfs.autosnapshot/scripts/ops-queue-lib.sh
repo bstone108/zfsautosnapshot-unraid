@@ -30,6 +30,8 @@ DELETE_QUEUE_LOCK_DIR="${DELETE_WORKER_RUNTIME_DIR}/daemon.lockdir"
 PREP_LOCKS_DIR="${RUNTIME_DIR}/prep-locks"
 JOB_LOCKS_DIR="${RUNTIME_DIR}/job-locks"
 ACTIVE_SEND_DATASETS_DIR="${RUNTIME_DIR}/active-send-datasets"
+SEND_SPACE_RESERVATION_DIR="${RUNTIME_DIR}/send-space-reservations"
+SEND_SPACE_RESERVATION_LOCK_FILE="${RUNTIME_DIR}/send-space-reservations.lock"
 AUTOSNAPSHOT_RUNTIME_DIR="/var/run/zfs-autosnapshot"
 AUTOSNAPSHOT_ACTIVE_FILE="${AUTOSNAPSHOT_RUNTIME_DIR}/zfs_autosnapshot.active"
 LOG_FILE="/var/log/zfs_autosnapshot_send.log"
@@ -240,7 +242,7 @@ ensure_runtime_layout() {
   ops_ensure_dir "$OPS_STATUS_DIR" || return 1
   ops_ensure_dir "$PERSISTED_QUEUE_DIR" || return 1
   ops_ensure_dir "$FAILED_SEND_LOGS_DIR" || return 1
-  mkdir -p "$RUNTIME_DIR" "$SEND_WORKER_RUNTIME_DIR" "$DELETE_WORKER_RUNTIME_DIR" "$PREP_LOCKS_DIR" "$JOB_LOCKS_DIR" "$ACTIVE_SEND_DATASETS_DIR" "$(dirname "$LOG_FILE")" >/dev/null 2>&1 || true
+  mkdir -p "$RUNTIME_DIR" "$SEND_WORKER_RUNTIME_DIR" "$DELETE_WORKER_RUNTIME_DIR" "$PREP_LOCKS_DIR" "$JOB_LOCKS_DIR" "$ACTIVE_SEND_DATASETS_DIR" "$SEND_SPACE_RESERVATION_DIR" "$(dirname "$LOG_FILE")" >/dev/null 2>&1 || true
   # Only reap clearly stale temp files. Removing every *.tmp.* file at worker startup can
   # delete another process's in-flight job write and corrupt queue items.
   find "$OPS_JOBS_DIR" -maxdepth 1 -type f -name '*.tmp.*' -mmin +60 -exec rm -f {} \; >/dev/null 2>&1 || true
@@ -1114,6 +1116,9 @@ enqueue_resume_prepare_job() {
   local requested_at="$4"
   local source_snapshot_basename="$5"
   local previous_basename="${6:-}"
+  local prep_job_id="${7:-}"
+  local prep_dest_pool="${8:-}"
+  local run_group_id="${9:-}"
   local job_file
   local -A job=()
 
@@ -1127,6 +1132,9 @@ enqueue_resume_prepare_job() {
   job[REQUESTED_AT]="$requested_at"
   job[QUEUE_SORT]="$requested_epoch"
   job[WINDOW_KEY]="$window_key"
+  job[RUN_GROUP_ID]="$run_group_id"
+  job[PREP_JOB_ID]="$prep_job_id"
+  job[PREP_DEST_POOL]="$prep_dest_pool"
   job[SCHEDULE_JOB_ID]="$schedule_job_id"
   job[SOURCE_ROOT]="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]}"
   job[DESTINATION_ROOT]="${SCHEDULE_DEST_ROOT[$schedule_job_id]}"
@@ -1150,6 +1158,91 @@ enqueue_resume_prepare_job() {
   job[RESUME_ONLY]="1"
 
   job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "${job[JOB_ID]}")"
+  job_write "$job_file" job
+}
+
+enqueue_pool_prep_job() {
+  local dest_pool="$1"
+  local run_group_id="$2"
+  local requested_epoch="$3"
+  local requested_at="$4"
+  local schedule_ids="$5"
+  local job_id job_file
+  local -A job=()
+
+  [[ -n "$dest_pool" && -n "$run_group_id" && -n "$schedule_ids" ]] || return 1
+  job_id="$(pool_prep_job_id_for_group "$dest_pool" "$run_group_id")"
+  job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "$job_id")"
+  [[ -f "$job_file" ]] && return 0
+
+  job[JOB_ID]="$job_id"
+  job[JOB_TYPE]="send"
+  job[JOB_MODE]="scheduled"
+  job[JOB_ACTION]="pool_prep"
+  job[STATE]="queued"
+  job[PHASE]="queued"
+  job[REQUESTED_EPOCH]="$requested_epoch"
+  job[REQUESTED_AT]="$requested_at"
+  job[QUEUE_SORT]="$requested_epoch"
+  job[RUN_GROUP_ID]="$run_group_id"
+  job[DESTINATION_POOL]="$dest_pool"
+  job[DESTINATION_ROOT]="$dest_pool"
+  job[SCHEDULE_JOB_IDS]="$schedule_ids"
+  job[ATTEMPT_COUNT]="0"
+  job[RETRY_AT]="0"
+  job[LAST_ERROR]=""
+  job[LAST_MESSAGE]="Queued destination-pool prep for ZFS Send jobs on ${dest_pool}."
+  job[WORKER_PID]=""
+  job[PROGRESS_PERCENT]="5"
+  job[COMPLETES_SCHEDULE_WINDOW]="0"
+  job_write "$job_file" job
+}
+
+enqueue_scheduled_prepare_job() {
+  local schedule_job_id="$1"
+  local window_key="$2"
+  local requested_epoch="$3"
+  local requested_at="$4"
+  local prep_job_id="${5:-}"
+  local prep_dest_pool="${6:-}"
+  local run_group_id="${7:-}"
+  local completes_window="${8:-1}"
+  local message="${9:-Queued by schedule.}"
+  local job_file
+  local -A job=()
+
+  job[JOB_ID]="send-${schedule_job_id}-${window_key}"
+  job[JOB_TYPE]="send"
+  job[JOB_MODE]="scheduled"
+  job[JOB_ACTION]="prepare"
+  job[STATE]="queued"
+  job[PHASE]="queued"
+  job[REQUESTED_EPOCH]="$requested_epoch"
+  job[REQUESTED_AT]="$requested_at"
+  job[QUEUE_SORT]="$requested_epoch"
+  job[WINDOW_KEY]="$window_key"
+  job[RUN_GROUP_ID]="$run_group_id"
+  job[PREP_JOB_ID]="$prep_job_id"
+  job[PREP_DEST_POOL]="$prep_dest_pool"
+  job[SCHEDULE_JOB_ID]="$schedule_job_id"
+  job[SOURCE_ROOT]="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]}"
+  job[DESTINATION_ROOT]="${SCHEDULE_DEST_ROOT[$schedule_job_id]}"
+  job[INCLUDE_CHILDREN]="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]}"
+  job[FREQUENCY]="${SCHEDULE_FREQUENCY[$schedule_job_id]}"
+  job[THRESHOLD]="${SCHEDULE_THRESHOLD_RAW[$schedule_job_id]}"
+  job[THRESHOLD_BYTES]="${SCHEDULE_THRESHOLD_BYTES[$schedule_job_id]}"
+  job[SNAPSHOT_PREFIX_BASE]="$SEND_SNAPSHOT_PREFIX"
+  job[SNAPSHOT_PREFIX]="$(job_prefix_for_schedule "$schedule_job_id")"
+  job[ATTEMPT_COUNT]="0"
+  job[RETRY_AT]="0"
+  job[LAST_ERROR]=""
+  job[LAST_MESSAGE]="$message"
+  job[WORKER_PID]=""
+  job[PROGRESS_PERCENT]="5"
+  job[MEMBER_COUNT]="0"
+  job[COMPLETES_SCHEDULE_WINDOW]="$completes_window"
+
+  job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "send-${schedule_job_id}-${window_key}")"
   job_write "$job_file" job
 }
 
@@ -1205,6 +1298,149 @@ process_alive() {
   kill -0 "$pid" >/dev/null 2>&1
 }
 
+send_space_reservation_file_for_job() {
+  local job_id="$1"
+  local safe_job_id
+  safe_job_id="$(printf '%s' "$job_id" | tr -c 'A-Za-z0-9._-' '_')"
+  printf '%s/%s.reservation' "$SEND_SPACE_RESERVATION_DIR" "$safe_job_id"
+}
+
+cleanup_stale_send_space_reservations_locked() {
+  local file pid
+  local -A reservation=()
+
+  for file in "$SEND_SPACE_RESERVATION_DIR"/*.reservation; do
+    [[ -e "$file" ]] || continue
+    reservation=()
+    job_load "$file" reservation || {
+      rm -f "$file" >/dev/null 2>&1 || true
+      continue
+    }
+    pid="$(job_get reservation PID)"
+    if ! process_alive "$pid"; then
+      rm -f "$file" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+send_space_reserved_bytes_for_constraint_locked() {
+  local constraint="$1"
+  local exclude_job_id="${2:-}"
+  local file job_id destination bytes total=0
+  local -A reservation=()
+
+  for file in "$SEND_SPACE_RESERVATION_DIR"/*.reservation; do
+    [[ -e "$file" ]] || continue
+    reservation=()
+    job_load "$file" reservation || continue
+    job_id="$(job_get reservation JOB_ID)"
+    [[ -n "$exclude_job_id" && "$job_id" == "$exclude_job_id" ]] && continue
+    destination="$(job_get reservation DESTINATION)"
+    bytes="$(job_get reservation REQUIRED_BYTES 0)"
+    [[ -n "$destination" && "$bytes" =~ ^[0-9]+$ ]] || continue
+    send_space_reservation_affects_constraint "$destination" "$constraint" || continue
+    total=$(( total + bytes ))
+  done
+
+  printf '%s' "$total"
+}
+
+send_space_effective_avail_after_reservations_locked() {
+  local capacity_dataset="$1"
+  local exclude_job_id="$2"
+  local result_var="$3"
+  local token base reserved adjusted best_value=""
+
+  while IFS=$'\t' read -r token base; do
+    [[ -n "$token" && "$base" =~ ^[0-9]+$ ]] || continue
+    reserved="$(send_space_reserved_bytes_for_constraint_locked "$token" "$exclude_job_id")"
+    [[ "$reserved" =~ ^[0-9]+$ ]] || reserved=0
+    adjusted=$(( base - reserved ))
+    (( adjusted >= 0 )) || adjusted=0
+    if [[ -z "$best_value" ]] || (( adjusted < best_value )); then
+      best_value="$adjusted"
+    fi
+  done < <(emit_dataset_capacity_constraints "$capacity_dataset")
+
+  printf -v "$result_var" '%s' "$best_value"
+  [[ -n "$best_value" ]]
+}
+
+acquire_send_space_reservation() {
+  local job_id="$1"
+  local pid="$2"
+  local destination="$3"
+  local capacity_dataset="$4"
+  local required_bytes="$5"
+  local buffer_bytes="$6"
+  local available_var="$7"
+  local needed_var="$8"
+  local available="" needed reservation_file fd
+  # shellcheck disable=SC2034
+  local -A reservation=()
+
+  [[ -n "$job_id" && -n "$pid" && -n "$destination" && -n "$capacity_dataset" ]] || return 1
+  [[ "$required_bytes" =~ ^[0-9]+$ ]] || required_bytes=0
+  [[ "$buffer_bytes" =~ ^[0-9]+$ ]] || buffer_bytes=0
+  needed=$(( required_bytes + buffer_bytes ))
+
+  mkdir -p "$SEND_SPACE_RESERVATION_DIR" >/dev/null 2>&1 || return 1
+  : > "$SEND_SPACE_RESERVATION_LOCK_FILE" 2>/dev/null || true
+  exec {fd}>>"$SEND_SPACE_RESERVATION_LOCK_FILE" || return 1
+  flock "$fd" || {
+    eval "exec ${fd}>&-"
+    return 1
+  }
+
+  cleanup_stale_send_space_reservations_locked
+  if send_space_effective_avail_after_reservations_locked "$capacity_dataset" "$job_id" available && (( available >= needed )); then
+    reservation_file="$(send_space_reservation_file_for_job "$job_id")"
+    reservation[JOB_ID]="$job_id"
+    reservation[PID]="$pid"
+    reservation[DESTINATION]="$destination"
+    reservation[CAPACITY_DATASET]="$capacity_dataset"
+    reservation[REQUIRED_BYTES]="$required_bytes"
+    reservation[BUFFER_BYTES]="$buffer_bytes"
+    reservation[NEEDED_BYTES]="$needed"
+    # shellcheck disable=SC2034
+    reservation[RESERVED_AT]="$(date +%s)"
+    job_write "$reservation_file" reservation || {
+      flock -u "$fd" || true
+      eval "exec ${fd}>&-"
+      return 1
+    }
+    flock -u "$fd" || true
+    eval "exec ${fd}>&-"
+    printf -v "$available_var" '%s' "$available"
+    printf -v "$needed_var" '%s' "$needed"
+    return 0
+  fi
+
+  flock -u "$fd" || true
+  eval "exec ${fd}>&-"
+  printf -v "$available_var" '%s' "${available:-0}"
+  printf -v "$needed_var" '%s' "$needed"
+  return 1
+}
+
+release_send_space_reservation_for_job() {
+  local job_id="$1"
+  local reservation_file fd
+
+  [[ -n "$job_id" ]] || return 0
+  mkdir -p "$SEND_SPACE_RESERVATION_DIR" >/dev/null 2>&1 || true
+  : > "$SEND_SPACE_RESERVATION_LOCK_FILE" 2>/dev/null || true
+  exec {fd}>>"$SEND_SPACE_RESERVATION_LOCK_FILE" || return 0
+  flock "$fd" || {
+    eval "exec ${fd}>&-"
+    return 0
+  }
+  reservation_file="$(send_space_reservation_file_for_job "$job_id")"
+  rm -f "$reservation_file" >/dev/null 2>&1 || true
+  flock -u "$fd" || true
+  eval "exec ${fd}>&-"
+}
+
 send_worker_lock_count() {
   find "$SEND_WORKER_RUNTIME_DIR" -maxdepth 1 -mindepth 1 -type d -name 'worker-*.lockdir' 2>/dev/null | wc -l | tr -d ' '
 }
@@ -1216,6 +1452,17 @@ send_worker_slot_available() {
   (( count < SEND_MAX_PARALLEL ))
 }
 
+pool_prep_worker_lock_count() {
+  find "$SEND_WORKER_RUNTIME_DIR" -maxdepth 1 -mindepth 1 -type d -name 'pool-prep-*.lockdir' 2>/dev/null | wc -l | tr -d ' '
+}
+
+pool_prep_worker_slot_available() {
+  local count
+  count="$(pool_prep_worker_lock_count)"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  (( count < 8 ))
+}
+
 delete_worker_running() {
   delete_queue_daemon_running
 }
@@ -1225,6 +1472,7 @@ shared_send_log_safe_to_compact() {
 
   count="$(send_worker_lock_count)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  count=$(( count + $(pool_prep_worker_lock_count) ))
   (( count == 0 )) || return 1
   ! delete_worker_running
 }
@@ -1304,6 +1552,76 @@ snapshot_written_bytes() {
   local value
 
   value="$(zfs get -H -p -o value written "$snapshot" 2>/dev/null || true)"
+  [[ "$value" =~ ^[0-9]+$ ]] || value=0
+  printf '%s' "$value"
+}
+
+snapshot_referenced_bytes() {
+  local snapshot="$1"
+  local value
+
+  value="$(zfs get -H -p -o value referenced "$snapshot" 2>/dev/null || true)"
+  [[ "$value" =~ ^[0-9]+$ ]] || value=0
+  printf '%s' "$value"
+}
+
+estimate_incremental_snapshot_written_bytes() {
+  local base_snapshot="$1"
+  local snapshot="$2"
+  local dataset base_epoch target_epoch snap_name snap_epoch total=0
+
+  dataset="${snapshot%@*}"
+  load_send_dataset_snapshot_cache "$dataset"
+  base_epoch="${SEND_SNAPSHOT_CREATION_MAP[$base_snapshot]:-0}"
+  target_epoch="${SEND_SNAPSHOT_CREATION_MAP[$snapshot]:-0}"
+  [[ "$base_epoch" =~ ^[0-9]+$ && "$target_epoch" =~ ^[0-9]+$ ]] || {
+    printf '0'
+    return 1
+  }
+
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" && "$snap_epoch" =~ ^[0-9]+$ ]] || continue
+    (( snap_epoch > base_epoch && snap_epoch <= target_epoch )) || continue
+    total=$(( total + $(send_snapshot_written_bytes_cached "$snap_name") ))
+  done <<< "${SEND_DATASET_SNAPSHOT_LINES_ASC[$dataset]}"
+
+  printf '%s' "$total"
+}
+
+estimate_zfs_send_stream_bytes() {
+  local base_snapshot="$1"
+  local snapshot="$2"
+  local output value
+
+  if [[ -n "$base_snapshot" ]]; then
+    output="$(zfs send -nP -I "$base_snapshot" "$snapshot" 2>&1 || true)"
+  else
+    output="$(zfs send -nP "$snapshot" 2>&1 || true)"
+  fi
+
+  value="$(awk '
+    $1 == "size" && $2 ~ /^[0-9]+$/ { size = $2 }
+    END { if (size != "") print size }
+  ' <<< "$output")"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+    return 0
+  fi
+
+  if [[ -n "$base_snapshot" ]]; then
+    value="$(estimate_incremental_snapshot_written_bytes "$base_snapshot" "$snapshot" 2>/dev/null || true)"
+    if [[ "$value" =~ ^[0-9]+$ && "$value" != "0" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+    value="$(send_snapshot_written_bytes_cached "$snapshot")"
+  else
+    value="$(snapshot_referenced_bytes "$snapshot")"
+    if [[ ! "$value" =~ ^[0-9]+$ || "$value" == "0" ]]; then
+      value="$(send_snapshot_written_bytes_cached "$snapshot")"
+    fi
+  fi
+
   [[ "$value" =~ ^[0-9]+$ ]] || value=0
   printf '%s' "$value"
 }
@@ -1657,6 +1975,19 @@ candidate_affects_constraint() {
   esac
 }
 
+send_space_reservation_affects_constraint() {
+  local dataset="$1"
+  local constraint="$2"
+  local scope
+
+  case "$constraint" in
+    pool:*) [[ "${dataset%%/*}" == "${constraint#pool:}" ]] ;;
+    quota:*) scope="${constraint#quota:}"; dataset_is_within_scope "$dataset" "$scope" ;;
+    refquota:*) scope="${constraint#refquota:}"; [[ "$dataset" == "$scope" ]] ;;
+    *) return 1 ;;
+  esac
+}
+
 candidate_affects_any_constraint() {
   local dataset="$1"
   local constraints_name="$2"
@@ -1929,6 +2260,19 @@ job_list_basenames_for_root() {
   local root_dataset="$1"
   local prefix="$2"
   zfs list -H -p -r -t snapshot -o name,creation "$root_dataset" 2>/dev/null | grep -F "@${prefix}" || true
+}
+
+queue_safe_token() {
+  local value="$1"
+  value="$(printf '%s' "$value" | tr -c 'A-Za-z0-9._-' '_')"
+  [[ -n "$value" ]] || value="unknown"
+  printf '%s' "$value"
+}
+
+pool_prep_job_id_for_group() {
+  local pool="$1"
+  local run_group="$2"
+  printf 'send-pool-prep-%s-%s' "$(queue_safe_token "$pool")" "$(queue_safe_token "$run_group")"
 }
 
 scheduled_job_protected_basenames() {
@@ -2328,11 +2672,22 @@ schedule_window_exists() {
 
 enqueue_scheduled_send_jobs_due() {
   local now_epoch="$1"
-  local job_id frequency current_window last_completed_window requested_at requested_epoch job_file
-  local resume_basename previous_basename
-  local -A job=()
+  local job_id frequency current_window last_completed_window requested_at requested_epoch
+  local resume_basename previous_basename dest_pool run_group_id prep_job_id pool
+  local -a due_jobs=()
+  local -a due_pools=()
+  local -A due_window=()
+  local -A due_resume_basename=()
+  local -A due_previous_basename=()
+  local -A due_is_resume=()
+  local -A due_pool=()
+  local -A pool_schedule_ids=()
+  local -A seen_pool=()
 
   load_schedule_state
+  requested_epoch="$now_epoch"
+  requested_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ' -r "$requested_epoch" 2>/dev/null || date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  run_group_id="scheduled-${requested_epoch}"
 
   for job_id in "${SCHEDULE_JOB_IDS[@]}"; do
     frequency="${SCHEDULE_FREQUENCY[$job_id]}"
@@ -2349,47 +2704,42 @@ enqueue_scheduled_send_jobs_due() {
 
     schedule_window_exists "$job_id" "$current_window" && continue
 
-    requested_epoch="$now_epoch"
-    requested_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ' -r "$requested_epoch" 2>/dev/null || date -u +'%Y-%m-%dT%H:%M:%SZ')"
-
     resume_basename=""
     previous_basename=""
     if schedule_can_resume_current_window "$job_id" "$current_window" resume_basename previous_basename; then
-      enqueue_resume_prepare_job "$job_id" "$current_window" "$requested_epoch" "$requested_at" "$resume_basename" "$previous_basename" || true
-      continue
+      due_is_resume["$job_id"]="1"
+      due_resume_basename["$job_id"]="$resume_basename"
+      due_previous_basename["$job_id"]="$previous_basename"
+    else
+      due_is_resume["$job_id"]="0"
     fi
 
-    job=()
-    job[JOB_ID]="send-${job_id}-${current_window}"
-    job[JOB_TYPE]="send"
-    job[JOB_MODE]="scheduled"
-    job[JOB_ACTION]="prepare"
-    job[STATE]="queued"
-    job[PHASE]="queued"
-    job[REQUESTED_EPOCH]="$requested_epoch"
-    job[REQUESTED_AT]="$requested_at"
-    job[QUEUE_SORT]="$requested_epoch"
-    job[WINDOW_KEY]="$current_window"
-    job[SCHEDULE_JOB_ID]="$job_id"
-    job[SOURCE_ROOT]="${SCHEDULE_SOURCE_ROOT[$job_id]}"
-    job[DESTINATION_ROOT]="${SCHEDULE_DEST_ROOT[$job_id]}"
-    job[INCLUDE_CHILDREN]="${SCHEDULE_INCLUDE_CHILDREN[$job_id]}"
-    job[FREQUENCY]="$frequency"
-    job[THRESHOLD]="${SCHEDULE_THRESHOLD_RAW[$job_id]}"
-    job[THRESHOLD_BYTES]="${SCHEDULE_THRESHOLD_BYTES[$job_id]}"
-    job[SNAPSHOT_PREFIX_BASE]="$SEND_SNAPSHOT_PREFIX"
-    job[SNAPSHOT_PREFIX]="$(job_prefix_for_schedule "$job_id")"
-    job[ATTEMPT_COUNT]="0"
-    job[RETRY_AT]="0"
-    job[LAST_ERROR]=""
-    job[LAST_MESSAGE]="Queued by schedule."
-    job[WORKER_PID]=""
-    job[PROGRESS_PERCENT]="5"
-    job[MEMBER_COUNT]="0"
-    job[COMPLETES_SCHEDULE_WINDOW]="1"
+    dest_pool="$(schedule_destination_pool "$job_id" || true)"
+    [[ -n "$dest_pool" ]] || continue
+    due_jobs+=("$job_id")
+    due_window["$job_id"]="$current_window"
+    due_pool["$job_id"]="$dest_pool"
+    pool_schedule_ids["$dest_pool"]="${pool_schedule_ids[$dest_pool]:-}${job_id} "
+    if [[ -z "${seen_pool[$dest_pool]:-}" ]]; then
+      seen_pool["$dest_pool"]=1
+      due_pools+=("$dest_pool")
+    fi
+  done
 
-    job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "send-${job_id}-${current_window}")"
-    job_write "$job_file" job || continue
+  for pool in "${due_pools[@]}"; do
+    enqueue_pool_prep_job "$pool" "$run_group_id" "$requested_epoch" "$requested_at" "${pool_schedule_ids[$pool]}" || true
+  done
+
+  for job_id in "${due_jobs[@]}"; do
+    pool="${due_pool[$job_id]}"
+    prep_job_id="$(pool_prep_job_id_for_group "$pool" "$run_group_id")"
+    if [[ "${due_is_resume[$job_id]:-0}" == "1" ]]; then
+      enqueue_resume_prepare_job "$job_id" "${due_window[$job_id]}" "$requested_epoch" "$requested_at" \
+        "${due_resume_basename[$job_id]}" "${due_previous_basename[$job_id]:-}" "$prep_job_id" "$pool" "$run_group_id" || true
+    else
+      enqueue_scheduled_prepare_job "$job_id" "${due_window[$job_id]}" "$requested_epoch" "$requested_at" \
+        "$prep_job_id" "$pool" "$run_group_id" "1" "Queued by schedule." || true
+    fi
   done
 
   return 0
@@ -2494,9 +2844,10 @@ mark_job_failed_or_retry() {
 claim_next_send_job() {
   local now_epoch="$1"
   local result_path_var="$2"
+  local selector="${3:-any}"
   local best_path=""
   local best_sort=-1
-  local file state retry_at sort_key job_id
+  local file state retry_at sort_key action
   local -A job=()
 
   printf -v "$result_path_var" ''
@@ -2504,6 +2855,15 @@ claim_next_send_job() {
   while IFS= read -r file; do
     job_load "$file" job || continue
     [[ "$(job_get job JOB_TYPE)" == "send" ]] || continue
+    action="$(job_get job JOB_ACTION)"
+    case "$selector" in
+      pool_prep)
+        [[ "$action" == "pool_prep" ]] || continue
+        ;;
+      non_pool_prep)
+        [[ "$action" != "pool_prep" ]] || continue
+        ;;
+    esac
     state="$(job_get job STATE)"
     retry_at="$(job_get job RETRY_AT 0)"
     job_is_retry_ready "$state" "$retry_at" "$now_epoch" || continue
@@ -3107,22 +3467,21 @@ queue_pool_retention_cleanup() {
   done < <(list_existing_destination_datasets_for_pool "$pool")
 }
 
-queue_pool_free_space_cleanup_for_schedule() {
-  local schedule_job_id="$1"
+queue_pool_free_space_cleanup_for_target() {
+  local pool="$1"
   local capacity_dataset="$2"
-  local delta_map_name="$3"
-  local threshold="${SCHEDULE_THRESHOLD_BYTES[$schedule_job_id]}"
-  local pool effective candidate_snapshot candidate_epoch candidate_dataset
+  local target_bytes="$3"
+  local delta_map_name="$4"
+  local effective candidate_snapshot candidate_epoch candidate_dataset
   # shellcheck disable=SC2034
   local -a active_constraints=()
 
-  pool="$(schedule_destination_pool "$schedule_job_id")"
   [[ -n "$pool" && -n "$capacity_dataset" ]] || return 1
-  [[ "$threshold" =~ ^[0-9]+$ ]] || return 1
+  [[ "$target_bytes" =~ ^[0-9]+$ ]] || return 1
 
   while :; do
     get_dataset_active_constraints "$capacity_dataset" "$delta_map_name" effective active_constraints || return 1
-    (( effective >= threshold )) && return 0
+    (( effective >= target_bytes )) && return 0
 
     candidate_snapshot=""
     candidate_epoch=0
@@ -3139,6 +3498,18 @@ queue_pool_free_space_cleanup_for_schedule() {
 
     return 1
   done
+}
+
+queue_pool_free_space_cleanup_for_schedule() {
+  local schedule_job_id="$1"
+  local capacity_dataset="$2"
+  local delta_map_name="$3"
+  local threshold="${SCHEDULE_THRESHOLD_BYTES[$schedule_job_id]}"
+  local pool
+
+  pool="$(schedule_destination_pool "$schedule_job_id")"
+  [[ "$threshold" =~ ^[0-9]+$ ]] || return 1
+  queue_pool_free_space_cleanup_for_target "$pool" "$capacity_dataset" "$threshold" "$delta_map_name"
 }
 
 queue_schedule_retention_cleanup() {
