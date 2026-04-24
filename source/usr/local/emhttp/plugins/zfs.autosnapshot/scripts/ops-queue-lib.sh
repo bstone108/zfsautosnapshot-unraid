@@ -1288,14 +1288,59 @@ job_lock_dir_for_id() {
 
 acquire_job_claim() {
   local job_id="$1"
-  local lock_dir
+  local lock_dir pid_file
   lock_dir="$(job_lock_dir_for_id "$job_id")"
-  mkdir "$lock_dir" 2>/dev/null
+  pid_file="${lock_dir}/pid"
+
+  mkdir -p "$JOB_LOCKS_DIR" >/dev/null 2>&1 || return 1
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" > "$pid_file" 2>/dev/null || true
+    return 0
+  fi
+
+  job_claim_active "$job_id" && return 1
+  rm -rf "$lock_dir" >/dev/null 2>&1 || true
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" > "$pid_file" 2>/dev/null || true
+    return 0
+  fi
+  return 1
 }
 
 release_job_claim() {
   local job_id="$1"
-  rm -rf "$(job_lock_dir_for_id "$job_id")" >/dev/null 2>&1 || true
+  local lock_dir pid
+
+  lock_dir="$(job_lock_dir_for_id "$job_id")"
+  pid="$(sed -n '1p' "${lock_dir}/pid" 2>/dev/null || true)"
+  [[ -z "$pid" || "$pid" == "$$" ]] || return 0
+  rm -rf "$lock_dir" >/dev/null 2>&1 || true
+}
+
+job_claim_active() {
+  local job_id="$1"
+  local lock_dir pid_file pid now_epoch mtime_epoch
+
+  lock_dir="$(job_lock_dir_for_id "$job_id")"
+  [[ -d "$lock_dir" ]] || return 1
+  pid_file="${lock_dir}/pid"
+  pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$pid" ]]; then
+    if process_alive "$pid"; then
+      return 0
+    fi
+    rm -rf "$lock_dir" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  now_epoch="$(date +%s)"
+  mtime_epoch="$(stat -c %Y "$lock_dir" 2>/dev/null || stat -f %m "$lock_dir" 2>/dev/null || echo "$now_epoch")"
+  [[ "$mtime_epoch" =~ ^[0-9]+$ ]] || mtime_epoch="$now_epoch"
+  if (( now_epoch - mtime_epoch <= 300 )); then
+    return 0
+  fi
+  rm -rf "$lock_dir" >/dev/null 2>&1 || true
+  return 1
 }
 
 process_alive() {
@@ -3331,40 +3376,82 @@ send_job_needs_preflight() {
   return 1
 }
 
+send_job_matches_selector() {
+  local assoc_name="$1"
+  local selector="${2:-any}"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+  local action
+
+  action="${job_ref[JOB_ACTION]:-}"
+  case "$selector" in
+    pool_prep)
+      [[ "$action" == "pool_prep" ]]
+      ;;
+    non_pool_prep)
+      [[ "$action" != "pool_prep" ]]
+      ;;
+    non_pool_prep_preflight)
+      [[ "$action" != "pool_prep" ]] && send_job_needs_preflight "$assoc_name"
+      ;;
+    non_pool_prep_ready)
+      [[ "$action" != "pool_prep" ]] && ! send_job_needs_preflight "$assoc_name"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+send_job_ready_for_selector() {
+  local assoc_name="$1"
+  local selector="$2"
+  local now_epoch="$3"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+  local state retry_at job_id
+
+  [[ "${job_ref[JOB_TYPE]:-}" == "send" ]] || return 1
+  send_job_matches_selector "$assoc_name" "$selector" || return 1
+  state="${job_ref[STATE]:-}"
+  retry_at="${job_ref[RETRY_AT]:-0}"
+  job_is_retry_ready "$state" "$retry_at" "$now_epoch" || return 1
+  job_id="${job_ref[JOB_ID]:-}"
+  [[ -n "$job_id" ]] || return 1
+  job_claim_active "$job_id" && return 1
+  return 0
+}
+
+count_ready_send_jobs() {
+  local now_epoch="$1"
+  local selector="${2:-any}"
+  local file count=0
+  local -A job=()
+
+  while IFS= read -r file; do
+    job_load "$file" job || continue
+    if send_job_ready_for_selector job "$selector" "$now_epoch"; then
+      count=$((count + 1))
+    fi
+  done < <(list_job_files)
+
+  printf '%s' "$count"
+}
+
 claim_next_send_job() {
   local now_epoch="$1"
   local result_path_var="$2"
   local selector="${3:-any}"
   local best_path=""
   local best_sort=-1
-  local file state retry_at sort_key action
+  local file sort_key
   local -A job=()
 
   printf -v "$result_path_var" ''
 
   while IFS= read -r file; do
     job_load "$file" job || continue
-    [[ "$(job_get job JOB_TYPE)" == "send" ]] || continue
-    action="$(job_get job JOB_ACTION)"
-    case "$selector" in
-      pool_prep)
-        [[ "$action" == "pool_prep" ]] || continue
-        ;;
-      non_pool_prep)
-        [[ "$action" != "pool_prep" ]] || continue
-        ;;
-      non_pool_prep_preflight)
-        [[ "$action" != "pool_prep" ]] || continue
-        send_job_needs_preflight job || continue
-        ;;
-      non_pool_prep_ready)
-        [[ "$action" != "pool_prep" ]] || continue
-        ! send_job_needs_preflight job || continue
-        ;;
-    esac
-    state="$(job_get job STATE)"
-    retry_at="$(job_get job RETRY_AT 0)"
-    job_is_retry_ready "$state" "$retry_at" "$now_epoch" || continue
+    send_job_ready_for_selector job "$selector" "$now_epoch" || continue
     sort_key="$(job_get job QUEUE_SORT 0)"
     [[ "$sort_key" =~ ^[0-9]+$ ]] || sort_key=0
     if (( best_sort == -1 || sort_key < best_sort )); then

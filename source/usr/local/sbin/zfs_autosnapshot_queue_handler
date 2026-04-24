@@ -25,14 +25,16 @@ handler_cleanup() {
 
 spawn_available_workers() {
   local now_epoch="$1"
-  local candidate_path worker_lock_dir max_send_workers prep_extra_workers preflight_workers
+  local worker_lock_dir max_send_workers prep_extra_workers preflight_workers ready_count launched
 
+  ready_count="$(count_ready_send_jobs "$now_epoch" pool_prep)"
+  launched=0
   while pool_prep_worker_slot_available; do
-    claim_next_send_job "$now_epoch" candidate_path pool_prep || break
-    [[ -n "$candidate_path" ]] || break
+    (( launched < ready_count )) || break
     worker_lock_dir=""
     acquire_send_worker_launch_slot pool_prep 8 worker_lock_dir || break
     spawn_pool_prep_worker "$worker_lock_dir"
+    launched=$((launched + 1))
     sleep 0.05
   done
 
@@ -44,12 +46,14 @@ spawn_available_workers() {
   [[ "$prep_extra_workers" =~ ^[0-9]+$ ]] || prep_extra_workers="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
   (( prep_extra_workers >= 0 )) || prep_extra_workers=0
 
+  ready_count="$(count_ready_send_jobs "$now_epoch" non_pool_prep_ready)"
+  launched=0
   while send_worker_role_slot_available transfer "$max_send_workers"; do
-    claim_next_send_job "$now_epoch" candidate_path non_pool_prep_ready || break
-    [[ -n "$candidate_path" ]] || break
+    (( launched < ready_count )) || break
     worker_lock_dir=""
     acquire_send_worker_launch_slot transfer "$max_send_workers" worker_lock_dir || break
     spawn_send_worker "$worker_lock_dir" non_pool_prep_ready
+    launched=$((launched + 1))
     sleep 0.05
   done
 
@@ -57,12 +61,14 @@ spawn_available_workers() {
   if (( preflight_workers <= 0 )); then
     preflight_workers="$max_send_workers"
   fi
+  ready_count="$(count_ready_send_jobs "$now_epoch" non_pool_prep_preflight)"
+  launched=0
   while send_worker_role_slot_available preflight "$preflight_workers"; do
-    claim_next_send_job "$now_epoch" candidate_path non_pool_prep_preflight || break
-    [[ -n "$candidate_path" ]] || break
+    (( launched < ready_count )) || break
     worker_lock_dir=""
     acquire_send_worker_launch_slot preflight "$preflight_workers" worker_lock_dir || break
     spawn_send_worker "$worker_lock_dir" non_pool_prep_preflight
+    launched=$((launched + 1))
     sleep 0.05
   done
 
@@ -104,7 +110,7 @@ main() {
 
     if send_or_delete_queue_has_active_work; then
       idle_since=0
-      sleep 2
+      sleep 1
       continue
     fi
 
@@ -114,7 +120,7 @@ main() {
     if (( now_epoch - idle_since >= idle_timeout )); then
       break
     fi
-    sleep 2
+    sleep 1
   done
 
   log "Queue handler $$ finished"

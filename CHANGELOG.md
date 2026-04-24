@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.04.24.11 (Testing Branch Only)
+
+- Fixed `ZFS Send` queue fan-out so the live handler launches batches of eligible workers immediately instead of repeatedly peeking the same first queued row.
+- Added PID-backed job claim checks so workers skip jobs already claimed by another worker, which keeps the queue moving near the configured parallel limit.
+
 ### 2026.04.24.10 (Testing Branch Only)
 
 - Fixed `ZFS Send` preflight dispatch so jobs that already finished snapshot/space preparation and are waiting for a send slot no longer block fresh queued children from preparing.
