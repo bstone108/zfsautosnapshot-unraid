@@ -133,8 +133,36 @@ get_unraid_array_status() {
 normalize_unraid_state_value() {
   local value="${1:-}"
   value="$(trim "$value")"
+  value="${value%$'\r'}"
+  if (( ${#value} >= 2 )); then
+    case "$value" in
+      \"*\") value="${value:1:${#value}-2}" ;;
+      \'*\') value="${value:1:${#value}-2}" ;;
+    esac
+  fi
+  value="$(trim "$value")"
   value="${value,,}"
   printf '%s' "$value"
+}
+
+unraid_state_is_actionable() {
+  local value="$1"
+  case "$value" in
+    1|yes|true|started|started_mounted|mounted|array_started|array_started_mounted|running)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+unraid_state_is_not_actionable() {
+  local value="$1"
+  case "$value" in
+    0|no|false|stopped|stopping|starting|shutdown|shutting_down|array_stopped|array_stopping|array_starting)
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 unraid_actionable_state_value() {
@@ -156,51 +184,36 @@ unraid_array_actionable() {
   sb_state="$(unraid_actionable_state_value "sbState" || true)"
   started="$(unraid_actionable_state_value "started" || true)"
 
-  case "$md_state" in
-    started|started_mounted|mounted)
-      return 0
-      ;;
-    stopped|stopping|starting|shutdown|shutting_down)
-      return 1
-      ;;
-  esac
+  if [[ -n "$md_state" ]]; then
+    unraid_state_is_actionable "$md_state" && return 0
+    unraid_state_is_not_actionable "$md_state" && return 1
+  fi
 
-  case "$fs_state" in
-    started|mounted)
-      return 0
-      ;;
-    stopped|stopping|starting|shutdown|shutting_down)
-      return 1
-      ;;
-  esac
+  if [[ -n "$fs_state" ]]; then
+    unraid_state_is_actionable "$fs_state" && return 0
+    unraid_state_is_not_actionable "$fs_state" && return 1
+  fi
 
-  case "$sb_state" in
-    started|mounted)
-      return 0
-      ;;
-    stopped|stopping|starting|shutdown|shutting_down)
-      return 1
-      ;;
-  esac
+  if [[ -n "$sb_state" ]]; then
+    unraid_state_is_actionable "$sb_state" && return 0
+    unraid_state_is_not_actionable "$sb_state" && return 1
+  fi
 
-  case "$started" in
-    1|yes|true)
-      return 0
-      ;;
-    0|no|false)
-      return 1
-      ;;
-  esac
+  if [[ -n "$started" ]]; then
+    unraid_state_is_actionable "$started" && return 0
+    unraid_state_is_not_actionable "$started" && return 1
+  fi
 
   return 1
 }
 
 unraid_array_action_message() {
-  local md_state fs_state sb_state
+  local md_state fs_state sb_state started
 
   md_state="$(unraid_actionable_state_value "mdState" || true)"
   fs_state="$(unraid_actionable_state_value "fsState" || true)"
   sb_state="$(unraid_actionable_state_value "sbState" || true)"
+  started="$(unraid_actionable_state_value "started" || true)"
 
   if [[ -n "$md_state" ]]; then
     printf 'Waiting for Unraid array to become actionable (mdState=%s)' "$md_state"
@@ -214,6 +227,11 @@ unraid_array_action_message() {
 
   if [[ -n "$sb_state" ]]; then
     printf 'Waiting for Unraid system state to become actionable (sbState=%s)' "$sb_state"
+    return 0
+  fi
+
+  if [[ -n "$started" ]]; then
+    printf 'Waiting for Unraid array start flag to become actionable (started=%s)' "$started"
     return 0
   fi
 

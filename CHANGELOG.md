@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.05.01 (2026-05-05)
+
+- Fixed scheduled `ZFS Send` runs that could remain stuck waiting for the Unraid array to become actionable when the fallback array-state file reported quoted values like `"STARTED"`.
+- Improved the queue's Unraid array-state parser so quoted and alternate started/stopped values are normalized consistently before workers decide whether to run or pause.
+
 ### 2026.04.24.14 (Testing Branch Only)
 
 - Changed the `ZFS Send` queue status badge to show specific wait reasons like `Waiting for autosnapshot` instead of the generic `Waiting`.
