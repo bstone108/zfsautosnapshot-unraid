@@ -41,6 +41,9 @@ LOG_FILE="/var/log/zfs_autosnapshot_send.log"
 LOG_ARCHIVE_FILE="/var/log/zfs_autosnapshot_send.archive.log"
 SEND_LOG_MAX_BYTES="${SEND_LOG_MAX_BYTES:-2097152}"
 SEND_LOG_ARCHIVE_MAX_BYTES="${SEND_LOG_ARCHIVE_MAX_BYTES:-4194304}"
+# TESTING_DEBUG_MARKER: Enabled on the testing branch to collect detailed ZFS send behavior.
+# Strip this setting and zfsas_send_debug_marker calls before promoting to main/release.
+ZFSAS_SEND_DEBUG_MARKERS="${ZFSAS_SEND_DEBUG_MARKERS:-1}"
 
 DEFAULT_SEND_SNAPSHOT_PREFIX="zfs-send-"
 DEFAULT_SEND_MAX_PARALLEL="1"
@@ -97,6 +100,12 @@ SEND_PROTECTED_BASENAME_CACHE_LOADED=0
 
 log() {
   printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$(zfsas_log_sanitize_text "$*")"
+}
+
+zfsas_send_debug_marker() {
+  [[ "${ZFSAS_SEND_DEBUG_MARKERS:-0}" == "1" ]] || return 0
+  # TESTING_DEBUG_MARKER: testing-only behavioral breadcrumb. Remove before main/release promotion.
+  log "TESTING_DEBUG_MARKER zfs_send $*"
 }
 
 find_mdcmd() {
@@ -1496,6 +1505,7 @@ acquire_send_space_reservation() {
   }
 
   cleanup_stale_send_space_reservations_locked
+  zfsas_send_debug_marker "space_reservation_check job_id=${job_id} destination=${destination} capacity_dataset=${capacity_dataset} required=${required_bytes} buffer=${buffer_bytes} needed=${needed}"
   if send_space_effective_avail_after_reservations_locked "$capacity_dataset" "$job_id" available && (( available >= needed )); then
     reservation_file="$(send_space_reservation_file_for_job "$job_id")"
     reservation[JOB_ID]="$job_id"
@@ -1514,6 +1524,7 @@ acquire_send_space_reservation() {
     }
     flock -u "$fd" || true
     eval "exec ${fd}>&-"
+    zfsas_send_debug_marker "space_reservation_acquired job_id=${job_id} destination=${destination} capacity_dataset=${capacity_dataset} available_after_existing=${available} needed=${needed} required=${required_bytes} buffer=${buffer_bytes}"
     printf -v "$available_var" '%s' "$available"
     printf -v "$needed_var" '%s' "$needed"
     return 0
@@ -1521,6 +1532,7 @@ acquire_send_space_reservation() {
 
   flock -u "$fd" || true
   eval "exec ${fd}>&-"
+  zfsas_send_debug_marker "space_reservation_denied job_id=${job_id} destination=${destination} capacity_dataset=${capacity_dataset} available=${available:-0} needed=${needed} required=${required_bytes} buffer=${buffer_bytes}"
   printf -v "$available_var" '%s' "${available:-0}"
   printf -v "$needed_var" '%s' "$needed"
   return 1
@@ -1600,6 +1612,7 @@ acquire_send_transfer_slot() {
     if mkdir "$lock_dir" 2>/dev/null; then
       printf '%s\n' "$pid" > "${lock_dir}/pid" 2>/dev/null || true
       printf '%s\n' "$job_id" > "${lock_dir}/job_id" 2>/dev/null || true
+      zfsas_send_debug_marker "transfer_slot_acquired job_id=${job_id} slot=${slot} lock_dir=${lock_dir}"
       printf -v "$result_var" '%s' "$lock_dir"
       return 0
     fi
@@ -1610,6 +1623,7 @@ acquire_send_transfer_slot() {
       if mkdir "$lock_dir" 2>/dev/null; then
         printf '%s\n' "$pid" > "${lock_dir}/pid" 2>/dev/null || true
         printf '%s\n' "$job_id" > "${lock_dir}/job_id" 2>/dev/null || true
+        zfsas_send_debug_marker "transfer_slot_recovered job_id=${job_id} slot=${slot} lock_dir=${lock_dir}"
         printf -v "$result_var" '%s' "$lock_dir"
         return 0
       fi
@@ -2502,6 +2516,7 @@ run_pipeline_with_status() {
   fi
 
   log "$description"
+  zfsas_send_debug_marker "pipeline_start mode=$([[ -n "$base_snapshot" ]] && printf incremental || printf full) base=${base_snapshot:-none} snapshot=${snapshot} destination=${destination} progress_total_bytes=${progress_total_bytes} progress_window=${progress_start_percent}-${progress_end_percent}"
   if [[ "$progress_total_bytes" =~ ^[0-9]+$ ]] && (( progress_total_bytes > 0 )) && dd_status_progress_supported; then
     progress_supported=1
   fi
@@ -2521,6 +2536,7 @@ run_pipeline_with_status() {
     fi
     if (( pipeline_rc != 0 )); then
       log "Send pipeline failed: mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
+      zfsas_send_debug_marker "pipeline_failed mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
       return 1
     fi
   else
@@ -2538,10 +2554,12 @@ run_pipeline_with_status() {
     fi
     if (( pipeline_rc != 0 )); then
       log "Send pipeline failed: mode=full snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
+      zfsas_send_debug_marker "pipeline_failed mode=full snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
       return 1
     fi
   fi
 
+  zfsas_send_debug_marker "pipeline_complete mode=$([[ -n "$base_snapshot" ]] && printf incremental || printf full) base=${base_snapshot:-none} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
   return 0
 }
 
@@ -2686,6 +2704,7 @@ find_latest_common_basename_for_member() {
   local prefix="$3"
   local result_name_var="$4"
   local source_inventory dest_inventory snap_name snap_epoch snap_base
+  local source_count dest_count
   local -A dest_basenames=()
 
   printf -v "$result_name_var" ''
@@ -2693,6 +2712,8 @@ find_latest_common_basename_for_member() {
 
   source_inventory="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null | grep -F "@${prefix}" | sort -t $'\t' -k2,2n || true)"
   dest_inventory="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$dest_dataset" 2>/dev/null | grep -F "@${prefix}" | sort -t $'\t' -k2,2n || true)"
+  source_count="$(printf '%s\n' "$source_inventory" | awk 'NF { c++ } END { print c+0 }')"
+  dest_count="$(printf '%s\n' "$dest_inventory" | awk 'NF { c++ } END { print c+0 }')"
 
   while IFS=$'\t' read -r snap_name snap_epoch; do
     [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
@@ -2706,6 +2727,7 @@ find_latest_common_basename_for_member() {
       printf -v "$result_name_var" '%s' "$snap_base"
     fi
   done <<< "$source_inventory"
+  zfsas_send_debug_marker "latest_common_scan source=${source_dataset} destination=${dest_dataset} prefix=${prefix} source_matches=${source_count} destination_matches=${dest_count} latest_common=${!result_name_var:-none}"
 }
 
 find_latest_common_snapshot_for_target() {

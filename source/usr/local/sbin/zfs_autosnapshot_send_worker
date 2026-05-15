@@ -72,6 +72,7 @@ set_job_progress() {
 complete_job() {
   local message="$1"
   local ttl="${2:-$JOB_SUCCESS_TTL_SECONDS}"
+  zfsas_send_debug_marker "job_complete_start job_id=$(job_get job JOB_ID) mode=$(job_get job JOB_MODE) action=$(effective_job_action job) phase=$(job_get job PHASE) message=${message} ttl=${ttl}"
   job[STATE]="complete"
   job[PHASE]="complete"
   job[PROGRESS_PERCENT]="100"
@@ -109,6 +110,7 @@ fail_current_job() {
 
 fail_current_job_final() {
   local message="$1"
+  zfsas_send_debug_marker "job_failed_final job_id=$(job_get job JOB_ID) mode=$(job_get job JOB_MODE) action=$(effective_job_action job) phase=$(job_get job PHASE) message=${message}"
   job[STATE]="failed"
   job[PHASE]="failed"
   job[RETRY_AT]="0"
@@ -124,6 +126,7 @@ defer_current_job() {
   local message="$1"
   local delay="${2:-15}"
   local now_epoch
+  zfsas_send_debug_marker "job_deferred job_id=$(job_get job JOB_ID) mode=$(job_get job JOB_MODE) action=$(effective_job_action job) phase=$(job_get job PHASE) delay=${delay} message=${message}"
   now_epoch="$(date +%s)"
   job[STATE]="retry_wait"
   job[PHASE]="retry_wait"
@@ -633,6 +636,7 @@ prepare_scheduled_job_snapshot() {
   job[SOURCE_SNAPSHOT_NAME]="$basename"
   job[SOURCE_SNAPSHOT_EPOCH]="$(date +%s)"
   build_members_for_job job "$basename"
+  zfsas_send_debug_marker "scheduled_checkpoint_created job_id=$(job_get job JOB_ID) schedule_job_id=$(job_get job SCHEDULE_JOB_ID) source_root=${source_root} include_children=${include_children} snapshot=${source_root}@${basename} previous_basename=${previous_basename:-none} member_count=$(job_get job MEMBER_COUNT 0)"
   persist_job
   return 0
 }
@@ -832,6 +836,7 @@ queue_child_send_jobs() {
 
   fanout_elapsed=$(( $(date +%s) - fanout_started ))
   log "Queued ${member_count} child send job(s) for ${run_root_id} in ${fanout_elapsed}s"
+  zfsas_send_debug_marker "child_jobs_queued parent_job_id=${run_root_id} schedule_job_id=${schedule_job_id} run_group_id=${run_group_id} member_count=${member_count} resume_only=${resume_only} finalize_job_id=${finalize_job_id} source_root=${source_root} destination_root=${destination_root} snapshot_basename=${snapshot_basename} previous_basename=${previous_basename:-none} elapsed=${fanout_elapsed}s"
   return 0
 }
 
@@ -874,6 +879,7 @@ send_member_snapshot() {
   fi
 
   log "Send preflight: source=${source_dataset} source_exists=${source_exists} source_type=${source_type:-unknown} destination=${destination} destination_exists=${destination_exists} destination_type=${destination_type:-missing} parent=${destination_parent} parent_exists=${parent_exists} snapshot=${snapshot} job_mode=$(job_get job JOB_MODE) job_action=$(effective_job_action job)"
+  zfsas_send_debug_marker "member_preflight job_id=$(job_get job JOB_ID) schedule_job_id=$(job_get job SCHEDULE_JOB_ID) member_index=${member_index}/${member_count} source=${source_dataset} source_exists=${source_exists} source_type=${source_type:-unknown} destination=${destination} destination_exists=${destination_exists} destination_type=${destination_type:-missing} parent=${destination_parent} parent_exists=${parent_exists} snapshot=${snapshot} basename=${basename} mode=$(job_get job JOB_MODE) action=$(effective_job_action job)"
 
   if ! ensure_destination_parent_exists "$destination"; then
     fail_current_job_final "Unable to ensure destination parent exists for '${destination}'."
@@ -882,6 +888,7 @@ send_member_snapshot() {
 
   if snapshot_exists "${destination}@${basename}"; then
     log "Destination already has ${destination}@${basename}; skipping receive for this member."
+    zfsas_send_debug_marker "member_already_received job_id=$(job_get job JOB_ID) source=${source_dataset} destination=${destination} snapshot=${basename}"
     return 0
   fi
 
@@ -909,6 +916,7 @@ send_member_snapshot() {
     latest_common=""
     find_latest_common_basename_for_member "$source_dataset" "$destination" "$(job_get job SNAPSHOT_PREFIX)" latest_common
     log "Scheduled send base selection: source=${source_dataset} destination=${destination} requested_snapshot=${basename} latest_common=${latest_common:-none}"
+    zfsas_send_debug_marker "base_selection mode=scheduled job_id=$(job_get job JOB_ID) schedule_job_id=$(job_get job SCHEDULE_JOB_ID) source=${source_dataset} destination=${destination} requested_snapshot=${basename} prefix=$(job_get job SNAPSHOT_PREFIX) latest_common=${latest_common:-none} destination_exists=${destination_exists}"
     if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
       is_valid_snapshot_basename "$latest_common" || {
         fail_current_job_final "Base snapshot '${latest_common}' is invalid."
@@ -920,6 +928,7 @@ send_member_snapshot() {
       if (( destination_exists == 1 )) && dataset_has_any_snapshots "$destination"; then
         failure_message="No common send checkpoint remains between '${source_dataset}' and '${destination}'. The destination dataset was purged so the next retry can reseed this backup from scratch. Review the preserved send log for diagnostics."
         log "$failure_message"
+        zfsas_send_debug_marker "reseed_required mode=scheduled job_id=$(job_get job JOB_ID) schedule_job_id=$(job_get job SCHEDULE_JOB_ID) source=${source_dataset} destination=${destination} requested_snapshot=${basename} destination_had_snapshots=1 action=purge_destination_for_reseed"
         if purge_destination_for_reseed "$destination"; then
           job[LAST_ERROR]="$failure_message"
           job[LAST_MESSAGE]="$failure_message"
@@ -937,6 +946,7 @@ send_member_snapshot() {
     latest_common=""
     find_latest_common_snapshot_for_target "$source_dataset" "$destination" "$basename" latest_common
     log "Manual send base selection: source=${source_dataset} destination=${destination} requested_snapshot=${basename} latest_common=${latest_common:-none}"
+    zfsas_send_debug_marker "base_selection mode=manual job_id=$(job_get job JOB_ID) source=${source_dataset} destination=${destination} requested_snapshot=${basename} latest_common=${latest_common:-none} destination_exists=${destination_exists}"
     if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
       is_valid_snapshot_basename "$latest_common" || {
         fail_current_job_final "Base snapshot '${latest_common}' is invalid."
@@ -976,6 +986,7 @@ cleanup_source_checkpoints_for_verified_member() {
 
   retained_basename=""
   find_latest_common_basename_for_member "$source_dataset" "$destination" "$prefix" retained_basename || true
+  zfsas_send_debug_marker "source_cleanup_scan job_id=$(job_get job JOB_ID) schedule_job_id=${schedule_job_id} source=${source_dataset} destination=${destination} current_basename=${current_basename} prefix=${prefix} retained_basename=${retained_basename:-none}"
   [[ -n "$retained_basename" ]] || {
     log "Skipping source checkpoint cleanup for ${source_dataset}; no common checkpoint with ${destination} was found."
     return 0
@@ -1016,12 +1027,14 @@ cleanup_source_checkpoints_for_verified_member() {
 
   ((${#old_basenames[@]} > 0)) || return 0
 
+  zfsas_send_debug_marker "source_cleanup_candidates job_id=$(job_get job JOB_ID) schedule_job_id=${schedule_job_id} source=${source_dataset} destination=${destination} retained_basename=${retained_basename} candidate_count=${#old_basenames[@]} candidates=$(printf '%s,' "${!old_basenames[@]}")"
   set_job_progress "cleanup" "95" "Cleaning source checkpoints."
   for snap_base in "${!old_basenames[@]}"; do
     while IFS=$'\t' read -r snap_name snap_epoch; do
       [[ -n "$snap_name" ]] || continue
       [[ "${snap_name##*@}" == "$snap_base" ]] || continue
       log "Deleting source send checkpoint: $snap_name"
+      zfsas_send_debug_marker "source_checkpoint_destroy job_id=$(job_get job JOB_ID) schedule_job_id=${schedule_job_id} snapshot=${snap_name} retained_basename=${retained_basename}"
       zfs destroy "$snap_name"
     done < <(zfs list -H -p -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null || true)
   done
@@ -1034,6 +1047,7 @@ purge_destination_for_reseed() {
   dataset_exists "$destination" || return 0
 
   log "Purging destination dataset for automatic reseed: ${destination}"
+  zfsas_send_debug_marker "destination_reseed_purge destination=${destination}"
   zfs destroy -r "$destination"
 }
 
@@ -1133,16 +1147,19 @@ process_finalize_job() {
   parent_run_id="$(job_get job PARENT_RUN_ID)"
 
   if run_child_jobs_have_failed "$parent_run_id"; then
+    zfsas_send_debug_marker "finalize_skip_child_failed job_id=$(job_get job JOB_ID) parent_run_id=${parent_run_id}"
     skip_job "Skipped; child failed."
     return 0
   fi
 
   if run_child_jobs_still_active "$parent_run_id"; then
+    zfsas_send_debug_marker "finalize_waiting_for_children job_id=$(job_get job JOB_ID) parent_run_id=${parent_run_id}"
     defer_current_job "Waiting for children." 15
     return 2
   fi
 
   complete_job "Scheduled window complete."
+  zfsas_send_debug_marker "finalize_complete job_id=$(job_get job JOB_ID) parent_run_id=${parent_run_id} schedule_job_id=$(job_get job SCHEDULE_JOB_ID) window_key=$(job_get job WINDOW_KEY)"
   return 0
 }
 
