@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.15.01 (Testing Branch Only)
+
+- Added temporary testing-only `ZFS Send` debug markers to capture detailed field behavior for checkpoint creation, base snapshot selection, queue fan-out, reservations, send/receive pipeline results, reseed decisions, cleanup, and finalization.
+- Added an explicit reminder to strip the temporary debug markers before promoting these changes to `main`.
+
 ### 2026.05.05.01 (2026-05-05)
 
 - Fixed scheduled `ZFS Send` runs that could remain stuck waiting for the Unraid array to become actionable when the fallback array-state file reported quoted values like `"STARTED"`.
