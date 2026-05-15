@@ -780,6 +780,8 @@ parse_send_jobs_config() {
     job_id="$(trim "$job_id")"
     source="$(trim "$source")"
     dest="$(trim "$dest")"
+    source="${source%/}"
+    dest="${dest%/}"
     freq="$(normalize_send_frequency "$(trim "$freq")")"
     thresh="$(trim "$thresh")"
     children="$(trim "${children:-0}")"
@@ -3740,9 +3742,20 @@ queue_snapshot_delete_job() {
 
   if [[ -z "$send_schedule_job_id" ]]; then
     parsed_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snapshot_name" 2>/dev/null || true)"
-    if [[ -n "$parsed_schedule_job_id" && -n "${SCHEDULE_SOURCE_ROOT[$parsed_schedule_job_id]:-}" ]]; then
+    if [[ -n "$parsed_schedule_job_id" ]]; then
+      if [[ -z "${SCHEDULE_SOURCE_ROOT[$parsed_schedule_job_id]:-}" || -z "${SCHEDULE_DEST_ROOT[$parsed_schedule_job_id]:-}" ]]; then
+        log "Skipping snapshot delete queue for ${snapshot}; send checkpoint ${snapshot_name} belongs to schedule ${parsed_schedule_job_id}, but that schedule is not loaded."
+        return 0
+      fi
       send_schedule_job_id="$parsed_schedule_job_id"
       delete_scope="checkpoint"
+    fi
+  fi
+
+  if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
+    if [[ -z "${SCHEDULE_SOURCE_ROOT[$send_schedule_job_id]:-}" || -z "${SCHEDULE_DEST_ROOT[$send_schedule_job_id]:-}" ]]; then
+      log "Skipping snapshot delete queue for ${snapshot}; send checkpoint schedule ${send_schedule_job_id} is not loaded."
+      return 0
     fi
   fi
 

@@ -555,9 +555,12 @@ process_send_checkpoint_delete() {
   delete_scope="$(job_get job DELETE_SCOPE snapshot)"
 
   [[ -n "$schedule_job_id" ]] || schedule_job_id="$(parse_send_checkpoint_schedule_id "$basename" 2>/dev/null || true)"
-  if [[ -z "$schedule_job_id" || -z "${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}" ]]; then
-    delete_single_snapshot "$snapshot" || return $?
-    complete_delete_job "Deleted send-managed snapshot ${snapshot}."
+  if [[ -z "$schedule_job_id" ]]; then
+    fail_delete_job "Cannot safely delete send-managed snapshot ${snapshot} because its schedule id could not be determined."
+    return 0
+  fi
+  if [[ -z "${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}" || -z "${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}" ]]; then
+    fail_delete_job "Cannot safely delete send-managed snapshot ${snapshot} because schedule ${schedule_job_id} is not loaded."
     return 0
   fi
 

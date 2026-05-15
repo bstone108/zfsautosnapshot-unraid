@@ -748,6 +748,9 @@ main() {
   test_missing_configured_dataset_is_skipped
   echo "PASS: missing configured datasets are skipped"
 
+  python3 "${ROOT_DIR}/tests/stage1/send_settings_static_checks.py"
+  bash "${ROOT_DIR}/tests/stage1/zero_change_common_harness.sh"
+
   echo "All Stage 1 tests passed."
 }
 

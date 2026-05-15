@@ -76,15 +76,21 @@ function zfsas_send_frequency_label($value)
     return $options[$value] ?? $value;
 }
 
+function zfsas_send_normalize_dataset_path($value)
+{
+    $normalized = rtrim(zfsas_send_trim($value), '/');
+    return $normalized;
+}
+
 function zfsas_send_job_id($source, $destination)
 {
-    return substr(sha1(strtolower(trim((string) $source) . "|" . trim((string) $destination))), 0, 12);
+    return substr(sha1(strtolower(zfsas_send_normalize_dataset_path($source) . "|" . zfsas_send_normalize_dataset_path($destination))), 0, 12);
 }
 
 function zfsas_send_paths_overlap($source, $destination)
 {
-    $source = zfsas_send_trim($source);
-    $destination = zfsas_send_trim($destination);
+    $source = zfsas_send_normalize_dataset_path($source);
+    $destination = zfsas_send_normalize_dataset_path($destination);
 
     if ($source === '' || $destination === '') {
         return false;
@@ -293,8 +299,8 @@ function zfsas_send_parse_jobs($jobsRaw, &$errors = [], &$warnings = [])
         $thresholdRaw = $pieces[4] ?? '';
         $childrenRaw = $pieces[5] ?? '0';
         $jobId = zfsas_send_trim($jobIdRaw);
-        $source = zfsas_send_trim($sourceRaw);
-        $destination = zfsas_send_trim($destinationRaw);
+        $source = zfsas_send_normalize_dataset_path($sourceRaw);
+        $destination = zfsas_send_normalize_dataset_path($destinationRaw);
         $frequency = zfsas_send_normalize_frequency($frequencyRaw, true);
         $threshold = zfsas_send_normalize_threshold($thresholdRaw);
         $children = zfsas_send_normalize_children_flag($childrenRaw);
@@ -383,8 +389,8 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
             continue;
         }
 
-        $source = zfsas_send_trim($sourceRaw);
-        $destination = zfsas_send_trim($destinations[$index] ?? '');
+        $source = zfsas_send_normalize_dataset_path($sourceRaw);
+        $destination = zfsas_send_normalize_dataset_path($destinations[$index] ?? '');
         $frequency = zfsas_send_normalize_frequency($frequencies[$index] ?? '');
         $threshold = zfsas_send_normalize_threshold($thresholds[$index] ?? '');
         $children = zfsas_send_normalize_children_flag($childrenFlags[$index] ?? '0');
@@ -453,8 +459,8 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
         $seenJobIds[$jobId] = true;
     }
 
-    $newSource = zfsas_send_trim($post['new_job_source'] ?? '');
-    $newDestination = zfsas_send_trim($post['new_job_destination'] ?? '');
+    $newSource = zfsas_send_normalize_dataset_path($post['new_job_source'] ?? '');
+    $newDestination = zfsas_send_normalize_dataset_path($post['new_job_destination'] ?? '');
     $newFrequencyRaw = zfsas_send_trim($post['new_job_frequency'] ?? '');
     $newThresholdRaw = zfsas_send_trim($post['new_job_threshold'] ?? '');
     $newChildrenRaw = zfsas_send_trim($post['new_job_children'] ?? '0');
@@ -543,6 +549,29 @@ function zfsas_send_render_config($config)
     return implode("\n", $lines);
 }
 
+function zfsas_send_write_config_atomically($configFile, $content)
+{
+    $dir = dirname($configFile);
+    $tmpFile = tempnam($dir, basename($configFile) . '.tmp.');
+    if ($tmpFile === false) {
+        return false;
+    }
+
+    $written = @file_put_contents($tmpFile, $content, LOCK_EX);
+    if ($written === false) {
+        @unlink($tmpFile);
+        return false;
+    }
+
+    @chmod($tmpFile, 0660);
+    if (!@rename($tmpFile, $configFile)) {
+        @unlink($tmpFile);
+        return false;
+    }
+
+    return $written;
+}
+
 function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScript, $config, $defaultReturnUrl)
 {
     $errors = [];
@@ -581,7 +610,7 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
             @mkdir($configDir, 0775, true);
         }
 
-        $written = @file_put_contents($configFile, zfsas_send_render_config($config));
+        $written = zfsas_send_write_config_atomically($configFile, zfsas_send_render_config($config));
         if ($written === false) {
             $errors[] = "Unable to write config file: {$configFile}";
         } else {
