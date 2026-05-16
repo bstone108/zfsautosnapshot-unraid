@@ -9,6 +9,7 @@ $logApiUrl = "/plugins/{$pluginName}/php/log-tail.php";
 $logStreamApiUrl = "/plugins/{$pluginName}/php/log-stream.php";
 $runApiUrl = "/plugins/{$pluginName}/php/run-now.php";
 $saveApiUrl = "/plugins/{$pluginName}/php/save-settings.php";
+$diagnosticsApiUrl = "/plugins/zfs.autosnapshot/php/diagnostics.php";
 $sendSettingsUrl = "/plugins/{$pluginName}/php/send-settings.php";
 $migrateDatasetsUrl = "/plugins/{$pluginName}/php/migrate-datasets.php";
 $snapshotManagerPageUrl = "/plugins/{$pluginName}/php/snapshot-manager-page.php";
@@ -758,7 +759,7 @@ $sendJobs = zfsas_send_parse_jobs($sendConfig['SEND_JOBS'] ?? '', $sendParseErro
 $sendDestinationCandidates = array_values(array_unique(array_merge($availableDatasets, array_keys($configuredDatasetMap))));
 $sendDestinationDatasets = zfsas_send_destination_datasets_from_jobs($sendJobs, $sendDestinationCandidates);
 $initialSection = trim((string) ($_GET['section'] ?? 'main'));
-if (!in_array($initialSection, ['main', 'special-features', 'repair-tools', 'snapshot-manager'], true)) {
+if (!in_array($initialSection, ['main', 'special-features', 'repair-tools', 'snapshot-manager', 'help'], true)) {
     $initialSection = 'main';
 }
 
@@ -842,6 +843,11 @@ if ($isPostRequest) {
 
     if (!preg_match('/^[A-Za-z0-9._:-]+$/', $submitted['PREFIX'])) {
         $errors[] = 'Prefix can only contain letters, numbers, dot, underscore, colon, and dash.';
+    }
+
+    $sendSnapshotPrefix = (string) ($sendConfig['SEND_SNAPSHOT_PREFIX'] ?? 'zfs-send-');
+    if (zfsas_snapshot_prefixes_conflict($submitted['PREFIX'], $sendSnapshotPrefix)) {
+        $errors[] = zfsas_snapshot_prefix_conflict_message($submitted['PREFIX'], $sendSnapshotPrefix);
     }
 
     $submitted['KEEP_ALL_FOR_DAYS'] = intInRange($submitted['KEEP_ALL_FOR_DAYS'], 1, 36500, 'Keep all for days', $errors) ?? $submitted['KEEP_ALL_FOR_DAYS'];
@@ -1698,6 +1704,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       <button type="button" class="zfsas-section-tab" id="zfsas_tab_features" data-section-target="special-features" role="tab" aria-selected="false" aria-controls="zfsas_panel_special_features">Special Features</button>
       <button type="button" class="zfsas-section-tab" id="zfsas_tab_repairs" data-section-target="repair-tools" role="tab" aria-selected="false" aria-controls="zfsas_panel_repair_tools">Repair Tools</button>
       <button type="button" class="zfsas-section-tab" id="zfsas_tab_snapshot_manager" data-section-target="snapshot-manager" role="tab" aria-selected="false" aria-controls="zfsas_panel_snapshot_manager">Snapshot Manager</button>
+      <button type="button" class="zfsas-section-tab" id="zfsas_tab_help" data-section-target="help" role="tab" aria-selected="false" aria-controls="zfsas_panel_help">Help</button>
     </div>
 
     <div class="zfsas-section-panel is-active" id="zfsas_panel_main" data-section-panel="main" role="tabpanel" aria-labelledby="zfsas_tab_main">
@@ -2019,6 +2026,39 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
         </div>
       </div>
     </div>
+
+    <div class="zfsas-section-panel" id="zfsas_panel_help" data-section-panel="help" role="tabpanel" aria-labelledby="zfsas_tab_help" hidden>
+      <div class="zfsas-card zfsas-placeholder-copy">
+        <h3 class="zfsas-placeholder-title">Help and Diagnostics</h3>
+        <div class="zfsas-help">
+          Report plugin bugs and enhancement requests on GitHub. Include a clear description of the problem, the Unraid version, the plugin version, relevant logs, and reproduction steps when you have them.
+        </div>
+        <div class="zfsas-tool-list">
+          <div class="zfsas-tool-row">
+            <div class="zfsas-tool-button-wrap">
+              <a class="btn btn-primary" href="https://github.com/bstone108/zfsautosnapshot-unraid/issues" target="_blank" rel="noopener noreferrer">Open GitHub Issues</a>
+            </div>
+            <div class="zfsas-tool-copy">
+              <div class="zfsas-tool-title">Report an issue</div>
+              <div class="zfsas-help zfsas-tool-description">
+                Open the repository issue tracker in a new tab. Attach diagnostics when reporting runtime, WebGUI, queue, send, or cleanup problems.
+              </div>
+            </div>
+          </div>
+          <div class="zfsas-tool-row">
+            <div class="zfsas-tool-button-wrap">
+              <a class="btn" id="diagnostics_download" href="<?php echo h($diagnosticsApiUrl); ?>" download="zfs_autosnapshot_diagnostics.zip">Download Diagnostics</a>
+            </div>
+            <div class="zfsas-tool-copy">
+              <div class="zfsas-tool-title">Diagnostics zip</div>
+              <div class="zfsas-help zfsas-tool-description">
+                Downloads <code>zfs_autosnapshot_diagnostics.zip</code> with redacted plugin configuration, plugin logs, queue state, and read-only ZFS/zpool/system status outputs for attaching to a GitHub issue. Secrets matching password, token, API key, or secret-style fields are replaced with <code>[REDACTED]</code>.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </form>
 </div>
 
@@ -2033,6 +2073,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var logStreamApiUrl = <?php echo json_encode($logStreamApiUrl); ?>;
   var runApiUrl = <?php echo json_encode($runApiUrl); ?>;
   var saveApiUrl = <?php echo json_encode($saveApiUrl); ?>;
+  var diagnosticsApiUrl = <?php echo json_encode($diagnosticsApiUrl); ?>;
   var sendSettingsUrl = <?php echo json_encode($sendSettingsUrl); ?>;
   var migrateDatasetsUrl = <?php echo json_encode($migrateDatasetsUrl); ?>;
   var snapshotManagerEmbeddedUrl = <?php echo json_encode($snapshotManagerEmbeddedUrl); ?>;

@@ -68,7 +68,8 @@ if ($isPostRequest) {
 
         $errors[] = $csrfError;
     } else {
-        $saveResult = zfsas_send_handle_save_request($_POST, $configDir, $configFile, $syncScript, $config, $defaultReturnUrl);
+        $autoSnapshotPrefix = zfsas_read_auto_snapshot_prefix($configDir);
+        $saveResult = zfsas_send_handle_save_request($_POST, $configDir, $configFile, $syncScript, $config, $defaultReturnUrl, $autoSnapshotPrefix);
         $config = $saveResult['config'];
         $formJobs = $saveResult['formJobs'];
         $errors = $saveResult['errors'];

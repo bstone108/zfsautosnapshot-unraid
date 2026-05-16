@@ -94,6 +94,21 @@ function zfsas_get_submitted_csrf_token()
     return '';
 }
 
+function zfsas_unraid_global_csrf_guard_active()
+{
+    if (PHP_SAPI === 'cli') {
+        return false;
+    }
+
+    $prependFile = trim((string) ini_get('auto_prepend_file'));
+    if ($prependFile === '') {
+        return false;
+    }
+
+    $normalized = str_replace('\\', '/', $prependFile);
+    return substr($normalized, -strlen('/local_prepend.php')) === '/local_prepend.php';
+}
+
 function zfsas_validate_csrf_token(&$error = null)
 {
     $error = null;
@@ -106,6 +121,10 @@ function zfsas_validate_csrf_token(&$error = null)
 
     $submittedToken = zfsas_get_submitted_csrf_token();
     if ($submittedToken === '') {
+        if (zfsas_unraid_global_csrf_guard_active()) {
+            return true;
+        }
+
         $error = 'Security token is missing. Reload the page and try again.';
         return false;
     }

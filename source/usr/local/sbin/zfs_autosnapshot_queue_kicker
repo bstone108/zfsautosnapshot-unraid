@@ -24,7 +24,7 @@ start_queue_handler() {
 # shellcheck disable=SC2034
 enqueue_all_scheduled_jobs_now() {
   local now_epoch="$1"
-  local requested_at job_id dest_pool run_group_id prep_job_id pool
+  local requested_at job_id dest_pool run_group_id prep_job_id pool readiness_message
   local -a run_jobs=()
   local -a run_pools=()
   local -A run_pool=()
@@ -36,6 +36,10 @@ enqueue_all_scheduled_jobs_now() {
 
   for job_id in "${SCHEDULE_JOB_IDS[@]}"; do
     schedule_job_blocked "$job_id" && continue
+    scheduled_send_job_zfs_actionable "$job_id" readiness_message || {
+      log "Deferring manual send ${job_id}; ZFS source/destination is not ready: ${readiness_message}"
+      continue
+    }
     dest_pool="$(schedule_destination_pool "$job_id" || true)"
     [[ -n "$dest_pool" ]] || continue
     run_jobs+=("$job_id")
@@ -79,6 +83,7 @@ main() {
 
   compact_shared_send_log_if_safe || true
   exec >> "$LOG_FILE" 2>&1
+  zfsas_log_send_runtime_stamp "queue_kicker"
   log "Queue kicker $$ starting"
 
   reconcile_stale_jobs

@@ -5,6 +5,50 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.16.07 (Testing Branch Only)
+
+- Added a Help and Diagnostics tab with a direct link to the GitHub issue tracker.
+- Added a diagnostics zip download that collects redacted plugin configuration, plugin logs, queue state, and read-only ZFS/zpool/system status output for attaching to support issues.
+
+### 2026.05.16.06 (Testing Branch Only)
+
+- Added a settings safety check that refuses overlapping auto-snapshot and `ZFS Send` checkpoint prefixes, including exact matches and broader prefixes such as `zfs-` that would also match send checkpoints.
+- The main settings save path and the `ZFS Send` settings save path both report the conflict before writing config, so cleanup cannot accidentally classify send checkpoints as auto snapshots.
+
+### 2026.05.16.05 (Testing Branch Only)
+
+- Strengthened `ZFS Send` startup/readiness handling so scheduled sends wait until the source tree, destination parent, and destination pool-prep state are actually usable instead of creating phantom failed jobs during boot or import timing.
+- Tightened queue-worker recovery so child sends wait for their source checkpoint and destination parent, release failed launch claims cleanly, and back off briefly when destination-space approval is blocked by prep, delete, cleanup, or ZFS freeing work.
+- Kept send-checkpoint cleanup ownership separated: worker cleanup remains source-only, destination retention keeps the newest confirmed common checkpoint protected, and post-send zero-change cleanup ignores send checkpoint snapshots.
+
+### 2026.05.16.04 (Testing Branch Only)
+
+- Fixed post-send zero-change cleanup so it leaves `ZFS Send` checkpoint snapshots alone; checkpoint retention cleanup owns checkpoint deletion and keeps the newest confirmed common checkpoint protected.
+- This prevents the cleanup that runs after a successful send from deleting older send checkpoints that another recursive member may still need as its latest common base.
+- Fixed another `ZFS Send` queue safety guard so child transfer jobs do not treat a missing destination pool-prep job as completed; they now wait for prep to reappear or be requeued before destination-space approval and send launch.
+
+### 2026.05.16.03 (Testing Branch Only)
+
+- Changed `ZFS Send` transfer workers to wait for queue-manager destination-space approval instead of creating their own reservations or replanning destination cleanup.
+- This keeps retention/free-space cleanup centralized in the queue manager, reducing repeated cleanup scans and worker churn while jobs are waiting for space.
+
+### 2026.05.16.02 (Testing Branch Only)
+
+- Changed the `ZFS Send` queue handler to approve worker-reported destination space before launching transfer workers, so sends wait in the queue instead of repeatedly starting workers that immediately defer.
+- Added queue-manager cleanup gating so destination cleanup is only replanned when cleanup is not already running, the delete queue is empty, and ZFS is not already freeing enough space.
+- Kept pre-approved destination-space reservations attached to the send job and let the worker adopt them when it starts, reducing repeated space scans and reservation churn.
+
+### 2026.05.16.01 (Testing Branch Only)
+
+- Fixed WebGUI save/action requests on Unraid 7.3 systems where the global WebGUI CSRF guard validates and consumes the security token before plugin PHP sees it.
+- Kept the plugin's hidden form tokens and AJAX token headers/body fields so Unraid's WebGUI layer continues to receive the required token.
+- Added version/environment stamps to `ZFS Send` queue, worker, wrapper, and delete-worker logs so field logs identify the plugin, Unraid, ZFS, and zpool versions that generated them.
+
+### 2026.05.15.01 (Testing Branch Only)
+
+- Added temporary testing-only `ZFS Send` debug markers to capture detailed field behavior for checkpoint creation, base snapshot selection, queue fan-out, reservations, send/receive pipeline results, reseed decisions, cleanup, and finalization.
+- Added an explicit reminder to strip the temporary debug markers before promoting these changes to `main`.
+
 ### 2026.05.05.01 (2026-05-05)
 
 - Fixed scheduled `ZFS Send` runs that could remain stuck waiting for the Unraid array to become actionable when the fallback array-state file reported quoted values like `"STARTED"`.

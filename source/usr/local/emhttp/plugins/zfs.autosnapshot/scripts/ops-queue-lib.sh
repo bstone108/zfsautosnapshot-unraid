@@ -41,7 +41,6 @@ LOG_FILE="/var/log/zfs_autosnapshot_send.log"
 LOG_ARCHIVE_FILE="/var/log/zfs_autosnapshot_send.archive.log"
 SEND_LOG_MAX_BYTES="${SEND_LOG_MAX_BYTES:-2097152}"
 SEND_LOG_ARCHIVE_MAX_BYTES="${SEND_LOG_ARCHIVE_MAX_BYTES:-4194304}"
-
 DEFAULT_SEND_SNAPSHOT_PREFIX="zfs-send-"
 DEFAULT_SEND_MAX_PARALLEL="1"
 DEFAULT_SEND_PREP_EXTRA_WORKERS="16"
@@ -243,6 +242,93 @@ trim() {
   s="${s#"${s%%[![:space:]]*}"}"
   s="${s%"${s##*[![:space:]]}"}"
   printf '%s' "$s"
+}
+
+zfsas_detect_plugin_version() {
+  local manifest_path version
+
+  for manifest_path in "/var/log/plugins/${PLUGIN_NAME}.plg" "/boot/config/plugins/${PLUGIN_NAME}.plg"; do
+    [[ -r "$manifest_path" ]] || continue
+    version="$(sed -n 's/.*<PLUGIN[^>]*version="\([^"]\+\)".*/\1/p' "$manifest_path" | head -n 1)"
+    version="$(trim "$version")"
+    if [[ -n "$version" ]]; then
+      printf '%s\n' "$version"
+      return 0
+    fi
+  done
+
+  printf 'unknown\n'
+}
+
+zfsas_detect_unraid_version() {
+  local value
+
+  if [[ -r /etc/unraid-version ]]; then
+    value="$(awk -F= '
+      /^[[:space:]]*version[[:space:]]*=/ {
+        gsub(/"/, "", $2)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+        print $2
+        exit
+      }
+    ' /etc/unraid-version 2>/dev/null || true)"
+    value="$(trim "$value")"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+
+    value="$(head -n 1 /etc/unraid-version 2>/dev/null || true)"
+    value="$(trim "$value")"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  fi
+
+  if [[ -r /etc/os-release ]]; then
+    value="$(awk -F= '/^PRETTY_NAME=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null || true)"
+    value="$(trim "$value")"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  fi
+
+  printf 'unknown\n'
+}
+
+zfsas_detect_zfs_version() {
+  local value
+  value="$(zfs version 2>/dev/null || zfs --version 2>/dev/null || true)"
+  value="$(printf '%s' "$value" | tr '\n' ';' | sed 's/;[[:space:]]*/; /g; s/[[:space:];]*$//')"
+  value="$(trim "$value")"
+  [[ -n "$value" ]] && printf '%s\n' "$value" || printf 'unknown\n'
+}
+
+zfsas_detect_zpool_version() {
+  local value
+  value="$(zpool version 2>/dev/null || zpool --version 2>/dev/null || true)"
+  value="$(printf '%s' "$value" | tr '\n' ';' | sed 's/;[[:space:]]*/; /g; s/[[:space:];]*$//')"
+  value="$(trim "$value")"
+  [[ -n "$value" ]] && printf '%s\n' "$value" || printf 'unknown\n'
+}
+
+zfsas_log_send_runtime_stamp() {
+  local component="${1:-send}"
+  local plugin_version unraid_version zfs_version zpool_version kernel_info bash_info path_zfs path_zpool
+
+  plugin_version="$(zfsas_detect_plugin_version)"
+  unraid_version="$(zfsas_detect_unraid_version)"
+  zfs_version="$(zfsas_detect_zfs_version)"
+  zpool_version="$(zfsas_detect_zpool_version)"
+  kernel_info="$(uname -srmo 2>/dev/null || uname -sr 2>/dev/null || echo unknown)"
+  bash_info="${BASH_VERSION:-unknown}"
+  path_zfs="$(command -v zfs 2>/dev/null || echo missing)"
+  path_zpool="$(command -v zpool 2>/dev/null || echo missing)"
+
+  log "Runtime stamp: component='${component}' pid='$$' plugin='${plugin_version}' unraid='${unraid_version}' zfs='${zfs_version}' zpool='${zpool_version}'"
+  log "Runtime environment: component='${component}' kernel='${kernel_info}' bash='${bash_info}' zfs_cmd='${path_zfs}' zpool_cmd='${path_zpool}'"
 }
 
 ops_apply_owner() {
@@ -780,6 +866,8 @@ parse_send_jobs_config() {
     job_id="$(trim "$job_id")"
     source="$(trim "$source")"
     dest="$(trim "$dest")"
+    source="${source%/}"
+    dest="${dest%/}"
     freq="$(normalize_send_frequency "$(trim "$freq")")"
     thresh="$(trim "$thresh")"
     children="$(trim "${children:-0}")"
@@ -1560,6 +1648,39 @@ send_space_reservation_exists_for_job() {
   flock -u "$fd" || true
   eval "exec ${fd}>&-"
   return "$exists"
+}
+
+adopt_send_space_reservation_for_job() {
+  local job_id="$1"
+  local pid="$2"
+  local reservation_file fd
+  local -A reservation=()
+
+  [[ -n "$job_id" && "$pid" =~ ^[0-9]+$ ]] || return 1
+  mkdir -p "$SEND_SPACE_RESERVATION_DIR" >/dev/null 2>&1 || return 1
+  : > "$SEND_SPACE_RESERVATION_LOCK_FILE" 2>/dev/null || true
+  exec {fd}>>"$SEND_SPACE_RESERVATION_LOCK_FILE" || return 1
+  flock "$fd" || {
+    eval "exec ${fd}>&-"
+    return 1
+  }
+  cleanup_stale_send_space_reservations_locked
+  reservation_file="$(send_space_reservation_file_for_job "$job_id")"
+  if [[ ! -f "$reservation_file" ]] || ! job_load "$reservation_file" reservation; then
+    flock -u "$fd" || true
+    eval "exec ${fd}>&-"
+    return 1
+  fi
+  reservation[PID]="$pid"
+  reservation[ADOPTED_AT]="$(date +%s)"
+  job_write "$reservation_file" reservation || {
+    flock -u "$fd" || true
+    eval "exec ${fd}>&-"
+    return 1
+  }
+  flock -u "$fd" || true
+  eval "exec ${fd}>&-"
+  return 0
 }
 
 send_transfer_slot_dir() {
@@ -2625,6 +2746,106 @@ list_tree_datasets() {
   fi
 }
 
+function zfs_dataset_tree_actionable() {
+  local root_dataset="$1"
+  local include_children="${2:-0}"
+  local message_var="${3:-}"
+  local output
+
+  if [[ -n "$message_var" ]]; then
+    printf -v "$message_var" ''
+  fi
+  [[ -n "$root_dataset" ]] || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" 'source dataset is not configured'
+    return 1
+  }
+
+  if [[ "$include_children" == "1" ]]; then
+    output="$(zfs list -H -o name -t filesystem,volume -r "$root_dataset" 2>&1)" || {
+      [[ -n "$message_var" ]] && printf -v "$message_var" "source dataset tree '${root_dataset}' is not listable yet: ${output}"
+      return 1
+    }
+  else
+    output="$(zfs list -H -o name -t filesystem,volume "$root_dataset" 2>&1)" || {
+      [[ -n "$message_var" ]] && printf -v "$message_var" "source dataset '${root_dataset}' is not visible yet: ${output}"
+      return 1
+    }
+  fi
+  [[ -n "$output" ]] || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" "source dataset '${root_dataset}' did not produce a ZFS listing"
+    return 1
+  }
+  return 0
+}
+
+function zfs_pool_actionable() {
+  local pool="$1"
+  local message_var="${2:-}"
+  local output
+
+  if [[ -n "$message_var" ]]; then
+    printf -v "$message_var" ''
+  fi
+  [[ -n "$pool" ]] || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" 'destination pool is not configured'
+    return 1
+  }
+  output="$(zfs list -H -o name -t filesystem,volume "$pool" 2>&1)" || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" "destination pool '${pool}' is not visible yet: ${output}"
+    return 1
+  }
+  [[ -n "$output" ]] || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" "destination pool '${pool}' did not produce a ZFS listing"
+    return 1
+  }
+  return 0
+}
+
+send_destination_actionable() {
+  local destination="$1"
+  local message_var="${2:-}"
+  local pool parent
+
+  if [[ -n "$message_var" ]]; then
+    printf -v "$message_var" ''
+  fi
+  [[ -n "$destination" ]] || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" 'destination dataset is not configured'
+    return 1
+  }
+  pool="${destination%%/*}"
+  zfs_pool_actionable "$pool" "$message_var" || return 1
+  parent="${destination%/*}"
+  if [[ "$parent" != "$pool" ]] && ! dataset_exists "$parent"; then
+    [[ -n "$message_var" ]] && printf -v "$message_var" "destination parent dataset '${parent}' is not visible yet"
+    return 1
+  fi
+  return 0
+}
+
+function scheduled_send_job_zfs_actionable() {
+  local schedule_job_id="$1"
+  local message_var="${2:-}"
+  local source_root include_children dest_root source_message dest_message
+
+  if [[ -n "$message_var" ]]; then
+    printf -v "$message_var" ''
+  fi
+  source_root="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}"
+  include_children="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]:-0}"
+  dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
+
+  if ! zfs_dataset_tree_actionable "$source_root" "$include_children" source_message; then
+    [[ -n "$message_var" ]] && printf -v "$message_var" "%s" "$source_message"
+    return 1
+  fi
+  if ! send_destination_actionable "$dest_root" dest_message; then
+    [[ -n "$message_var" ]] && printf -v "$message_var" "%s" "$dest_message"
+    return 1
+  fi
+  return 0
+}
+
 build_members_for_job() {
   local assoc_name="$1"
   local basename="$2"
@@ -2684,6 +2905,7 @@ find_latest_common_basename_for_member() {
   local prefix="$3"
   local result_name_var="$4"
   local source_inventory dest_inventory snap_name snap_epoch snap_base
+  local source_count dest_count
   local -A dest_basenames=()
 
   printf -v "$result_name_var" ''
@@ -2691,6 +2913,8 @@ find_latest_common_basename_for_member() {
 
   source_inventory="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null | grep -F "@${prefix}" | sort -t $'\t' -k2,2n || true)"
   dest_inventory="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$dest_dataset" 2>/dev/null | grep -F "@${prefix}" | sort -t $'\t' -k2,2n || true)"
+  source_count="$(printf '%s\n' "$source_inventory" | awk 'NF { c++ } END { print c+0 }')"
+  dest_count="$(printf '%s\n' "$dest_inventory" | awk 'NF { c++ } END { print c+0 }')"
 
   while IFS=$'\t' read -r snap_name snap_epoch; do
     [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
@@ -3197,7 +3421,7 @@ schedule_window_exists() {
 enqueue_scheduled_send_jobs_due() {
   local now_epoch="$1"
   local job_id frequency current_window last_completed_window requested_at requested_epoch
-  local resume_basename previous_basename dest_pool run_group_id prep_job_id pool
+  local resume_basename previous_basename dest_pool run_group_id prep_job_id pool readiness_message
   local -a due_jobs=()
   local -a due_pools=()
   local -A due_window=()
@@ -3227,6 +3451,11 @@ enqueue_scheduled_send_jobs_due() {
     schedule_job_blocked "$job_id" && continue
 
     schedule_window_exists "$job_id" "$current_window" && continue
+
+    scheduled_send_job_zfs_actionable "$job_id" readiness_message || {
+      log "Deferring scheduled send ${job_id}; ZFS source/destination is not ready: ${readiness_message}"
+      continue
+    }
 
     resume_basename=""
     previous_basename=""
@@ -3740,9 +3969,20 @@ queue_snapshot_delete_job() {
 
   if [[ -z "$send_schedule_job_id" ]]; then
     parsed_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snapshot_name" 2>/dev/null || true)"
-    if [[ -n "$parsed_schedule_job_id" && -n "${SCHEDULE_SOURCE_ROOT[$parsed_schedule_job_id]:-}" ]]; then
+    if [[ -n "$parsed_schedule_job_id" ]]; then
+      if [[ -z "${SCHEDULE_SOURCE_ROOT[$parsed_schedule_job_id]:-}" || -z "${SCHEDULE_DEST_ROOT[$parsed_schedule_job_id]:-}" ]]; then
+        log "Skipping snapshot delete queue for ${snapshot}; send checkpoint ${snapshot_name} belongs to schedule ${parsed_schedule_job_id}, but that schedule is not loaded."
+        return 0
+      fi
       send_schedule_job_id="$parsed_schedule_job_id"
       delete_scope="checkpoint"
+    fi
+  fi
+
+  if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
+    if [[ -z "${SCHEDULE_SOURCE_ROOT[$send_schedule_job_id]:-}" || -z "${SCHEDULE_DEST_ROOT[$send_schedule_job_id]:-}" ]]; then
+      log "Skipping snapshot delete queue for ${snapshot}; send checkpoint schedule ${send_schedule_job_id} is not loaded."
+      return 0
     fi
   fi
 
@@ -3793,7 +4033,7 @@ queue_snapshot_delete_job() {
   job[DELETE_SCOPE]="$delete_scope"
   job[RETRY_AT]="0"
 
-  if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
+  if [[ ( "$delete_scope" == "checkpoint" || "$delete_scope" == "destination_checkpoint" ) && -n "$send_schedule_job_id" ]]; then
     job[SEND_PROTECTED]="1"
     job[SEND_SCHEDULE_JOB_ID]="$send_schedule_job_id"
   fi
@@ -4003,17 +4243,12 @@ queue_destination_retention_for_dataset() {
         if [[ -n "$zero_change_anchor" ]]; then
           snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
           if [[ -n "$snapshot_schedule_job_id" ]]; then
-            [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
-            queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by post-send zero-change cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
-            if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
-              add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
-            fi
-            queued_checkpoint_basenames["$snap_base"]=1
-          else
-            queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by post-send zero-change cleanup." || true
-            if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
-              add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
-            fi
+            log "Skipping post-send zero-change cleanup for send checkpoint ${snap_name}; checkpoint retention owns send checkpoint deletion."
+            continue
+          fi
+          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by post-send zero-change cleanup." || true
+          if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
+            add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
           fi
           continue
         fi
@@ -4029,7 +4264,7 @@ queue_destination_retention_for_dataset() {
       snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
       if [[ -n "$snapshot_schedule_job_id" ]]; then
         [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
-        queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+        queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint" || true
         if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
           add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
         fi
@@ -4051,7 +4286,7 @@ queue_destination_retention_for_dataset() {
         snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
         if [[ -n "$snapshot_schedule_job_id" ]]; then
           [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
-          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send weekly retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send weekly retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint" || true
           if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
             add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
           fi
@@ -4074,7 +4309,7 @@ queue_destination_retention_for_dataset() {
         snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
         if [[ -n "$snapshot_schedule_job_id" ]]; then
           [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
-          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send daily retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send daily retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint" || true
           if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
             add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
           fi
@@ -4223,4 +4458,118 @@ queue_schedule_zero_change_cleanup_for_dataset() {
 
   [[ -n "$schedule_job_id" && -n "$dataset" && -n "$newest_send_basename" ]] || return 1
   queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change"
+}
+
+defer_send_launch_approval() {
+  local job_path="$1"
+  local assoc_name="$2"
+  local message="$3"
+  local delay="${4:-3}"
+  local now_epoch
+  # shellcheck disable=SC2178
+  local -n launch_job_ref="$assoc_name"
+
+  [[ -n "$job_path" ]] || return 1
+  [[ "$delay" =~ ^[0-9]+$ ]] || delay=3
+  now_epoch="$(date +%s)"
+  launch_job_ref[STATE]="retry_wait"
+  launch_job_ref[PHASE]="retry_wait"
+  launch_job_ref[RETRY_AT]="$((now_epoch + delay))"
+  launch_job_ref[LAST_MESSAGE]="$message"
+  job_write "$job_path" "$assoc_name" || true
+  return 1
+}
+
+approve_send_job_space_for_launch() {
+  local job_path="$1"
+  local reservation_pid="$2"
+  local job_id destination capacity_dataset dest_pool required_bytes buffer_bytes needed_bytes available_bytes freeing_bytes shortfall threshold_bytes cleanup_target now_epoch last_cleanup_at prep_job_id prep_path prep_state
+  local -A launch_job=()
+  local -A prep_job=()
+  local -A planned_reclaim=()
+
+  [[ -n "$job_path" && "$reservation_pid" =~ ^[0-9]+$ ]] || return 1
+  job_load "$job_path" launch_job || return 1
+  job_id="$(job_get launch_job JOB_ID)"
+  destination="$(job_get launch_job SEND_PLAN_DESTINATION)"
+  [[ -n "$destination" ]] || destination="$(job_get launch_job DESTINATION_ROOT)"
+  required_bytes="$(job_get launch_job SPACE_REQUIRED_BYTES 0)"
+  [[ -n "$job_id" && -n "$destination" && "$required_bytes" =~ ^[0-9]+$ ]] || return 1
+
+  prep_job_id="$(job_get launch_job PREP_JOB_ID)"
+  if [[ -n "$prep_job_id" ]]; then
+    if ! find_job_by_id "$prep_job_id" prep_path || ! job_load "$prep_path" prep_job; then
+      defer_send_launch_approval "$job_path" launch_job "Waiting for pool prep to reappear." 3
+      return 1
+    fi
+    prep_state="$(job_get prep_job STATE)"
+    case "$prep_state" in
+      complete|skipped)
+        ;;
+      *)
+        defer_send_launch_approval "$job_path" launch_job "Waiting for pool prep." 3
+        return 1
+        ;;
+    esac
+  fi
+
+  if send_space_reservation_exists_for_job "$job_id"; then
+    return 0
+  fi
+
+  capacity_dataset="$(nearest_existing_dataset_ancestor "$destination")"
+  [[ -n "$capacity_dataset" ]] || capacity_dataset="${destination%%/*}"
+  dest_pool="${capacity_dataset%%/*}"
+  [[ -n "$dest_pool" ]] || return 1
+
+  buffer_bytes="$(send_space_buffer_bytes "$required_bytes")"
+  if acquire_send_space_reservation "$job_id" "$reservation_pid" "$destination" "$capacity_dataset" "$required_bytes" "$buffer_bytes" available_bytes needed_bytes; then
+    launch_job[LAST_MESSAGE]="Destination space approved."
+    launch_job[SPACE_APPROVED_AT]="$(date +%s)"
+    job_write "$job_path" launch_job || true
+    return 0
+  fi
+
+  [[ "$needed_bytes" =~ ^[0-9]+$ ]] || needed_bytes=$(( required_bytes + buffer_bytes ))
+  [[ "$available_bytes" =~ ^[0-9]+$ ]] || available_bytes=0
+  shortfall=$(( needed_bytes > available_bytes ? needed_bytes - available_bytes : 0 ))
+  freeing_bytes="$(get_pool_freeing "$dest_pool")"
+  [[ "$freeing_bytes" =~ ^[0-9]+$ ]] || freeing_bytes=0
+
+  if (( shortfall <= 0 || freeing_bytes >= shortfall )); then
+    defer_send_launch_approval "$job_path" launch_job "Waiting for ZFS freeing to satisfy destination space." 3
+    return 1
+  fi
+
+  if pool_has_active_delete_jobs "$dest_pool"; then
+    defer_send_launch_approval "$job_path" launch_job "Waiting for queued destination cleanup to free space." 3
+    return 1
+  fi
+
+  now_epoch="$(date +%s)"
+  last_cleanup_at="$(job_get launch_job SPACE_CLEANUP_REQUESTED_AT 0)"
+  [[ "$last_cleanup_at" =~ ^[0-9]+$ ]] || last_cleanup_at=0
+  if (( now_epoch - last_cleanup_at < 30 )); then
+    defer_send_launch_approval "$job_path" launch_job "Waiting for destination cleanup planning cooldown." 3
+    return 1
+  fi
+
+  if ! acquire_pool_prep_lock "$dest_pool"; then
+    defer_send_launch_approval "$job_path" launch_job "Waiting for destination cleanup planner lock." 3
+    return 1
+  fi
+  launch_job[SPACE_CLEANUP_REQUESTED_AT]="$now_epoch"
+  launch_job[LAST_MESSAGE]="Planning destination cleanup for send space."
+  job_write "$job_path" launch_job || true
+  cleanup_target="$needed_bytes"
+  threshold_bytes="$(job_get launch_job THRESHOLD_BYTES 0)"
+  if [[ "$threshold_bytes" =~ ^[0-9]+$ ]] && (( threshold_bytes > cleanup_target )); then
+    cleanup_target="$threshold_bytes"
+  fi
+  log "Destination space approval is short on pool ${dest_pool}; queue manager is planning cleanup up to ${cleanup_target} bytes for ${job_id}."
+  queue_pool_retention_cleanup "$dest_pool" "$capacity_dataset" planned_reclaim || true
+  queue_pool_free_space_cleanup_for_target "$dest_pool" "$capacity_dataset" "$cleanup_target" planned_reclaim || true
+  release_pool_prep_lock "$dest_pool"
+  ensure_delete_worker_for_backlog
+  return 1
 }
