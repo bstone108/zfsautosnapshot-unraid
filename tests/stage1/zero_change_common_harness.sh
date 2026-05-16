@@ -126,11 +126,11 @@ if grep -q $'checkpoint\tjob1\tzfs-send-job1-current' "${TEST_ROOT}/queued.tsv";
   printf 'FAIL: zero-change cleanup queued current latest common checkpoint\n' >&2
   exit 1
 fi
-if ! grep -q $'checkpoint\tjob1\tzfs-send-job1-prev' "${TEST_ROOT}/queued.tsv"; then
-  printf 'FAIL: expected older zero-change checkpoint to be queued once current is common\n' >&2
+if grep -q $'checkpoint\tjob1\tzfs-send-job1-prev' "${TEST_ROOT}/queued.tsv"; then
+  printf 'FAIL: zero-change cleanup queued older send checkpoint instead of leaving checkpoint deletion to retention cleanup\n' >&2
   exit 1
 fi
-printf 'PASS: single-member zero-change cleanup protects current and queues older zero checkpoint\n'
+printf 'PASS: single-member zero-change cleanup leaves send checkpoints to retention cleanup\n'
 
 # Multi-member stress: one child has current, another child only has prev. In that case
 # prev is still the latest common checkpoint for the incomplete member and must not be queued.

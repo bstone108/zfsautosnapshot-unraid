@@ -153,6 +153,18 @@ def main() -> int:
         "approve_send_job_space_for_launch \"$job_path\" \"$$\" || {",
         "queue handler must skip launching transfer workers until space is approved",
     )
+
+    zero_change_body = lib.split('if [[ "$mode" == "zero_change" ]]; then', 1)[1].split('    fi\n\n    snap_age=', 1)[0]
+    if "Queued by post-send zero-change cleanup.\" \"$snapshot_schedule_job_id\" \"checkpoint\"" in zero_change_body:
+        raise AssertionError(
+            "post-send zero-change cleanup must not queue deletes for send checkpoint snapshots"
+        )
+    assert_contains(
+        zero_change_body,
+        "Skipping post-send zero-change cleanup for send checkpoint",
+        "zero-change cleanup should explicitly skip send checkpoints and leave them to retention cleanup",
+    )
+
     print("PASS: send queue readiness static contracts")
     return 0
 

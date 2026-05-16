@@ -4267,17 +4267,12 @@ queue_destination_retention_for_dataset() {
         if [[ -n "$zero_change_anchor" ]]; then
           snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
           if [[ -n "$snapshot_schedule_job_id" ]]; then
-            [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
-            queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by post-send zero-change cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
-            if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
-              add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
-            fi
-            queued_checkpoint_basenames["$snap_base"]=1
-          else
-            queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by post-send zero-change cleanup." || true
-            if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
-              add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
-            fi
+            log "Skipping post-send zero-change cleanup for send checkpoint ${snap_name}; checkpoint retention owns send checkpoint deletion."
+            continue
+          fi
+          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by post-send zero-change cleanup." || true
+          if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
+            add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
           fi
           continue
         fi
