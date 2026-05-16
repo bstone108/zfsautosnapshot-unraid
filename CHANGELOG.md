@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.16.04 (Testing Branch Only)
+
+- Fixed post-send zero-change cleanup so it leaves `ZFS Send` checkpoint snapshots alone; checkpoint retention cleanup owns checkpoint deletion and keeps the newest confirmed common checkpoint protected.
+- This prevents the cleanup that runs after a successful send from deleting older send checkpoints that another recursive member may still need as its latest common base.
+
 ### 2026.05.16.03 (Testing Branch Only)
 
 - Changed `ZFS Send` transfer workers to wait for queue-manager destination-space approval instead of creating their own reservations or replanning destination cleanup.
