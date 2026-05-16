@@ -1095,7 +1095,7 @@ process_cleanup_member_job() {
   if linked_job_state "$wait_job_id" wait_state; then
     case "$wait_state" in
       queued|running|retry_wait)
-        defer_current_job "Waiting for child send." 15
+        defer_current_job "Waiting for child send." 1
         return 2
         ;;
       failed)
@@ -1123,7 +1123,7 @@ process_finalize_job() {
 
   if run_child_jobs_still_active "$parent_run_id"; then
     zfsas_send_debug_marker "finalize_waiting_for_children job_id=$(job_get job JOB_ID) parent_run_id=${parent_run_id}"
-    defer_current_job "Waiting for children." 15
+    defer_current_job "Waiting for children." 1
     return 2
   fi
 

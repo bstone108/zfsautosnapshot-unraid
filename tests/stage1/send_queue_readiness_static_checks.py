@@ -169,6 +169,15 @@ def main() -> int:
         "approve_send_job_space_for_launch \"$job_path\" \"$$\" || {",
         "queue handler must skip launching transfer workers until space is approved",
     )
+    assert_contains(
+        worker,
+        'defer_current_job "Waiting for children." 1',
+        "scheduled finalizers should recheck child completion quickly instead of sleeping through ready work",
+    )
+    if 'defer_current_job "Waiting for children." 15' in worker:
+        raise AssertionError("scheduled finalizers must not wait 15 seconds after children are ready")
+    if 'defer_current_job "Waiting for child send." 15' in worker:
+        raise AssertionError("post-send cleanup waiters must not wait 15 seconds after child sends are ready")
 
     zero_change_body = lib.split('if [[ "$mode" == "zero_change" ]]; then', 1)[1].split('    fi\n\n    snap_age=', 1)[0]
     if "Queued by post-send zero-change cleanup.\" \"$snapshot_schedule_job_id\" \"checkpoint\"" in zero_change_body:
