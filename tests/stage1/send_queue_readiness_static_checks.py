@@ -182,10 +182,16 @@ def main() -> int:
         "defer_current_job \"Waiting for destination space approval.\"",
         "worker without pre-approved reservation should publish estimate and wait for queue-manager approval",
     )
+    queue_handler = Path(ROOT / "source/usr/local/sbin/zfs_autosnapshot_queue_handler").read_text()
     assert_contains(
-        Path(ROOT / "source/usr/local/sbin/zfs_autosnapshot_queue_handler").read_text(),
+        queue_handler,
         "approve_send_job_space_for_launch \"$job_path\" \"$$\" || {",
         "queue handler must skip launching transfer workers until space is approved",
+    )
+    assert_contains(
+        queue_handler,
+        "release_job_claim \"$job_id\"",
+        "queue handler must release a pre-claimed job if worker launch fails instead of leaving it blocked until stale cleanup",
     )
     assert_contains(
         worker,
