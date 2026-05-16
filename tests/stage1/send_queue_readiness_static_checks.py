@@ -81,6 +81,13 @@ def main() -> int:
         "send_destination_actionable \"$destination_root\" readiness_message || {",
         "scheduled prepare must recheck destination readiness before creating source checkpoints",
     )
+    scheduled_actionable_body = lib.split("function scheduled_send_job_zfs_actionable() {", 1)[1].split("\n}\n", 1)[0]
+    assert_contains(
+        scheduled_actionable_body,
+        "send_destination_actionable \"$dest_root\" dest_message",
+        "scheduled enqueue readiness must require the destination parent/root to be actionable, not just the pool",
+    )
+
     destination_actionable_body = lib.split("send_destination_actionable() {", 1)[1].split("\n}\n", 1)[0]
     assert_contains(
         destination_actionable_body,

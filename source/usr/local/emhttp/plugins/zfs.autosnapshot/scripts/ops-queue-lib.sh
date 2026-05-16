@@ -2846,7 +2846,7 @@ send_destination_actionable() {
 function scheduled_send_job_zfs_actionable() {
   local schedule_job_id="$1"
   local message_var="${2:-}"
-  local source_root include_children dest_root dest_pool source_message dest_message
+  local source_root include_children dest_root source_message dest_message
 
   if [[ -n "$message_var" ]]; then
     printf -v "$message_var" ''
@@ -2854,13 +2854,12 @@ function scheduled_send_job_zfs_actionable() {
   source_root="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}"
   include_children="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]:-0}"
   dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
-  dest_pool="${dest_root%%/*}"
 
   if ! zfs_dataset_tree_actionable "$source_root" "$include_children" source_message; then
     [[ -n "$message_var" ]] && printf -v "$message_var" "%s" "$source_message"
     return 1
   fi
-  if ! zfs_pool_actionable "$dest_pool" dest_message; then
+  if ! send_destination_actionable "$dest_root" dest_message; then
     [[ -n "$message_var" ]] && printf -v "$message_var" "%s" "$dest_message"
     return 1
   fi
