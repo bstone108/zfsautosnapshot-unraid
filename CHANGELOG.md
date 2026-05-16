@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.16.06 (Testing Branch Only)
+
+- Added a settings safety check that refuses overlapping auto-snapshot and `ZFS Send` checkpoint prefixes, including exact matches and broader prefixes such as `zfs-` that would also match send checkpoints.
+- The main settings save path and the `ZFS Send` settings save path both report the conflict before writing config, so cleanup cannot accidentally classify send checkpoints as auto snapshots.
+
 ### 2026.05.16.05 (Testing Branch Only)
 
 - Strengthened `ZFS Send` startup/readiness handling so scheduled sends wait until the source tree, destination parent, and destination pool-prep state are actually usable instead of creating phantom failed jobs during boot or import timing.

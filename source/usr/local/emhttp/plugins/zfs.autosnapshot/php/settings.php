@@ -844,6 +844,11 @@ if ($isPostRequest) {
         $errors[] = 'Prefix can only contain letters, numbers, dot, underscore, colon, and dash.';
     }
 
+    $sendSnapshotPrefix = (string) ($sendConfig['SEND_SNAPSHOT_PREFIX'] ?? 'zfs-send-');
+    if (zfsas_snapshot_prefixes_conflict($submitted['PREFIX'], $sendSnapshotPrefix)) {
+        $errors[] = zfsas_snapshot_prefix_conflict_message($submitted['PREFIX'], $sendSnapshotPrefix);
+    }
+
     $submitted['KEEP_ALL_FOR_DAYS'] = intInRange($submitted['KEEP_ALL_FOR_DAYS'], 1, 36500, 'Keep all for days', $errors) ?? $submitted['KEEP_ALL_FOR_DAYS'];
     $submitted['KEEP_DAILY_UNTIL_DAYS'] = intInRange($submitted['KEEP_DAILY_UNTIL_DAYS'], 2, 36500, 'Keep daily until days', $errors) ?? $submitted['KEEP_DAILY_UNTIL_DAYS'];
     $submitted['KEEP_WEEKLY_UNTIL_DAYS'] = intInRange($submitted['KEEP_WEEKLY_UNTIL_DAYS'], 3, 36500, 'Keep weekly until days', $errors) ?? $submitted['KEEP_WEEKLY_UNTIL_DAYS'];

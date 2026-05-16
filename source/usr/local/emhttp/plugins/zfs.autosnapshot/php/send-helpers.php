@@ -82,6 +82,59 @@ function zfsas_send_normalize_dataset_path($value)
     return $normalized;
 }
 
+function zfsas_snapshot_prefixes_conflict($autoPrefix, $sendPrefix)
+{
+    $autoPrefix = zfsas_send_trim($autoPrefix);
+    $sendPrefix = zfsas_send_trim($sendPrefix);
+
+    if ($autoPrefix === '' || $sendPrefix === '') {
+        return false;
+    }
+
+    return $autoPrefix === $sendPrefix
+        || strpos($autoPrefix, $sendPrefix) === 0
+        || strpos($sendPrefix, $autoPrefix) === 0;
+}
+
+function zfsas_snapshot_prefix_conflict_message($autoPrefix, $sendPrefix)
+{
+    return "Auto-snapshot prefix '{$autoPrefix}' overlaps ZFS send checkpoint prefix '{$sendPrefix}'. Change one of these prefixes so auto-snapshot cleanup cannot match send checkpoints.";
+}
+
+function zfsas_read_auto_snapshot_prefix($configDir, $defaultPrefix = 'autosnapshot-')
+{
+    $path = rtrim((string) $configDir, '/') . '/zfs_autosnapshot.conf';
+    if (!is_file($path)) {
+        return $defaultPrefix;
+    }
+
+    $lines = @file($path, FILE_IGNORE_NEW_LINES);
+    if (!is_array($lines)) {
+        return $defaultPrefix;
+    }
+
+    foreach ($lines as $line) {
+        if (!preg_match('/^\s*PREFIX\s*=\s*(.*)\s*$/', $line, $match)) {
+            continue;
+        }
+
+        $raw = trim((string) $match[1]);
+        if ($raw === '') {
+            return '';
+        }
+        if ($raw[0] === '"' && substr($raw, -1) === '"' && strlen($raw) >= 2) {
+            $raw = substr($raw, 1, -1);
+            return str_replace(['\\"', '\\\\'], ['"', '\\'], $raw);
+        }
+        if ($raw[0] === "'" && substr($raw, -1) === "'" && strlen($raw) >= 2) {
+            return substr($raw, 1, -1);
+        }
+        return $raw;
+    }
+
+    return $defaultPrefix;
+}
+
 function zfsas_send_job_id($source, $destination)
 {
     return substr(sha1(strtolower(zfsas_send_normalize_dataset_path($source) . "|" . zfsas_send_normalize_dataset_path($destination))), 0, 12);
@@ -572,7 +625,7 @@ function zfsas_send_write_config_atomically($configFile, $content)
     return $written;
 }
 
-function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScript, $config, $defaultReturnUrl)
+function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScript, $config, $defaultReturnUrl, $autoSnapshotPrefix = '')
 {
     $errors = [];
     $notices = [];
@@ -594,6 +647,10 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
         $errors[] = 'Send snapshot prefix cannot contain @.';
     } elseif (preg_match('/^[A-Za-z0-9._:-]+$/', $submitted['SEND_SNAPSHOT_PREFIX']) !== 1) {
         $errors[] = 'Send snapshot prefix can only contain letters, numbers, dot, underscore, colon, and dash.';
+    }
+
+    if (zfsas_snapshot_prefixes_conflict($autoSnapshotPrefix, $submitted['SEND_SNAPSHOT_PREFIX'])) {
+        $errors[] = zfsas_snapshot_prefix_conflict_message($autoSnapshotPrefix, $submitted['SEND_SNAPSHOT_PREFIX']);
     }
 
     if ((int) $submitted['SEND_KEEP_ALL_FOR_DAYS'] >= (int) $submitted['SEND_KEEP_DAILY_UNTIL_DAYS']

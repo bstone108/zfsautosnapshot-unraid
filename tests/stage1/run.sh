@@ -749,6 +749,7 @@ main() {
   echo "PASS: missing configured datasets are skipped"
 
   python3 "${ROOT_DIR}/tests/stage1/send_settings_static_checks.py"
+  php "${ROOT_DIR}/tests/stage1/prefix_overlap_contract.php"
   bash "${ROOT_DIR}/tests/stage1/zero_change_common_harness.sh"
 
   echo "All Stage 1 tests passed."
