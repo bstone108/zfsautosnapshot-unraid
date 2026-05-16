@@ -1,9 +1,10 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.05.15.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.05.16.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.05.15.01 (2026-05-15)
-- Added temporary testing-only `ZFS Send` debug markers to capture detailed field behavior for checkpoint creation, base snapshot selection, queue fan-out, reservations, send/receive pipeline results, reseed decisions, cleanup, and finalization.
-- Added an explicit reminder to strip the temporary debug markers before promoting these changes to `main`.
+### 2026.05.16.01 (2026-05-16)
+- Fixed WebGUI save/action requests on Unraid 7.3 systems where the global WebGUI CSRF guard validates and consumes the security token before plugin PHP sees it.
+- Kept the plugin's hidden form tokens and AJAX token headers/body fields so Unraid's WebGUI layer continues to receive the required token.
+- Added version/environment stamps to `ZFS Send` queue, worker, wrapper, and delete-worker logs so field logs identify the plugin, Unraid, ZFS, and zpool versions that generated them.
 
   </CHANGES>
 
@@ -13,9 +14,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.05.15.01-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.05.15.01-noarch-1.txz</URL>
-    <MD5>c7b179c01407d36e7cc0b42bc4834ef0</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.05.16.01-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.05.16.01-noarch-1.txz</URL>
+    <MD5>0a2a8dc8340473cffe4fcdee141b5763</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -23,10 +24,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.05.15.01-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.05.16.01-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="c7b179c01407d36e7cc0b42bc4834ef0"
+PKG_MD5="0a2a8dc8340473cffe4fcdee141b5763"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
