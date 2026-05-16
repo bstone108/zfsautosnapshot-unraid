@@ -81,6 +81,17 @@ def main() -> int:
         "send_destination_actionable \"$destination_root\" readiness_message || {",
         "scheduled prepare must recheck destination readiness before creating source checkpoints",
     )
+    destination_actionable_body = lib.split("send_destination_actionable() {", 1)[1].split("\n}\n", 1)[0]
+    assert_contains(
+        destination_actionable_body,
+        "destination parent dataset '${parent}' is not visible yet",
+        "destination readiness must defer when a required parent dataset is missing instead of allowing receive to fail",
+    )
+    assert_contains(
+        destination_actionable_body,
+        "return 1",
+        "destination readiness must fail closed for missing destination parents",
+    )
     assert_in_order(
         prepare_snapshot_body,
         "send_destination_actionable \"$destination_root\" readiness_message || {",

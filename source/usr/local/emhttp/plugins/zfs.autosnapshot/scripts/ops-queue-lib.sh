@@ -2837,10 +2837,8 @@ send_destination_actionable() {
   zfs_pool_actionable "$pool" "$message_var" || return 1
   parent="${destination%/*}"
   if [[ "$parent" != "$pool" ]] && ! dataset_exists "$parent"; then
-    if ! zfs list -H -o name -t filesystem,volume "$pool" >/dev/null 2>&1; then
-      [[ -n "$message_var" ]] && printf -v "$message_var" "destination pool '${pool}' is not actionable yet"
-      return 1
-    fi
+    [[ -n "$message_var" ]] && printf -v "$message_var" "destination parent dataset '${parent}' is not visible yet"
+    return 1
   fi
   return 0
 }
