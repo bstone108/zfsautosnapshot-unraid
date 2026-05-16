@@ -9,6 +9,7 @@ It answers one question: "What changed for me?"
 
 - Fixed post-send zero-change cleanup so it leaves `ZFS Send` checkpoint snapshots alone; checkpoint retention cleanup owns checkpoint deletion and keeps the newest confirmed common checkpoint protected.
 - This prevents the cleanup that runs after a successful send from deleting older send checkpoints that another recursive member may still need as its latest common base.
+- Fixed another `ZFS Send` queue safety guard so child transfer jobs do not treat a missing destination pool-prep job as completed; they now wait for prep to reappear or be requeued before destination-space approval and send launch.
 
 ### 2026.05.16.03 (Testing Branch Only)
 

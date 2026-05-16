@@ -154,8 +154,23 @@ def main() -> int:
     )
     assert_contains(
         lib,
+        "if [[ -n \"$prep_job_id\" ]]; then",
+        "queue manager must fail closed whenever a send references a pool prep job",
+    )
+    assert_contains(
+        lib,
+        "launch_job[LAST_MESSAGE]=\"Waiting for pool prep to reappear.\"",
+        "queue manager must not approve/launch sends when their referenced pool prep job is missing",
+    )
+    assert_contains(
+        lib,
         "launch_job[LAST_MESSAGE]=\"Waiting for pool prep.\"",
         "queue manager should leave prepped sends queued while destination cleanup prep is still running",
+    )
+    assert_contains(
+        worker,
+        "defer_current_job \"Waiting for pool prep to reappear.\" 3",
+        "transfer workers must defer when their referenced pool prep job is missing instead of treating missing prep as completed",
     )
     assert_contains(
         lib,

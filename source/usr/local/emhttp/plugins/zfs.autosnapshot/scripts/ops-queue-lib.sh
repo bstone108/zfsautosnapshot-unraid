@@ -4498,7 +4498,12 @@ approve_send_job_space_for_launch() {
   [[ -n "$job_id" && -n "$destination" && "$required_bytes" =~ ^[0-9]+$ ]] || return 1
 
   prep_job_id="$(job_get launch_job PREP_JOB_ID)"
-  if [[ -n "$prep_job_id" ]] && find_job_by_id "$prep_job_id" prep_path && job_load "$prep_path" prep_job; then
+  if [[ -n "$prep_job_id" ]]; then
+    if ! find_job_by_id "$prep_job_id" prep_path || ! job_load "$prep_path" prep_job; then
+      launch_job[LAST_MESSAGE]="Waiting for pool prep to reappear."
+      job_write "$job_path" launch_job || true
+      return 1
+    fi
     prep_state="$(job_get prep_job STATE)"
     case "$prep_state" in
       complete|skipped)

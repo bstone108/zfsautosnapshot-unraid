@@ -396,11 +396,15 @@ wait_for_pool_prep_for_current_job() {
   [[ -n "$prep_job_id" ]] || return 0
 
   if ! find_job_by_id "$prep_job_id" prep_path; then
-    log "Pool prep job ${prep_job_id} is no longer present; treating it as completed for ${CURRENT_JOB_ID}."
-    return 0
+    log "Pool prep job ${prep_job_id} is no longer present; deferring ${CURRENT_JOB_ID} until prep is available or requeued."
+    defer_current_job "Waiting for pool prep to reappear." 3
+    return 2
   fi
 
-  job_load "$prep_path" prep_job || return 0
+  if ! job_load "$prep_path" prep_job; then
+    defer_current_job "Waiting for pool prep to reappear." 3
+    return 2
+  fi
   prep_state="$(job_get prep_job STATE)"
   case "$prep_state" in
     complete|skipped)
