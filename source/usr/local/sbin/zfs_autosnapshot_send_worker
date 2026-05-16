@@ -551,10 +551,16 @@ ensure_send_job_file() {
 }
 
 prepare_scheduled_job_snapshot() {
-  local basename source_root include_children create_cmd previous_basename="" snapshot_error
+  local basename source_root include_children create_cmd previous_basename="" snapshot_error readiness_message
 
   source_root="$(job_get job SOURCE_ROOT)"
   include_children="$(job_get job INCLUDE_CHILDREN 0)"
+
+  zfs_dataset_tree_actionable "$source_root" "$include_children" readiness_message || {
+    log "Source dataset tree is not ready for scheduled send prepare ${source_root}: ${readiness_message}"
+    defer_current_job "Source dataset is not ready for scheduled send; waiting for ZFS import/mount." 15
+    return 2
+  }
 
   if [[ -n "$(job_get job SOURCE_SNAPSHOT)" ]]; then
     if ! snapshot_exists "$(job_get job SOURCE_SNAPSHOT)"; then

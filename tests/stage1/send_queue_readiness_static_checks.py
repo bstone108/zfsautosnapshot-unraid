@@ -59,10 +59,17 @@ def main() -> int:
         "manual send-all kicker must also defer schedules that are not ZFS-actionable",
     )
 
+    prepare_snapshot_body = worker.split("prepare_scheduled_job_snapshot() {", 1)[1].split("\n}\n", 1)[0]
     assert_contains(
         worker,
         "if ! snapshot_error=\"$(\"${create_cmd[@]}\" 2>&1)\"; then",
         "scheduled send snapshot creation failures must be handled explicitly",
+    )
+    assert_in_order(
+        prepare_snapshot_body,
+        "zfs_dataset_tree_actionable \"$source_root\" \"$include_children\" readiness_message || {",
+        "if [[ -n \"$(job_get job SOURCE_SNAPSHOT)\" ]]; then",
+        "scheduled prepare/resume jobs must verify source tree actionability before treating a missing queued checkpoint as permanently gone",
     )
     assert_contains(
         worker,
