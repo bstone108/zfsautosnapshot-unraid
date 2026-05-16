@@ -1540,12 +1540,14 @@ acquire_lock() {
 		exec 200>"$LOCKFILE"
 		if ! flock -n 200; then
 			log "Another instance is already running (lock: $LOCKFILE). Exiting."
+			RUN_SUMMARY_ENABLED=0
 			exit 0
 		fi
 		echo "$$" 1>&200
 	else
 		if ! mkdir "$LOCKDIR" 2>/dev/null; then
 			log "Another instance is already running (lock: $LOCKDIR). Exiting."
+			RUN_SUMMARY_ENABLED=0
 			exit 0
 		fi
 		echo "$$" >"$LOCKDIR/pid"

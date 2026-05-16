@@ -714,6 +714,43 @@ EOF
   assert_file_contains "${case_dir}/log/summary.log" "Result: Success"
 }
 
+test_lock_loser_does_not_run_log_maintenance() {
+  local case_dir path_prefix lock_file
+  case_dir="$(new_case lock_loser_log_maintenance)"
+  path_prefix="${case_dir}/mockbin"
+  lock_file="${case_dir}/run/zfs_autosnapshot.lock"
+
+  write_config "${case_dir}" "tank/data:100G"
+  cat > "${case_dir}/state/pools.tsv" <<'EOF'
+tank	500000000000	0	1000000000000	500000000000	50%	ONLINE
+EOF
+  cat > "${case_dir}/state/datasets.tsv" <<'EOF'
+tank/data	500000000000	0	0	0	0
+EOF
+
+  : > "${case_dir}/log/debug.log"
+  local before_inode after_inode
+  before_inode="$(stat -c '%i' "${case_dir}/log/debug.log")"
+  exec 9>"${lock_file}"
+  flock -n 9
+  PATH="${path_prefix}:${PATH}" \
+    MOCK_STATE_DIR="${case_dir}/state" \
+    MOCK_NOW_EPOCH="${MOCK_NOW_EPOCH:-2000000000}" \
+    TZ=UTC \
+      "${case_dir}/zfs_autosnapshot" >> "${case_dir}/log/debug.log" 2>&1
+  flock -u 9
+  exec 9>&-
+  after_inode="$(stat -c '%i' "${case_dir}/log/debug.log")"
+
+  assert_file_contains "${case_dir}/log/debug.log" "Another instance is already running"
+  if [[ "$before_inode" != "$after_inode" ]]; then
+    fail "Lock-losing autosnapshot instance must not prune/replace the active debug log"
+  fi
+  if [[ -s "${case_dir}/log/summary.log" ]]; then
+    fail "Lock-losing autosnapshot instance must not write a run summary"
+  fi
+}
+
 main() {
   test_zero_change_housekeeping
   echo "PASS: zero-change housekeeping"
@@ -747,6 +784,9 @@ main() {
 
   test_missing_configured_dataset_is_skipped
   echo "PASS: missing configured datasets are skipped"
+
+  test_lock_loser_does_not_run_log_maintenance
+  echo "PASS: lock loser does not run log maintenance"
 
   python3 "${ROOT_DIR}/tests/stage1/send_settings_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/diagnostics_static_checks.py"
