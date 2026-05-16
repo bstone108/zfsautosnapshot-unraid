@@ -15,6 +15,12 @@ assert preflight_branch in text, (
     "dispatch, not report that they are waiting for a transfer/send slot."
 )
 
-assert 'defer_current_job "Waiting for send slot." 3' in text, (
-    "Transfer workers should still report real transfer slot contention."
+assert 'defer_current_job "Waiting for send slot."' not in text, (
+    "Transfer workers are launched only after the queue manager chooses a job; "
+    "they must not independently wait for or arbitrate send slots."
+)
+
+assert 'acquire_send_transfer_slot' not in text, (
+    "Queue order must be owned by the queue manager, not by transfer workers "
+    "racing to acquire their own send slots after launch."
 )

@@ -16,7 +16,6 @@ CURRENT_JOB_PATH=""
 CURRENT_ACTIVE_DATASETS_FILE=""
 CURRENT_PREP_POOL=""
 CURRENT_SPACE_RESERVATION_JOB_ID=""
-CURRENT_SEND_TRANSFER_SLOT_DIR=""
 SEND_JOB_ID_CACHE_LOADED=0
 declare -A SEND_JOB_ID_PATH_CACHE=()
 
@@ -47,7 +46,6 @@ cleanup() {
     CURRENT_PREP_POOL=""
   fi
   release_current_space_reservation
-  release_current_send_transfer_slot
   clear_active_send_datasets
   rm -rf "$WORKER_LOCK_DIR" >/dev/null 2>&1 || true
   exit "$exit_code"
@@ -147,13 +145,6 @@ release_current_space_reservation() {
   if [[ -n "$CURRENT_SPACE_RESERVATION_JOB_ID" ]]; then
     release_send_space_reservation_for_job "$CURRENT_SPACE_RESERVATION_JOB_ID"
     CURRENT_SPACE_RESERVATION_JOB_ID=""
-  fi
-}
-
-release_current_send_transfer_slot() {
-  if [[ -n "$CURRENT_SEND_TRANSFER_SLOT_DIR" ]]; then
-    release_send_transfer_slot "$CURRENT_SEND_TRANSFER_SLOT_DIR"
-    CURRENT_SEND_TRANSFER_SLOT_DIR=""
   fi
 }
 
@@ -335,7 +326,7 @@ reserve_destination_space_for_current_send() {
   local destination="$1"
   local base_snapshot="$2"
   local snapshot="$3"
-  local required_bytes buffer_bytes transfer_slot_dir
+  local required_bytes buffer_bytes
 
   destination="${destination:-}"
   snapshot="${snapshot:-}"
@@ -346,17 +337,11 @@ reserve_destination_space_for_current_send() {
   buffer_bytes="$(send_space_buffer_bytes "$required_bytes")"
 
   if send_space_reservation_exists_for_job "$CURRENT_JOB_ID"; then
-    if ! acquire_send_transfer_slot "$CURRENT_JOB_ID" "$$" transfer_slot_dir; then
-      defer_current_job "Waiting for send slot." 3
-      return 2
-    fi
-    CURRENT_SEND_TRANSFER_SLOT_DIR="$transfer_slot_dir"
     if adopt_send_space_reservation_for_job "$CURRENT_JOB_ID" "$$"; then
       CURRENT_SPACE_RESERVATION_JOB_ID="$CURRENT_JOB_ID"
       log "Using pre-approved destination space reservation for ${CURRENT_JOB_ID}: destination=${destination} required=${required_bytes} buffer=${buffer_bytes}"
       return 0
     fi
-    release_current_send_transfer_slot
   fi
 
   defer_current_job "Waiting for destination space approval." 1
