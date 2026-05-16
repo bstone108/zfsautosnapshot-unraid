@@ -838,6 +838,18 @@ send_member_snapshot() {
     return 2
   }
 
+  zfs_dataset_tree_actionable "$source_dataset" "0" readiness_message || {
+    log "Source dataset is not ready for ${source_dataset}; deferring send member: ${readiness_message}"
+    defer_current_job "Source dataset is not ready for scheduled send; waiting for ZFS import/mount." 15
+    return 2
+  }
+
+  if ! snapshot_exists "$snapshot"; then
+    log "Source snapshot is not ready for ${snapshot}; deferring send member."
+    defer_current_job "source snapshot is not ready for scheduled send; waiting for ZFS import/mount" 15
+    return 2
+  fi
+
   if ! ensure_destination_parent_exists "$destination"; then
     fail_current_job_final "Unable to ensure destination parent exists for '${destination}'."
     return 1

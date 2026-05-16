@@ -76,6 +76,22 @@ def main() -> int:
     )
     assert_contains(
         worker,
+        "zfs_dataset_tree_actionable \"$source_dataset\" \"0\" readiness_message || {",
+        "send members must recheck source dataset actionability before base selection/reseed decisions",
+    )
+    assert_contains(
+        worker,
+        "source snapshot is not ready for scheduled send; waiting for ZFS import/mount",
+        "send members must defer when their queued source snapshot is temporarily unavailable",
+    )
+    assert_in_order(
+        worker,
+        "zfs_dataset_tree_actionable \"$source_dataset\" \"0\" readiness_message || {",
+        "find_latest_common_basename_for_member",
+        "source readiness must be verified before latest-common scans or destructive reseed decisions",
+    )
+    assert_contains(
+        worker,
         "zfs_pool_actionable \"$dest_pool\" readiness_message || {",
         "pool prep must defer until the destination pool is ZFS-actionable",
     )
