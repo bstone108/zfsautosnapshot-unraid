@@ -159,12 +159,12 @@ def main() -> int:
     )
     assert_contains(
         lib,
-        "launch_job[LAST_MESSAGE]=\"Waiting for pool prep to reappear.\"",
+        'defer_send_launch_approval "$job_path" launch_job "Waiting for pool prep to reappear." 3',
         "queue manager must not approve/launch sends when their referenced pool prep job is missing",
     )
     assert_contains(
         lib,
-        "launch_job[LAST_MESSAGE]=\"Waiting for pool prep.\"",
+        'defer_send_launch_approval "$job_path" launch_job "Waiting for pool prep." 3',
         "queue manager should leave prepped sends queued while destination cleanup prep is still running",
     )
     assert_contains(
@@ -186,6 +186,26 @@ def main() -> int:
         lib,
         "acquire_pool_prep_lock \"$dest_pool\"",
         "queue manager cleanup approval must avoid overlapping cleanup planners",
+    )
+    assert_contains(
+        lib,
+        "defer_send_launch_approval()",
+        "queue manager must have a launch-approval defer helper instead of retrying unapproved sends every loop",
+    )
+    assert_contains(
+        lib,
+        'defer_send_launch_approval "$job_path" launch_job "Waiting for queued destination cleanup to free space." 3',
+        "queue manager should back off sends while destination delete jobs are queued/running",
+    )
+    assert_contains(
+        lib,
+        'defer_send_launch_approval "$job_path" launch_job "Waiting for destination cleanup planning cooldown." 3',
+        "queue manager should back off sends during space-cleanup cooldown instead of rescanning every second",
+    )
+    assert_contains(
+        lib,
+        'defer_send_launch_approval "$job_path" launch_job "Waiting for destination cleanup planner lock." 3',
+        "queue manager should back off sends when another cleanup planner owns the pool lock",
     )
     assert_contains(
         worker,

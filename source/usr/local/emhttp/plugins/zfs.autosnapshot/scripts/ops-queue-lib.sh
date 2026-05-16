@@ -4481,6 +4481,26 @@ queue_schedule_zero_change_cleanup_for_dataset() {
   queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change"
 }
 
+defer_send_launch_approval() {
+  local job_path="$1"
+  local assoc_name="$2"
+  local message="$3"
+  local delay="${4:-3}"
+  local now_epoch
+  # shellcheck disable=SC2178
+  local -n launch_job_ref="$assoc_name"
+
+  [[ -n "$job_path" ]] || return 1
+  [[ "$delay" =~ ^[0-9]+$ ]] || delay=3
+  now_epoch="$(date +%s)"
+  launch_job_ref[STATE]="retry_wait"
+  launch_job_ref[PHASE]="retry_wait"
+  launch_job_ref[RETRY_AT]="$((now_epoch + delay))"
+  launch_job_ref[LAST_MESSAGE]="$message"
+  job_write "$job_path" "$assoc_name" || true
+  return 1
+}
+
 approve_send_job_space_for_launch() {
   local job_path="$1"
   local reservation_pid="$2"
@@ -4500,8 +4520,7 @@ approve_send_job_space_for_launch() {
   prep_job_id="$(job_get launch_job PREP_JOB_ID)"
   if [[ -n "$prep_job_id" ]]; then
     if ! find_job_by_id "$prep_job_id" prep_path || ! job_load "$prep_path" prep_job; then
-      launch_job[LAST_MESSAGE]="Waiting for pool prep to reappear."
-      job_write "$job_path" launch_job || true
+      defer_send_launch_approval "$job_path" launch_job "Waiting for pool prep to reappear." 3
       return 1
     fi
     prep_state="$(job_get prep_job STATE)"
@@ -4509,8 +4528,7 @@ approve_send_job_space_for_launch() {
       complete|skipped)
         ;;
       *)
-        launch_job[LAST_MESSAGE]="Waiting for pool prep."
-        job_write "$job_path" launch_job || true
+        defer_send_launch_approval "$job_path" launch_job "Waiting for pool prep." 3
         return 1
         ;;
     esac
@@ -4540,15 +4558,13 @@ approve_send_job_space_for_launch() {
   [[ "$freeing_bytes" =~ ^[0-9]+$ ]] || freeing_bytes=0
 
   if (( shortfall <= 0 || freeing_bytes >= shortfall )); then
-    launch_job[LAST_MESSAGE]="Waiting for ZFS freeing to satisfy destination space."
-    job_write "$job_path" launch_job || true
+    defer_send_launch_approval "$job_path" launch_job "Waiting for ZFS freeing to satisfy destination space." 3
     zfsas_send_debug_marker "space_approval_wait_freeing job_id=${job_id} destination=${destination} available=${available_bytes} needed=${needed_bytes} freeing=${freeing_bytes}"
     return 1
   fi
 
   if pool_has_active_delete_jobs "$dest_pool"; then
-    launch_job[LAST_MESSAGE]="Waiting for queued destination cleanup to free space."
-    job_write "$job_path" launch_job || true
+    defer_send_launch_approval "$job_path" launch_job "Waiting for queued destination cleanup to free space." 3
     zfsas_send_debug_marker "space_approval_wait_delete_queue job_id=${job_id} destination=${destination} pool=${dest_pool} available=${available_bytes} needed=${needed_bytes} freeing=${freeing_bytes}"
     return 1
   fi
@@ -4557,10 +4573,12 @@ approve_send_job_space_for_launch() {
   last_cleanup_at="$(job_get launch_job SPACE_CLEANUP_REQUESTED_AT 0)"
   [[ "$last_cleanup_at" =~ ^[0-9]+$ ]] || last_cleanup_at=0
   if (( now_epoch - last_cleanup_at < 30 )); then
+    defer_send_launch_approval "$job_path" launch_job "Waiting for destination cleanup planning cooldown." 3
     return 1
   fi
 
   if ! acquire_pool_prep_lock "$dest_pool"; then
+    defer_send_launch_approval "$job_path" launch_job "Waiting for destination cleanup planner lock." 3
     return 1
   fi
   launch_job[SPACE_CLEANUP_REQUESTED_AT]="$now_epoch"
