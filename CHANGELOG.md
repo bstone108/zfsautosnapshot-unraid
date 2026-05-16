@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.16.07 (Testing Branch Only)
+
+- Added a Help and Diagnostics tab with a direct link to the GitHub issue tracker.
+- Added a diagnostics zip download that collects redacted plugin configuration, plugin logs, queue state, and read-only ZFS/zpool/system status output for attaching to support issues.
+
 ### 2026.05.16.06 (Testing Branch Only)
 
 - Added a settings safety check that refuses overlapping auto-snapshot and `ZFS Send` checkpoint prefixes, including exact matches and broader prefixes such as `zfs-` that would also match send checkpoints.
