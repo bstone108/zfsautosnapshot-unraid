@@ -4055,7 +4055,7 @@ queue_snapshot_delete_job() {
   job[DELETE_SCOPE]="$delete_scope"
   job[RETRY_AT]="0"
 
-  if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
+  if [[ ( "$delete_scope" == "checkpoint" || "$delete_scope" == "destination_checkpoint" ) && -n "$send_schedule_job_id" ]]; then
     job[SEND_PROTECTED]="1"
     job[SEND_SCHEDULE_JOB_ID]="$send_schedule_job_id"
   fi
@@ -4286,7 +4286,7 @@ queue_destination_retention_for_dataset() {
       snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
       if [[ -n "$snapshot_schedule_job_id" ]]; then
         [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
-        queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+        queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint" || true
         if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
           add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
         fi
@@ -4308,7 +4308,7 @@ queue_destination_retention_for_dataset() {
         snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
         if [[ -n "$snapshot_schedule_job_id" ]]; then
           [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
-          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send weekly retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send weekly retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint" || true
           if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
             add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
           fi
@@ -4331,7 +4331,7 @@ queue_destination_retention_for_dataset() {
         snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
         if [[ -n "$snapshot_schedule_job_id" ]]; then
           [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
-          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send daily retention cleanup." "$snapshot_schedule_job_id" "checkpoint" || true
+          queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send daily retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint" || true
           if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
             add_planned_reclaim_for_capacity_dataset "$dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
           fi

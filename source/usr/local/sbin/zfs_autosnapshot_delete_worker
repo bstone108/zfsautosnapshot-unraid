@@ -112,6 +112,11 @@ queue_delete_duplicate_exists() {
     [[ -n "${QUEUE_BY_CHECKPOINT[$key]:-}" ]]
     return
   fi
+  if [[ "$delete_scope" == "destination_checkpoint" && -n "$schedule_job_id" ]]; then
+    key="${schedule_job_id}|${delete_scope}|${snapshot}"
+    [[ -n "${QUEUE_BY_CHECKPOINT[$key]:-}" ]]
+    return
+  fi
 
   [[ -n "${QUEUE_BY_SNAPSHOT[$snapshot]:-}" ]]
 }
@@ -158,6 +163,8 @@ queue_add_job() {
   [[ -n "$snapshot" ]] && QUEUE_BY_SNAPSHOT["$snapshot"]="$job_id"
   if [[ "$delete_scope" == "checkpoint" && -n "$schedule_job_id" ]]; then
     QUEUE_BY_CHECKPOINT["${schedule_job_id}|${snapshot_name}"]="$job_id"
+  elif [[ "$delete_scope" == "destination_checkpoint" && -n "$schedule_job_id" ]]; then
+    QUEUE_BY_CHECKPOINT["${schedule_job_id}|${delete_scope}|${snapshot}"]="$job_id"
   fi
 
   daemon_mark_dirty
@@ -226,6 +233,8 @@ queue_remove_job() {
   [[ -n "$snapshot" ]] && unset 'QUEUE_BY_SNAPSHOT[$snapshot]'
   if [[ "$delete_scope" == "checkpoint" && -n "$schedule_job_id" ]]; then
     unset "QUEUE_BY_CHECKPOINT[${schedule_job_id}|${snapshot_name}]"
+  elif [[ "$delete_scope" == "destination_checkpoint" && -n "$schedule_job_id" ]]; then
+    unset "QUEUE_BY_CHECKPOINT[${schedule_job_id}|${delete_scope}|${snapshot}]"
   fi
 
   daemon_mark_dirty
@@ -584,6 +593,13 @@ process_send_checkpoint_delete() {
     dataset_exists "$dest_root" && delete_checkpoint_basename_across_tree "$dest_root" "$basename" "$prefix" "destination"
     complete_delete_job "Deleted scheduled-send checkpoint ${basename} across its source and destination trees."
     log "Deleted scheduled-send checkpoint ${basename} across its source and destination trees."
+    return 0
+  fi
+
+  if [[ "$delete_scope" == "destination_checkpoint" ]]; then
+    log "Deleting destination scheduled-send checkpoint snapshot ${snapshot}."
+    delete_single_snapshot "$snapshot" || return $?
+    complete_delete_job "Deleted destination scheduled-send checkpoint snapshot ${snapshot}."
     return 0
   fi
 

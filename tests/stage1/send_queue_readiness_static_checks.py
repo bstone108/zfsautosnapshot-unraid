@@ -225,6 +225,38 @@ def main() -> int:
         "zero-change cleanup should explicitly skip send checkpoints and leave them to retention cleanup",
     )
 
+    assert_contains(
+        lib,
+        '"Queued by scheduled-send retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint"',
+        "destination retention must queue destination-only checkpoint deletes instead of cross-tree checkpoint deletes",
+    )
+    assert_contains(
+        lib,
+        '"Queued by scheduled-send weekly retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint"',
+        "destination weekly retention must not use cross-tree checkpoint cleanup for destination snapshots",
+    )
+    assert_contains(
+        lib,
+        '"Queued by scheduled-send daily retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint"',
+        "destination daily retention must not use cross-tree checkpoint cleanup for destination snapshots",
+    )
+    delete_worker = Path(ROOT / "source/usr/local/sbin/zfs_autosnapshot_delete_worker").read_text()
+    assert_contains(
+        delete_worker,
+        'if [[ "$delete_scope" == "destination_checkpoint" ]]; then',
+        "delete worker must revalidate protected destination checkpoint deletes and delete only the queued destination snapshot",
+    )
+    assert_contains(
+        delete_worker,
+        "Deleting destination scheduled-send checkpoint snapshot ${snapshot}.",
+        "destination retention checkpoint deletes must not destroy matching source checkpoints",
+    )
+    assert_contains(
+        delete_worker,
+        '"${schedule_job_id}|${delete_scope}|${snapshot}"',
+        "delete queue duplicate suppression for destination checkpoint deletes must be per snapshot, not one basename across a recursive tree",
+    )
+
     print("PASS: send queue readiness static contracts")
     return 0
 
