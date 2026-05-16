@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.16.t01 (Testing Branch Only)
+
+- Testing build; see commit history and linked issues.
+
 ### 2026.05.16.08 (Testing Branch Only)
 
 - Fixed a logging interruption when a scheduled autosnapshot run starts while another autosnapshot run is already active.
