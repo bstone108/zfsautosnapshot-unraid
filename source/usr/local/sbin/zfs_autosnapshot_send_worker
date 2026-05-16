@@ -331,52 +331,20 @@ send_space_buffer_bytes() {
   printf '%s' "$buffer"
 }
 
-rerun_space_cleanup_for_waiting_send() {
-  local schedule_job_id="$1"
-  local dest_pool="$2"
-  local capacity_dataset="$3"
-  local target_bytes="$4"
-  local cleanup_started cleanup_elapsed
-  # shellcheck disable=SC2034
-  local -A planned_reclaim=()
-
-  [[ -n "$schedule_job_id" && -n "$dest_pool" && -n "$capacity_dataset" ]] || return 1
-  [[ "$target_bytes" =~ ^[0-9]+$ ]] || return 1
-
-  if ! acquire_pool_prep_lock "$dest_pool"; then
-    return 1
-  fi
-  CURRENT_PREP_POOL="$dest_pool"
-
-  cleanup_started="$(date +%s)"
-  log "Destination space reservation is short on pool ${dest_pool}; rerunning retention and low-space cleanup planning up to ${target_bytes} bytes."
-  queue_pool_retention_cleanup "$dest_pool" "$capacity_dataset" planned_reclaim || true
-  queue_pool_free_space_cleanup_for_target "$dest_pool" "$capacity_dataset" "$target_bytes" planned_reclaim || true
-  cleanup_elapsed=$(( $(date +%s) - cleanup_started ))
-  log "Reservation-triggered cleanup planning for pool ${dest_pool} completed in ${cleanup_elapsed}s"
-  release_current_prep_pool_lock
-  ensure_delete_worker_for_backlog
-}
-
 reserve_destination_space_for_current_send() {
   local destination="$1"
   local base_snapshot="$2"
   local snapshot="$3"
-  local required_bytes buffer_bytes needed_bytes available_bytes capacity_dataset dest_pool schedule_job_id threshold_bytes cleanup_target transfer_slot_dir
+  local required_bytes buffer_bytes transfer_slot_dir
 
   destination="${destination:-}"
   snapshot="${snapshot:-}"
   [[ -n "$destination" && -n "$snapshot" ]] || return 1
 
-  capacity_dataset="$(nearest_existing_dataset_ancestor "$destination")"
-  [[ -n "$capacity_dataset" ]] || capacity_dataset="${destination%%/*}"
-  dest_pool="${capacity_dataset%%/*}"
-  schedule_job_id="$(job_get job SCHEDULE_JOB_ID)"
-
   estimate_destination_space_for_current_send "$destination" "$base_snapshot" "$snapshot" || return 1
   required_bytes="$(job_get job SPACE_REQUIRED_BYTES 0)"
-
   buffer_bytes="$(send_space_buffer_bytes "$required_bytes")"
+
   if send_space_reservation_exists_for_job "$CURRENT_JOB_ID"; then
     if ! acquire_send_transfer_slot "$CURRENT_JOB_ID" "$$" transfer_slot_dir; then
       defer_current_job "Waiting for send slot." 3
@@ -391,42 +359,7 @@ reserve_destination_space_for_current_send() {
     release_current_send_transfer_slot
   fi
 
-  if ! acquire_send_transfer_slot "$CURRENT_JOB_ID" "$$" transfer_slot_dir; then
-    defer_current_job "Waiting for send slot." 3
-    return 2
-  fi
-  CURRENT_SEND_TRANSFER_SLOT_DIR="$transfer_slot_dir"
-
-  if acquire_send_space_reservation "$CURRENT_JOB_ID" "$$" "$destination" "$capacity_dataset" "$required_bytes" "$buffer_bytes" available_bytes needed_bytes; then
-    CURRENT_SPACE_RESERVATION_JOB_ID="$CURRENT_JOB_ID"
-    log "Reserved destination space for ${CURRENT_JOB_ID}: destination=${destination} required=${required_bytes} buffer=${buffer_bytes} available_after_existing_reservations=${available_bytes}"
-    return 0
-  fi
-
-  [[ "$needed_bytes" =~ ^[0-9]+$ ]] || needed_bytes=$(( required_bytes + buffer_bytes ))
-  [[ "$available_bytes" =~ ^[0-9]+$ ]] || available_bytes=0
-  if ! pool_has_active_delete_jobs "$dest_pool"; then
-    release_current_send_transfer_slot
-    cleanup_target="$needed_bytes"
-    threshold_bytes="$(job_get job THRESHOLD_BYTES 0)"
-    if [[ "$threshold_bytes" =~ ^[0-9]+$ ]] && (( threshold_bytes > cleanup_target )); then
-      cleanup_target="$threshold_bytes"
-    fi
-    rerun_space_cleanup_for_waiting_send "$schedule_job_id" "$dest_pool" "$capacity_dataset" "$cleanup_target" || true
-    if ! acquire_send_transfer_slot "$CURRENT_JOB_ID" "$$" transfer_slot_dir; then
-      defer_current_job "Waiting for send slot." 3
-      return 2
-    fi
-    CURRENT_SEND_TRANSFER_SLOT_DIR="$transfer_slot_dir"
-    if acquire_send_space_reservation "$CURRENT_JOB_ID" "$$" "$destination" "$capacity_dataset" "$required_bytes" "$buffer_bytes" available_bytes needed_bytes; then
-      CURRENT_SPACE_RESERVATION_JOB_ID="$CURRENT_JOB_ID"
-      log "Reserved destination space for ${CURRENT_JOB_ID} after cleanup planning: destination=${destination} required=${required_bytes} buffer=${buffer_bytes} available_after_existing_reservations=${available_bytes}"
-      return 0
-    fi
-  fi
-
-  release_current_send_transfer_slot
-  defer_current_job "Waiting for destination space." 5
+  defer_current_job "Waiting for destination space approval." 1
   return 2
 }
 

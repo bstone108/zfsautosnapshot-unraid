@@ -130,6 +130,24 @@ def main() -> int:
         "if send_space_reservation_exists_for_job \"$CURRENT_JOB_ID\"; then",
         "worker must honor pre-approved space reservations before attempting a fresh reservation",
     )
+    if "rerun_space_cleanup_for_waiting_send()" in worker:
+        raise AssertionError(
+            "transfer worker cleanup helper must be removed; queue manager owns destination cleanup planning"
+        )
+    reserve_body = worker.split("reserve_destination_space_for_current_send() {", 1)[1].split("\n}\n", 1)[0]
+    if "queue_pool_retention_cleanup" in reserve_body or "queue_pool_free_space_cleanup_for_target" in reserve_body:
+        raise AssertionError(
+            "transfer workers must not churn destination cleanup; queue manager owns cleanup/space approval"
+        )
+    if "acquire_send_space_reservation \"$CURRENT_JOB_ID\" \"$$\"" in reserve_body:
+        raise AssertionError(
+            "transfer workers must not create fresh reservations; they should wait for queue-manager approval"
+        )
+    assert_contains(
+        reserve_body,
+        "defer_current_job \"Waiting for destination space approval.\"",
+        "worker without pre-approved reservation should publish estimate and wait for queue-manager approval",
+    )
     assert_contains(
         Path(ROOT / "source/usr/local/sbin/zfs_autosnapshot_queue_handler").read_text(),
         "approve_send_job_space_for_launch \"$job_path\" \"$$\" || {",
