@@ -604,7 +604,7 @@ ensure_send_job_file() {
 }
 
 prepare_scheduled_job_snapshot() {
-  local basename source_root include_children create_cmd previous_basename=""
+  local basename source_root include_children create_cmd previous_basename="" snapshot_error
 
   source_root="$(job_get job SOURCE_ROOT)"
   include_children="$(job_get job INCLUDE_CHILDREN 0)"
@@ -630,7 +630,11 @@ prepare_scheduled_job_snapshot() {
   fi
 
   log "Creating scheduled send checkpoint ${source_root}@${basename}"
-  "${create_cmd[@]}"
+  if ! snapshot_error="$("${create_cmd[@]}" 2>&1)"; then
+    [[ -n "$snapshot_error" ]] && log "Scheduled send checkpoint creation failed for ${source_root}@${basename}: ${snapshot_error}"
+    defer_current_job "Source dataset is not ready for scheduled send; waiting for ZFS import/mount." 15
+    return 2
+  fi
 
   job[SOURCE_SNAPSHOT]="${source_root}@${basename}"
   job[SOURCE_SNAPSHOT_NAME]="$basename"
@@ -844,7 +848,7 @@ send_member_snapshot() {
   local member_index="$1"
   local member_count="$2"
   local source_dataset destination snapshot basename latest_common description progress failure_message base_snapshot
-  local destination_parent source_exists=0 destination_exists=0 parent_exists=0
+  local destination_parent source_exists=0 destination_exists=0 parent_exists=0 readiness_message
   local source_type="" destination_type=""
 
   source_dataset="$(job_get job MEMBER_"${member_index}"_SOURCE)"
@@ -880,6 +884,12 @@ send_member_snapshot() {
 
   log "Send preflight: source=${source_dataset} source_exists=${source_exists} source_type=${source_type:-unknown} destination=${destination} destination_exists=${destination_exists} destination_type=${destination_type:-missing} parent=${destination_parent} parent_exists=${parent_exists} snapshot=${snapshot} job_mode=$(job_get job JOB_MODE) job_action=$(effective_job_action job)"
   zfsas_send_debug_marker "member_preflight job_id=$(job_get job JOB_ID) schedule_job_id=$(job_get job SCHEDULE_JOB_ID) member_index=${member_index}/${member_count} source=${source_dataset} source_exists=${source_exists} source_type=${source_type:-unknown} destination=${destination} destination_exists=${destination_exists} destination_type=${destination_type:-missing} parent=${destination_parent} parent_exists=${parent_exists} snapshot=${snapshot} basename=${basename} mode=$(job_get job JOB_MODE) action=$(effective_job_action job)"
+
+  send_destination_actionable "$destination" readiness_message || {
+    log "Destination is not ready for ${destination}; deferring send member: ${readiness_message}"
+    defer_current_job "Destination dataset is not ready for scheduled send; waiting for ZFS import/mount." 15
+    return 2
+  }
 
   if ! ensure_destination_parent_exists "$destination"; then
     fail_current_job_final "Unable to ensure destination parent exists for '${destination}'."
@@ -1164,7 +1174,7 @@ process_finalize_job() {
 }
 
 process_pool_prep_job() {
-  local dest_pool schedule_ids schedule_job_id dest_root capacity_dataset
+  local dest_pool schedule_ids schedule_job_id dest_root capacity_dataset readiness_message
   local retention_started retention_elapsed space_started space_elapsed
   # shellcheck disable=SC2034
   local -A planned_reclaim=()
@@ -1174,6 +1184,12 @@ process_pool_prep_job() {
   [[ -n "$dest_pool" && -n "$schedule_ids" ]] || {
     fail_current_job_final "Pool prep is missing settings."
     return 1
+  }
+
+  zfs_pool_actionable "$dest_pool" readiness_message || {
+    log "Destination pool is not ready for pool prep ${dest_pool}: ${readiness_message}"
+    defer_current_job "Destination pool is not ready; waiting for ZFS import/mount." 15
+    return 2
   }
 
   if ! acquire_pool_prep_lock "$dest_pool"; then

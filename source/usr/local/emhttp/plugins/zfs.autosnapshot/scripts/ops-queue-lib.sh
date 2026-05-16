@@ -2732,6 +2732,109 @@ list_tree_datasets() {
   fi
 }
 
+function zfs_dataset_tree_actionable() {
+  local root_dataset="$1"
+  local include_children="${2:-0}"
+  local message_var="${3:-}"
+  local output
+
+  if [[ -n "$message_var" ]]; then
+    printf -v "$message_var" ''
+  fi
+  [[ -n "$root_dataset" ]] || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" 'source dataset is not configured'
+    return 1
+  }
+
+  if [[ "$include_children" == "1" ]]; then
+    output="$(zfs list -H -o name -t filesystem,volume -r "$root_dataset" 2>&1)" || {
+      [[ -n "$message_var" ]] && printf -v "$message_var" "source dataset tree '${root_dataset}' is not listable yet: ${output}"
+      return 1
+    }
+  else
+    output="$(zfs list -H -o name -t filesystem,volume "$root_dataset" 2>&1)" || {
+      [[ -n "$message_var" ]] && printf -v "$message_var" "source dataset '${root_dataset}' is not visible yet: ${output}"
+      return 1
+    }
+  fi
+  [[ -n "$output" ]] || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" "source dataset '${root_dataset}' did not produce a ZFS listing"
+    return 1
+  }
+  return 0
+}
+
+function zfs_pool_actionable() {
+  local pool="$1"
+  local message_var="${2:-}"
+  local output
+
+  if [[ -n "$message_var" ]]; then
+    printf -v "$message_var" ''
+  fi
+  [[ -n "$pool" ]] || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" 'destination pool is not configured'
+    return 1
+  }
+  output="$(zfs list -H -o name -t filesystem,volume "$pool" 2>&1)" || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" "destination pool '${pool}' is not visible yet: ${output}"
+    return 1
+  }
+  [[ -n "$output" ]] || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" "destination pool '${pool}' did not produce a ZFS listing"
+    return 1
+  }
+  return 0
+}
+
+send_destination_actionable() {
+  local destination="$1"
+  local message_var="${2:-}"
+  local pool parent
+
+  if [[ -n "$message_var" ]]; then
+    printf -v "$message_var" ''
+  fi
+  [[ -n "$destination" ]] || {
+    [[ -n "$message_var" ]] && printf -v "$message_var" 'destination dataset is not configured'
+    return 1
+  }
+  pool="${destination%%/*}"
+  zfs_pool_actionable "$pool" "$message_var" || return 1
+  parent="${destination%/*}"
+  if [[ "$parent" != "$pool" ]] && ! dataset_exists "$parent"; then
+    if ! zfs list -H -o name -t filesystem,volume "$pool" >/dev/null 2>&1; then
+      [[ -n "$message_var" ]] && printf -v "$message_var" "destination pool '${pool}' is not actionable yet"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+function scheduled_send_job_zfs_actionable() {
+  local schedule_job_id="$1"
+  local message_var="${2:-}"
+  local source_root include_children dest_root dest_pool source_message dest_message
+
+  if [[ -n "$message_var" ]]; then
+    printf -v "$message_var" ''
+  fi
+  source_root="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}"
+  include_children="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]:-0}"
+  dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
+  dest_pool="${dest_root%%/*}"
+
+  if ! zfs_dataset_tree_actionable "$source_root" "$include_children" source_message; then
+    [[ -n "$message_var" ]] && printf -v "$message_var" "%s" "$source_message"
+    return 1
+  fi
+  if ! zfs_pool_actionable "$dest_pool" dest_message; then
+    [[ -n "$message_var" ]] && printf -v "$message_var" "%s" "$dest_message"
+    return 1
+  fi
+  return 0
+}
+
 build_members_for_job() {
   local assoc_name="$1"
   local basename="$2"
@@ -3308,7 +3411,7 @@ schedule_window_exists() {
 enqueue_scheduled_send_jobs_due() {
   local now_epoch="$1"
   local job_id frequency current_window last_completed_window requested_at requested_epoch
-  local resume_basename previous_basename dest_pool run_group_id prep_job_id pool
+  local resume_basename previous_basename dest_pool run_group_id prep_job_id pool readiness_message
   local -a due_jobs=()
   local -a due_pools=()
   local -A due_window=()
@@ -3338,6 +3441,11 @@ enqueue_scheduled_send_jobs_due() {
     schedule_job_blocked "$job_id" && continue
 
     schedule_window_exists "$job_id" "$current_window" && continue
+
+    scheduled_send_job_zfs_actionable "$job_id" readiness_message || {
+      log "Deferring scheduled send ${job_id}; ZFS source/destination is not ready: ${readiness_message}"
+      continue
+    }
 
     resume_basename=""
     previous_basename=""
