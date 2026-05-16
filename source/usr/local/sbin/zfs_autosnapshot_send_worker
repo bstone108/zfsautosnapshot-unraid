@@ -433,7 +433,7 @@ run_pipeline_with_space_reservation() {
   cache_current_send_plan "$description" "$base_snapshot" "$snapshot" "$destination"
   estimate_destination_space_for_current_send "$destination" "$base_snapshot" "$snapshot" || return 1
   if preflight_only_worker; then
-    defer_current_job "Waiting for send slot." 0
+    defer_current_job "Waiting in send queue for queue manager dispatch." 0
     return 2
   fi
   wait_for_pool_prep_for_current_job || return $?
