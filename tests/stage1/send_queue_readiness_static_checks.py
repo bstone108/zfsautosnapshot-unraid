@@ -77,6 +77,17 @@ def main() -> int:
         "failed scheduled snapshot creation should defer without persisting a phantom SOURCE_SNAPSHOT",
     )
     assert_contains(
+        prepare_snapshot_body,
+        "send_destination_actionable \"$destination_root\" readiness_message || {",
+        "scheduled prepare must recheck destination readiness before creating source checkpoints",
+    )
+    assert_in_order(
+        prepare_snapshot_body,
+        "send_destination_actionable \"$destination_root\" readiness_message || {",
+        "log \"Creating scheduled send checkpoint ${source_root}@${basename}\"",
+        "scheduled prepare must defer on destination readiness before snapshot creation to avoid phantom/churny checkpoints",
+    )
+    assert_contains(
         worker,
         "send_destination_actionable \"$destination\" readiness_message || {",
         "send members must defer when destination pool/parent is not actionable instead of final-failing",
