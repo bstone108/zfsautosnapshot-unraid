@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.16.08 (Testing Branch Only)
+
+- Fixed a logging interruption when a scheduled autosnapshot run starts while another autosnapshot run is already active.
+- The second run now exits without writing a run summary or pruning/replacing the debug log, so the active run can continue writing visible log output.
+
 ### 2026.05.16.07 (Testing Branch Only)
 
 - Added a Help and Diagnostics tab with a direct link to the GitHub issue tracker.
