@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.16.01 (Testing Branch Only)
+
+- Fixed WebGUI save/action requests on Unraid 7.3 systems where the global WebGUI CSRF guard validates and consumes the security token before plugin PHP sees it.
+- Kept the plugin's hidden form tokens and AJAX token headers/body fields so Unraid's WebGUI layer continues to receive the required token.
+- Added version/environment stamps to `ZFS Send` queue, worker, wrapper, and delete-worker logs so field logs identify the plugin, Unraid, ZFS, and zpool versions that generated them.
+
 ### 2026.05.15.01 (Testing Branch Only)
 
 - Added temporary testing-only `ZFS Send` debug markers to capture detailed field behavior for checkpoint creation, base snapshot selection, queue fan-out, reservations, send/receive pipeline results, reseed decisions, cleanup, and finalization.

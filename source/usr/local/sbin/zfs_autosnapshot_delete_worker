@@ -695,6 +695,7 @@ main() {
   ops_apply_owner "$DELETE_QUEUE_PID_FILE"
 
   exec >> "$LOG_FILE" 2>&1
+  zfsas_log_send_runtime_stamp "delete_worker"
   log "Delete daemon $$ starting"
 
   load_boot_persisted_state

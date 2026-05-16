@@ -79,6 +79,7 @@ main() {
 
   compact_shared_send_log_if_safe || true
   exec >> "$LOG_FILE" 2>&1
+  zfsas_log_send_runtime_stamp "queue_kicker"
   log "Queue kicker $$ starting"
 
   reconcile_stale_jobs

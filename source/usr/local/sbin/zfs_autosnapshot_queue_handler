@@ -114,6 +114,7 @@ main() {
   fi
   trap handler_cleanup EXIT INT TERM
 
+  zfsas_log_send_runtime_stamp "queue_handler"
   log "Queue handler $$ starting"
   while :; do
     now_epoch="$(date +%s)"

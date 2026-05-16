@@ -11,5 +11,9 @@ fi
 
 exec >> "$LOG_FILE" 2>&1
 
-echo "$(date +'%Y-%m-%d %H:%M:%S %Z') Compatibility wrapper invoked for zfs_autosnapshot_send; forwarding to queue kicker."
+# shellcheck source=/dev/null
+source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
+
+zfsas_log_send_runtime_stamp "compat_send_wrapper"
+log "Compatibility wrapper invoked for zfs_autosnapshot_send; forwarding to queue kicker."
 exec "$KICKER" --manual-now "$@"

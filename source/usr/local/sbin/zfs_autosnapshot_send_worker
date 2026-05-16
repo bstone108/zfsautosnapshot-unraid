@@ -1367,6 +1367,7 @@ main() {
   printf '%s\n' "$$" > "${WORKER_LOCK_DIR}/pid" 2>/dev/null || true
 
   exec >> "$LOG_FILE" 2>&1
+  zfsas_log_send_runtime_stamp "send_worker:${WORKER_ROLE}:${CLAIM_SELECTOR}"
   log "Send worker $$ starting (${WORKER_ROLE}:${CLAIM_SELECTOR})"
 
   while :; do

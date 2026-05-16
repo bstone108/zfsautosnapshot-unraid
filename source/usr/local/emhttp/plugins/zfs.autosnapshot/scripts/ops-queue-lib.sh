@@ -254,6 +254,93 @@ trim() {
   printf '%s' "$s"
 }
 
+zfsas_detect_plugin_version() {
+  local manifest_path version
+
+  for manifest_path in "/var/log/plugins/${PLUGIN_NAME}.plg" "/boot/config/plugins/${PLUGIN_NAME}.plg"; do
+    [[ -r "$manifest_path" ]] || continue
+    version="$(sed -n 's/.*<PLUGIN[^>]*version="\([^"]\+\)".*/\1/p' "$manifest_path" | head -n 1)"
+    version="$(trim "$version")"
+    if [[ -n "$version" ]]; then
+      printf '%s\n' "$version"
+      return 0
+    fi
+  done
+
+  printf 'unknown\n'
+}
+
+zfsas_detect_unraid_version() {
+  local value
+
+  if [[ -r /etc/unraid-version ]]; then
+    value="$(awk -F= '
+      /^[[:space:]]*version[[:space:]]*=/ {
+        gsub(/"/, "", $2)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+        print $2
+        exit
+      }
+    ' /etc/unraid-version 2>/dev/null || true)"
+    value="$(trim "$value")"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+
+    value="$(head -n 1 /etc/unraid-version 2>/dev/null || true)"
+    value="$(trim "$value")"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  fi
+
+  if [[ -r /etc/os-release ]]; then
+    value="$(awk -F= '/^PRETTY_NAME=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null || true)"
+    value="$(trim "$value")"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  fi
+
+  printf 'unknown\n'
+}
+
+zfsas_detect_zfs_version() {
+  local value
+  value="$(zfs version 2>/dev/null || zfs --version 2>/dev/null || true)"
+  value="$(printf '%s' "$value" | tr '\n' ';' | sed 's/;[[:space:]]*/; /g; s/[[:space:];]*$//')"
+  value="$(trim "$value")"
+  [[ -n "$value" ]] && printf '%s\n' "$value" || printf 'unknown\n'
+}
+
+zfsas_detect_zpool_version() {
+  local value
+  value="$(zpool version 2>/dev/null || zpool --version 2>/dev/null || true)"
+  value="$(printf '%s' "$value" | tr '\n' ';' | sed 's/;[[:space:]]*/; /g; s/[[:space:];]*$//')"
+  value="$(trim "$value")"
+  [[ -n "$value" ]] && printf '%s\n' "$value" || printf 'unknown\n'
+}
+
+zfsas_log_send_runtime_stamp() {
+  local component="${1:-send}"
+  local plugin_version unraid_version zfs_version zpool_version kernel_info bash_info path_zfs path_zpool
+
+  plugin_version="$(zfsas_detect_plugin_version)"
+  unraid_version="$(zfsas_detect_unraid_version)"
+  zfs_version="$(zfsas_detect_zfs_version)"
+  zpool_version="$(zfsas_detect_zpool_version)"
+  kernel_info="$(uname -srmo 2>/dev/null || uname -sr 2>/dev/null || echo unknown)"
+  bash_info="${BASH_VERSION:-unknown}"
+  path_zfs="$(command -v zfs 2>/dev/null || echo missing)"
+  path_zpool="$(command -v zpool 2>/dev/null || echo missing)"
+
+  log "Runtime stamp: component='${component}' pid='$$' plugin='${plugin_version}' unraid='${unraid_version}' zfs='${zfs_version}' zpool='${zpool_version}'"
+  log "Runtime environment: component='${component}' kernel='${kernel_info}' bash='${bash_info}' zfs_cmd='${path_zfs}' zpool_cmd='${path_zpool}'"
+}
+
 ops_apply_owner() {
   local path="$1"
   chown nobody "$path" >/dev/null 2>&1 || true
