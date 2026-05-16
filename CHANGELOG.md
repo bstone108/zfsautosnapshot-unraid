@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.16.05 (Testing Branch Only)
+
+- Strengthened `ZFS Send` startup/readiness handling so scheduled sends wait until the source tree, destination parent, and destination pool-prep state are actually usable instead of creating phantom failed jobs during boot or import timing.
+- Tightened queue-worker recovery so child sends wait for their source checkpoint and destination parent, release failed launch claims cleanly, and back off briefly when destination-space approval is blocked by prep, delete, cleanup, or ZFS freeing work.
+- Kept send-checkpoint cleanup ownership separated: worker cleanup remains source-only, destination retention keeps the newest confirmed common checkpoint protected, and post-send zero-change cleanup ignores send checkpoint snapshots.
+
 ### 2026.05.16.04 (Testing Branch Only)
 
 - Fixed post-send zero-change cleanup so it leaves `ZFS Send` checkpoint snapshots alone; checkpoint retention cleanup owns checkpoint deletion and keeps the newest confirmed common checkpoint protected.
