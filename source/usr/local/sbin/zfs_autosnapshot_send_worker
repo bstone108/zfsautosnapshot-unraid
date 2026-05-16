@@ -377,6 +377,20 @@ reserve_destination_space_for_current_send() {
   required_bytes="$(job_get job SPACE_REQUIRED_BYTES 0)"
 
   buffer_bytes="$(send_space_buffer_bytes "$required_bytes")"
+  if send_space_reservation_exists_for_job "$CURRENT_JOB_ID"; then
+    if ! acquire_send_transfer_slot "$CURRENT_JOB_ID" "$$" transfer_slot_dir; then
+      defer_current_job "Waiting for send slot." 3
+      return 2
+    fi
+    CURRENT_SEND_TRANSFER_SLOT_DIR="$transfer_slot_dir"
+    if adopt_send_space_reservation_for_job "$CURRENT_JOB_ID" "$$"; then
+      CURRENT_SPACE_RESERVATION_JOB_ID="$CURRENT_JOB_ID"
+      log "Using pre-approved destination space reservation for ${CURRENT_JOB_ID}: destination=${destination} required=${required_bytes} buffer=${buffer_bytes}"
+      return 0
+    fi
+    release_current_send_transfer_slot
+  fi
+
   if ! acquire_send_transfer_slot "$CURRENT_JOB_ID" "$$" transfer_slot_dir; then
     defer_current_job "Waiting for send slot." 3
     return 2

@@ -39,6 +39,7 @@ spawn_available_workers() {
   local now_epoch="$1"
   local worker_lock_dir max_send_workers prep_extra_workers preflight_workers job_path
   local -a ready_paths=()
+  local -A launch_job_for_release=()
 
   mapfile -t ready_paths < <(list_ready_send_job_paths "$now_epoch" pool_prep 64)
   for job_path in "${ready_paths[@]}"; do
@@ -67,7 +68,12 @@ spawn_available_workers() {
     [[ -n "$job_path" ]] || continue
     worker_lock_dir=""
     acquire_send_worker_launch_slot transfer "$max_send_workers" worker_lock_dir || break
+    approve_send_job_space_for_launch "$job_path" "$$" || {
+      release_send_worker_launch_slot "$worker_lock_dir"
+      continue
+    }
     spawn_send_worker "$worker_lock_dir" non_pool_prep_ready "$job_path" || {
+      release_send_space_reservation_for_job "$(job_load "$job_path" launch_job_for_release && job_get launch_job_for_release JOB_ID)"
       release_send_worker_launch_slot "$worker_lock_dir"
       continue
     }

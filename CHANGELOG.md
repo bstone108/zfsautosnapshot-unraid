@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.16.02 (Testing Branch Only)
+
+- Changed the `ZFS Send` queue handler to approve worker-reported destination space before launching transfer workers, so sends wait in the queue instead of repeatedly starting workers that immediately defer.
+- Added queue-manager cleanup gating so destination cleanup is only replanned when cleanup is not already running, the delete queue is empty, and ZFS is not already freeing enough space.
+- Kept pre-approved destination-space reservations attached to the send job and let the worker adopt them when it starts, reducing repeated space scans and reservation churn.
+
 ### 2026.05.16.01 (Testing Branch Only)
 
 - Fixed WebGUI save/action requests on Unraid 7.3 systems where the global WebGUI CSRF guard validates and consumes the security token before plugin PHP sees it.

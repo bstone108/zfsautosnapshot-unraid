@@ -1663,6 +1663,40 @@ send_space_reservation_exists_for_job() {
   return "$exists"
 }
 
+adopt_send_space_reservation_for_job() {
+  local job_id="$1"
+  local pid="$2"
+  local reservation_file fd
+  local -A reservation=()
+
+  [[ -n "$job_id" && "$pid" =~ ^[0-9]+$ ]] || return 1
+  mkdir -p "$SEND_SPACE_RESERVATION_DIR" >/dev/null 2>&1 || return 1
+  : > "$SEND_SPACE_RESERVATION_LOCK_FILE" 2>/dev/null || true
+  exec {fd}>>"$SEND_SPACE_RESERVATION_LOCK_FILE" || return 1
+  flock "$fd" || {
+    eval "exec ${fd}>&-"
+    return 1
+  }
+  cleanup_stale_send_space_reservations_locked
+  reservation_file="$(send_space_reservation_file_for_job "$job_id")"
+  if [[ ! -f "$reservation_file" ]] || ! job_load "$reservation_file" reservation; then
+    flock -u "$fd" || true
+    eval "exec ${fd}>&-"
+    return 1
+  fi
+  reservation[PID]="$pid"
+  reservation[ADOPTED_AT]="$(date +%s)"
+  job_write "$reservation_file" reservation || {
+    flock -u "$fd" || true
+    eval "exec ${fd}>&-"
+    return 1
+  }
+  flock -u "$fd" || true
+  eval "exec ${fd}>&-"
+  zfsas_send_debug_marker "space_reservation_adopted job_id=${job_id} pid=${pid}"
+  return 0
+}
+
 send_transfer_slot_dir() {
   local slot="$1"
   printf '%s/slot-%s.lockdir' "$SEND_TRANSFER_RUNTIME_DIR" "$slot"
@@ -4453,4 +4487,97 @@ queue_schedule_zero_change_cleanup_for_dataset() {
 
   [[ -n "$schedule_job_id" && -n "$dataset" && -n "$newest_send_basename" ]] || return 1
   queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change"
+}
+
+approve_send_job_space_for_launch() {
+  local job_path="$1"
+  local reservation_pid="$2"
+  local job_id destination capacity_dataset dest_pool required_bytes buffer_bytes needed_bytes available_bytes freeing_bytes shortfall threshold_bytes cleanup_target now_epoch last_cleanup_at prep_job_id prep_path prep_state
+  local -A launch_job=()
+  local -A prep_job=()
+  local -A planned_reclaim=()
+
+  [[ -n "$job_path" && "$reservation_pid" =~ ^[0-9]+$ ]] || return 1
+  job_load "$job_path" launch_job || return 1
+  job_id="$(job_get launch_job JOB_ID)"
+  destination="$(job_get launch_job SEND_PLAN_DESTINATION)"
+  [[ -n "$destination" ]] || destination="$(job_get launch_job DESTINATION_ROOT)"
+  required_bytes="$(job_get launch_job SPACE_REQUIRED_BYTES 0)"
+  [[ -n "$job_id" && -n "$destination" && "$required_bytes" =~ ^[0-9]+$ ]] || return 1
+
+  prep_job_id="$(job_get launch_job PREP_JOB_ID)"
+  if [[ -n "$prep_job_id" ]] && find_job_by_id "$prep_job_id" prep_path && job_load "$prep_path" prep_job; then
+    prep_state="$(job_get prep_job STATE)"
+    case "$prep_state" in
+      complete|skipped)
+        ;;
+      *)
+        launch_job[LAST_MESSAGE]="Waiting for pool prep."
+        job_write "$job_path" launch_job || true
+        return 1
+        ;;
+    esac
+  fi
+
+  if send_space_reservation_exists_for_job "$job_id"; then
+    return 0
+  fi
+
+  capacity_dataset="$(nearest_existing_dataset_ancestor "$destination")"
+  [[ -n "$capacity_dataset" ]] || capacity_dataset="${destination%%/*}"
+  dest_pool="${capacity_dataset%%/*}"
+  [[ -n "$dest_pool" ]] || return 1
+
+  buffer_bytes="$(send_space_buffer_bytes "$required_bytes")"
+  if acquire_send_space_reservation "$job_id" "$reservation_pid" "$destination" "$capacity_dataset" "$required_bytes" "$buffer_bytes" available_bytes needed_bytes; then
+    launch_job[LAST_MESSAGE]="Destination space approved."
+    launch_job[SPACE_APPROVED_AT]="$(date +%s)"
+    job_write "$job_path" launch_job || true
+    return 0
+  fi
+
+  [[ "$needed_bytes" =~ ^[0-9]+$ ]] || needed_bytes=$(( required_bytes + buffer_bytes ))
+  [[ "$available_bytes" =~ ^[0-9]+$ ]] || available_bytes=0
+  shortfall=$(( needed_bytes > available_bytes ? needed_bytes - available_bytes : 0 ))
+  freeing_bytes="$(get_pool_freeing "$dest_pool")"
+  [[ "$freeing_bytes" =~ ^[0-9]+$ ]] || freeing_bytes=0
+
+  if (( shortfall <= 0 || freeing_bytes >= shortfall )); then
+    launch_job[LAST_MESSAGE]="Waiting for ZFS freeing to satisfy destination space."
+    job_write "$job_path" launch_job || true
+    zfsas_send_debug_marker "space_approval_wait_freeing job_id=${job_id} destination=${destination} available=${available_bytes} needed=${needed_bytes} freeing=${freeing_bytes}"
+    return 1
+  fi
+
+  if pool_has_active_delete_jobs "$dest_pool"; then
+    launch_job[LAST_MESSAGE]="Waiting for queued destination cleanup to free space."
+    job_write "$job_path" launch_job || true
+    zfsas_send_debug_marker "space_approval_wait_delete_queue job_id=${job_id} destination=${destination} pool=${dest_pool} available=${available_bytes} needed=${needed_bytes} freeing=${freeing_bytes}"
+    return 1
+  fi
+
+  now_epoch="$(date +%s)"
+  last_cleanup_at="$(job_get launch_job SPACE_CLEANUP_REQUESTED_AT 0)"
+  [[ "$last_cleanup_at" =~ ^[0-9]+$ ]] || last_cleanup_at=0
+  if (( now_epoch - last_cleanup_at < 30 )); then
+    return 1
+  fi
+
+  if ! acquire_pool_prep_lock "$dest_pool"; then
+    return 1
+  fi
+  launch_job[SPACE_CLEANUP_REQUESTED_AT]="$now_epoch"
+  launch_job[LAST_MESSAGE]="Planning destination cleanup for send space."
+  job_write "$job_path" launch_job || true
+  cleanup_target="$needed_bytes"
+  threshold_bytes="$(job_get launch_job THRESHOLD_BYTES 0)"
+  if [[ "$threshold_bytes" =~ ^[0-9]+$ ]] && (( threshold_bytes > cleanup_target )); then
+    cleanup_target="$threshold_bytes"
+  fi
+  log "Destination space approval is short on pool ${dest_pool}; queue manager is planning cleanup up to ${cleanup_target} bytes for ${job_id}."
+  queue_pool_retention_cleanup "$dest_pool" "$capacity_dataset" planned_reclaim || true
+  queue_pool_free_space_cleanup_for_target "$dest_pool" "$capacity_dataset" "$cleanup_target" planned_reclaim || true
+  release_pool_prep_lock "$dest_pool"
+  ensure_delete_worker_for_backlog
+  return 1
 }

@@ -79,6 +79,62 @@ def main() -> int:
         "zfs_pool_actionable \"$dest_pool\" readiness_message || {",
         "pool prep must defer until the destination pool is ZFS-actionable",
     )
+
+    assert_contains(
+        lib,
+        "approve_send_job_space_for_launch()",
+        "queue manager must approve estimated send space before dispatching transfer workers",
+    )
+    assert_contains(
+        lib,
+        "required_bytes=\"$(job_get launch_job SPACE_REQUIRED_BYTES 0)\"",
+        "queue manager approval must use worker-reported SPACE_REQUIRED_BYTES, not just estimate presence",
+    )
+    assert_contains(
+        lib,
+        "acquire_send_space_reservation \"$job_id\" \"$reservation_pid\"",
+        "queue manager approval must reserve destination space before launching a transfer worker",
+    )
+    assert_contains(
+        lib,
+        "prep_job_id=\"$(job_get launch_job PREP_JOB_ID)\"",
+        "queue manager must not reserve/launch sends before their destination pool prep job completes",
+    )
+    assert_contains(
+        lib,
+        "launch_job[LAST_MESSAGE]=\"Waiting for pool prep.\"",
+        "queue manager should leave prepped sends queued while destination cleanup prep is still running",
+    )
+    assert_contains(
+        lib,
+        "pool_has_active_delete_jobs \"$dest_pool\"",
+        "queue manager must not churn cleanup while destination deletes are already queued/running",
+    )
+    assert_contains(
+        lib,
+        "freeing_bytes=\"$(get_pool_freeing \"$dest_pool\")\"",
+        "queue manager must account for ZFS freeing before rerunning cleanup",
+    )
+    assert_contains(
+        lib,
+        "acquire_pool_prep_lock \"$dest_pool\"",
+        "queue manager cleanup approval must avoid overlapping cleanup planners",
+    )
+    assert_contains(
+        worker,
+        "adopt_send_space_reservation_for_job \"$CURRENT_JOB_ID\" \"$$\"",
+        "worker must adopt queue-manager-created reservations instead of reserving/churning again",
+    )
+    assert_contains(
+        worker,
+        "if send_space_reservation_exists_for_job \"$CURRENT_JOB_ID\"; then",
+        "worker must honor pre-approved space reservations before attempting a fresh reservation",
+    )
+    assert_contains(
+        Path(ROOT / "source/usr/local/sbin/zfs_autosnapshot_queue_handler").read_text(),
+        "approve_send_job_space_for_launch \"$job_path\" \"$$\" || {",
+        "queue handler must skip launching transfer workers until space is approved",
+    )
     print("PASS: send queue readiness static contracts")
     return 0
 
