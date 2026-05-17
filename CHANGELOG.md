@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.17.03 (2026-05-17)
+
+- Tightened public diagnostics redaction for hostnames, syslog summary details, hashes/checksums, and safe aggregate byte totals.
+- Replaced the unsafe installed-manifest copy with a concise installed-package summary in diagnostics exports.
+- Fixed missing ZFS Send helper definitions that could produce command-not-found errors during send processing.
+
 ### 2026.05.17.02 (2026-05-17)
 
 - Shared the plugin log tail and live-stream endpoint helpers so both endpoints use the same path safety, log-type, and tailing behavior.
