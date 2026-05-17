@@ -2,8 +2,9 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Fixed `ZFS Send` queue workers that could keep flipping between waiting states while trying to choose their own send turn.
-- Workers now prepare their checkpoint and destination-space estimate, then stay queued until the queue manager launches them in order.
+- Shared the plugin log tail and live-stream endpoint helpers so both endpoints use the same path safety, log-type, and tailing behavior.
+- Hardened the public diagnostics zip by replacing detailed ZFS topology dumps with aggregate summaries and redacting public-sharing details such as hostnames, IP addresses, SSH login lines, Docker/container IDs, and filesystem paths.
+- Put the issue-reporting checklist directly in the Report an issue block beside the GitHub Issues button.
 
   </CHANGES>
 

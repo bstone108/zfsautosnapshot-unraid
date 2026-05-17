@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.17.02 (2026-05-17)
+
+- Shared the plugin log tail and live-stream endpoint helpers so both endpoints use the same path safety, log-type, and tailing behavior.
+- Hardened the public diagnostics zip by replacing detailed ZFS topology dumps with aggregate summaries and redacting public-sharing details such as hostnames, IP addresses, SSH login lines, Docker/container IDs, and filesystem paths.
+- Put the issue-reporting checklist directly in the Report an issue block beside the GitHub Issues button.
+
 ### 2026.05.17.01 (2026-05-17)
 
 - Fixed `ZFS Send` queue workers that could keep flipping between waiting states while trying to choose their own send turn.
