@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.17.t03 (Testing Branch Only)
+
+- Moved the expanded issue-reporting checklist into the Report an issue block so it appears next to the GitHub Issues button.
+
 ### 2026.05.17.t02 (Testing Branch Only)
 
 - Made the diagnostics zip safer for public GitHub issues by replacing raw dataset and snapshot inventories with aggregate ZFS and send-checkpoint summaries.
