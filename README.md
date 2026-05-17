@@ -1,109 +1,221 @@
-# ZFS Auto Snapshot Plugin (Unraid)
+# ZFS Auto Snapshot for Unraid
 
-This repository contains an Unraid plugin scaffold for automated ZFS snapshots, including a WebGUI settings page.
+ZFS Auto Snapshot is an Unraid plugin for managing ZFS snapshots from the WebGUI. You choose the datasets, set the retention rules, and decide whether it runs on a schedule or only when you press Run Now.
 
-## What gets installed
+The plugin also includes ZFS Send replication, a Dataset Migrator, preview tools for snapshots and recovery, and a diagnostics download for support.
 
-- `/usr/local/sbin/zfs_autosnapshot`
-- `/usr/local/emhttp/plugins/zfs.autosnapshot/...`
-- Config file (created on first install):
-  - `/boot/config/plugins/zfs.autosnapshot/zfs_autosnapshot.conf`
+## What it does
 
-## Behavior
+- Creates snapshots for the ZFS datasets you select.
+- Cleans up old plugin-created snapshots using keep-all, daily, and weekly retention windows.
+- Watches pool free space and can prune older eligible snapshots before a run when space gets low.
+- Lets you preview a run with Dry Run mode before allowing snapshot changes.
+- Shows run output and debug logs in the WebGUI.
+- Replicates datasets with ZFS Send using separate send checkpoint snapshots.
+- Provides a redacted diagnostics zip for GitHub issues.
 
-The snapshot engine runs in 3 phases:
+The plugin only manages snapshots that match its configured snapshot prefix. By default that prefix is `autosnapshot-`.
 
-1. Time-based retention cleanup (`PREFIX` snapshots only)
-2. Space-based cleanup when pool free space is below configured thresholds
-3. New snapshot creation for each configured dataset
+## Install
 
-## Configure on Unraid
+Use this plugin URL in Unraid:
 
-Use the plugin page in Unraid to edit settings and schedule in plain English.
-Datasets are auto-discovered and shown as a checklist with per-dataset free-space thresholds.
-The plugin defaults to no selected datasets and disabled scheduling until you save your choices.
+```text
+https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg
+```
 
-The settings page writes to:
+Minimum Unraid version: `6.12.0`, because that is the first Unraid release series with native ZFS pool support.
 
-`/boot/config/plugins/zfs.autosnapshot/zfs_autosnapshot.conf`
+After install, open:
 
-You can also edit the config manually if needed.
+```text
+Settings -> ZFS Auto Snapshot
+```
 
-## Install on Unraid
+## First setup
 
-Plugin URL:
+The plugin starts safe: no datasets are selected and the schedule is disabled until you save your own settings.
 
-`https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg`
+Basic setup:
 
-Minimum Unraid version: `6.12.0` (first release series with native ZFS pools).
+1. Select the datasets you want the plugin to manage.
+2. Set a free-space target for each dataset's pool, such as `100G` or `2T`.
+3. Check the snapshot prefix. The default is usually fine.
+4. Choose your retention windows.
+5. Choose a schedule, or leave it disabled and use Run Now.
+6. Save settings.
 
-## Changelog
+If you want to see what would happen first, turn on Dry Run mode and start a manual run. Dry Run logs the planned actions without creating or deleting snapshots.
 
-Detailed release history lives in `CHANGELOG.md`.
+## Retention and free-space cleanup
 
-## Support
+Retention has three normal windows:
 
-Support thread:
+- Keep every snapshot for the newest period.
+- After that, keep one snapshot per day.
+- After that, keep one snapshot per week.
 
-`https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/`
+Anything older than the weekly window is eligible for cleanup, as long as it was created with the configured snapshot prefix.
+
+The default example config uses:
+
+- keep all snapshots for 14 days
+- keep daily snapshots until 30 days
+- keep weekly snapshots until 183 days
+
+You can change those values in the WebGUI.
+
+Free-space cleanup is separate from normal age-based retention. Each selected dataset can have a pool free-space target. If a pool is below that target before a run, the plugin looks for eligible old snapshots that can free space on that same pool.
+
+That does not always mean it deletes from only the dataset that showed the warning. If several selected datasets share the same storage pool, or share quota space in a way where deleting a snapshot from one can free space for another, the plugin may prune the older eligible snapshot from the other dataset first. The goal is to free space safely while keeping the newest useful snapshots.
+
+Unselected datasets are not part of automatic cleanup.
 
 ## Scheduling
 
-The plugin supports human-friendly schedule modes:
+You do not have to write cron by hand unless you want to.
 
-- Disabled
-- Every N minutes
-- Every N hours
-- Daily at HH:MM
-- Weekly on a day/time
-- Advanced custom cron (optional)
+The WebGUI supports:
 
-When settings are saved, the plugin generates and applies the cron entry automatically.
+- disabled / manual only
+- every N minutes
+- every N hours
+- daily at a chosen time
+- weekly on a chosen day and time
+- custom cron for advanced use
 
-## Manual run
+When you save settings, the plugin writes the cron entry for you.
+
+## Running manually
+
+Use the Run Now button in the WebGUI, or run this from a shell:
 
 ```bash
 /usr/local/sbin/zfs_autosnapshot
 ```
 
-## Build a release
+## ZFS Send
 
-Release builds now use GitHub Actions as the source of truth so packaging happens on GitHub instead of a local iCloud-backed workspace.
-The checked-in template lives at `zfs.autosnapshot.plg.in`; the publishable `.plg` manifest is generated from that template during the release build.
+ZFS Send is for replicating selected datasets to destination datasets.
 
-### Recommended release flow
+Each send job has:
 
-1. Update `VERSION`
-2. Update `CHANGELOG.md`
-3. Update `zfs.autosnapshot.plg.in`
-4. Push the branch (`testing` or `main`)
-5. Let the `Build Release Artifacts` GitHub Action rebuild `dist/` and commit the generated artifacts back to that branch
+- a source dataset
+- a destination dataset
+- a frequency
+- an option to include child datasets
+- a destination free-space target
 
-The plugin URLs still point at the branch `dist/` directory, so the built-in Unraid updater path does not change.
+ZFS Send uses its own send checkpoint snapshots instead of the normal autosnapshot prefix. That keeps replication checkpoints separate from regular autosnapshot cleanup.
 
-### Local fallback build
+The send page also has a queue view. Scheduled sends and one-off sends go through the same queue, so you can see what is waiting, running, failed, or ready to retry. Active jobs show step and progress updates when the browser supports it.
 
-From repo root, if you need to reproduce the package locally:
+Destination cleanup uses the same keep-all, daily, and weekly style retention policy. The newest confirmed send checkpoint is protected so the next incremental send still has a base snapshot.
+
+## Dataset Migrator
+
+Dataset Migrator is for reorganizing a dataset that has several top-level folders and turning those folders into real child datasets.
+
+A common use case is an `appdata` dataset for Docker containers. The migrator can turn each application's configuration folder into its own child dataset. Then each app can have its own snapshots, so you can roll back one damaged or deleted app folder without reverting the entire appdata dataset and losing changes from every other app.
+
+The migrator is careful on purpose:
+
+1. You choose the parent dataset.
+2. It scans the top-level folders and shows the migration plan.
+3. It skips unsafe names, existing child datasets, and anything that does not look safe to move.
+4. Before copying, it records running Docker containers.
+5. It stops those containers and temporarily disables their Docker restart policy.
+6. It copies each folder into a new child dataset.
+7. It verifies the copy with file manifests and checksums.
+8. It restores Docker restart policies and starts the containers again.
+
+Because it verifies the copy, it can be slow. That is expected.
+
+Stop any watchdogs or outside tools that might restart containers before you use it. If something relaunches containers during the migration, the tool may abort to avoid an unsafe copy. If free space runs low, the migration can pause and wait for you to free enough space before continuing.
+
+## Snapshot Manager and Recovery Tools
+
+Snapshot Manager and Recovery Tools are still preview features.
+
+Snapshot Manager shows dataset-level snapshot summaries and can load a dataset's snapshots when you choose to manage it. It has manual actions such as take snapshot, delete selected snapshots, hold, and release.
+
+Recovery Tools shows ZFS scrub and corruption clues. It can also run a manual readability scan when ZFS reports trouble but does not name the bad file.
+
+Treat both pages as diagnostic or preview tools for now. Verify results manually before relying on them.
+
+## Logs and diagnostics
+
+The main settings page includes run output and debug logs.
+
+The Help tab has a diagnostics download. The diagnostics zip is meant for GitHub issues and includes redacted plugin config, plugin logs, queue state, and read-only ZFS/zpool/system summaries.
+
+When reporting a bug, include:
+
+- what happened
+- which system was affected
+- how to reproduce it, if you know
+- plugin version
+- Unraid version
+- diagnostics zip
+
+GitHub issues:
+
+```text
+https://github.com/bstone108/zfsautosnapshot-unraid/issues
+```
+
+Support thread:
+
+```text
+https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/
+```
+
+## Files on Unraid
+
+Main config:
+
+```text
+/boot/config/plugins/zfs.autosnapshot/zfs_autosnapshot.conf
+```
+
+Main command:
+
+```text
+/usr/local/sbin/zfs_autosnapshot
+```
+
+Plugin WebGUI files:
+
+```text
+/usr/local/emhttp/plugins/zfs.autosnapshot/
+```
+
+You can edit the config file by hand if needed, but the WebGUI is the intended path.
+
+## Development notes
+
+Release artifacts are built by GitHub Actions. The source template is:
+
+```text
+zfs.autosnapshot.plg.in
+```
+
+The generated plugin manifest and package are written under `dist/` during the build.
+
+For a normal release:
+
+1. Update `VERSION`.
+2. Update `CHANGELOG.md`.
+3. Update `zfs.autosnapshot.plg.in`.
+4. Push the branch.
+5. Let GitHub Actions build and commit the generated artifacts.
+
+To reproduce a package locally:
 
 ```bash
 ./scripts/build-release.sh <version> <base_url>
 ```
 
-Example:
-
-```bash
-./scripts/build-release.sh 2026.02.17 https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist
-```
-
-This creates and verifies:
-
-- `dist/zfs-autosnapshot-<version>-noarch-1.txz`
-- `dist/zfs.autosnapshot.plg`
-- `dist/zfs-autosnapshot.png`
-- `zfs.autosnapshot.plg` (copied to repo root)
-
-The build now fails if the generated package does not contain the full `source/` tree.
-
 ## License
 
-This project is licensed under the MIT License.
+MIT License.
