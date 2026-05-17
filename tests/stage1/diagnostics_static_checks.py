@@ -119,12 +119,32 @@ def main() -> int:
         "zpool status",
         "diagnostics archive must collect read-only zpool status",
     )
-    for redaction_marker in ["[REDACTED_HOST]", "[REDACTED_IP]", "[REDACTED_DOCKER_ID]", "[REDACTED_SSH_LOGIN]"]:
+    for redaction_marker in ["[REDACTED_HOST]", "[REDACTED_IP]", "[REDACTED_DOCKER_ID]", "[REDACTED_HASH]", "[REDACTED_SSH_LOGIN]"]:
         assert_contains(
             diagnostics,
             redaction_marker,
             f"diagnostics redaction must include public-safe marker {redaction_marker}",
         )
+    assert_contains(
+        diagnostics,
+        "Linux [REDACTED_HOST]",
+        "diagnostics redaction must redact the hostname emitted by uname -a",
+    )
+    assert_contains(
+        diagnostics,
+        "includeNotableLines",
+        "syslog summaries must be able to omit raw notable lines that expose unrelated app/share/plugin names",
+    )
+    assert_contains(
+        diagnostics,
+        "Recent notable lines omitted for public-safe syslog summary",
+        "public syslog summaries must document that raw notable lines are intentionally omitted",
+    )
+    assert_contains(
+        diagnostics,
+        "allowKnownSymlink",
+        "installed plugin manifest collection must safely allow the known manifest symlink path",
+    )
     assert_contains(
         diagnostics,
         "'/boot/config/plugins/zfs.autosnapshot.plg'",

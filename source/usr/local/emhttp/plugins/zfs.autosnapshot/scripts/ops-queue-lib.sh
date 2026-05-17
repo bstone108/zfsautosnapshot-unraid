@@ -1702,6 +1702,22 @@ send_transfer_slot_dir() {
   printf '%s/slot-%s.lockdir' "$SEND_TRANSFER_RUNTIME_DIR" "$slot"
 }
 
+send_space_buffer_bytes() {
+  local required_bytes="$1"
+  local max_buffer=$((10 * 1024 * 1024 * 1024))
+  local buffer
+
+  [[ "$required_bytes" =~ ^[0-9]+$ ]] || required_bytes=0
+  (( required_bytes > 0 )) || {
+    printf '0'
+    return 0
+  }
+
+  buffer=$(( required_bytes / 10 ))
+  (( buffer <= max_buffer )) || buffer="$max_buffer"
+  printf '%s' "$buffer"
+}
+
 cleanup_stale_send_transfer_slots() {
   local dir pid_file pid
   mkdir -p "$SEND_TRANSFER_RUNTIME_DIR" >/dev/null 2>&1 || true

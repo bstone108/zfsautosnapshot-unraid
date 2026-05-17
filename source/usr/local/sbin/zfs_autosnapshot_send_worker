@@ -306,6 +306,13 @@ ensure_delete_worker_for_backlog() {
   fi
 }
 
+release_current_send_transfer_slot() {
+  if [[ -n "${CURRENT_SEND_TRANSFER_SLOT:-}" ]]; then
+    release_send_transfer_slot "$CURRENT_SEND_TRANSFER_SLOT"
+    CURRENT_SEND_TRANSFER_SLOT=""
+  fi
+}
+
 send_space_buffer_bytes() {
   local required_bytes="$1"
   local max_buffer=$((10 * 1024 * 1024 * 1024))
