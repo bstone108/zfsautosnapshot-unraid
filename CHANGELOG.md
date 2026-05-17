@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.17.01 (2026-05-17)
+
+- Fixed `ZFS Send` queue workers that could keep flipping between waiting states while trying to choose their own send turn.
+- Workers now prepare their checkpoint and destination-space estimate, then stay queued until the queue manager launches them in order.
+
 ### 2026.05.16.08 (2026-05-16)
 
 - Fixed a logging interruption when a scheduled autosnapshot run starts while another autosnapshot run is already active.
