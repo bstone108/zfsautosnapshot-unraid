@@ -1,88 +1,13 @@
 <?php
+require_once __DIR__ . '/log-helpers.php';
+
 $debugLogFile = '/var/log/zfs_autosnapshot.log';
 $summaryLogFile = '/var/log/zfs_autosnapshot.last.log';
-
-function isSafeLogPath($path)
-{
-    clearstatcache(true, $path);
-    $allowedRoot = '/var/log';
-
-    if (!is_string($path) || $path === '') {
-        return false;
-    }
-
-    if (is_link($path)) {
-        return false;
-    }
-
-    if (file_exists($path) && !is_file($path)) {
-        return false;
-    }
-
-    $dirReal = realpath(dirname($path));
-    if ($dirReal === false || ($dirReal !== $allowedRoot && strpos($dirReal, $allowedRoot . '/') !== 0)) {
-        return false;
-    }
-
-    $real = realpath($path);
-    if ($real !== false && $real !== $allowedRoot && strpos($real, $allowedRoot . '/') !== 0) {
-        return false;
-    }
-
-    return true;
-}
-
-function tailFileLines($path, $lineCount, $maxBytes, &$wasTruncated = false)
-{
-    $wasTruncated = false;
-
-    $lineCount = (int) $lineCount;
-    if ($lineCount < 50) {
-        $lineCount = 50;
-    } elseif ($lineCount > 2000) {
-        $lineCount = 2000;
-    }
-
-    $maxBytes = (int) $maxBytes;
-    if ($maxBytes < 1024) {
-        $maxBytes = 1024;
-    }
-
-    $output = [];
-    $exitCode = 0;
-    @exec('tail -n ' . $lineCount . ' ' . escapeshellarg($path) . ' 2>/dev/null', $output, $exitCode);
-
-    if ($exitCode !== 0) {
-        return '';
-    }
-
-    $text = implode("\n", $output);
-    if ($text !== '') {
-        $text .= "\n";
-    }
-
-    if (strlen($text) > $maxBytes) {
-        $text = substr($text, -$maxBytes);
-        $wasTruncated = true;
-    }
-
-    return $text;
-}
-
-function resolveLogTypeAndFile($requestedType, $summaryLogFile, $debugLogFile)
-{
-    $type = strtolower(trim((string) $requestedType));
-    if ($type === 'debug') {
-        return ['debug', $debugLogFile];
-    }
-
-    return ['summary', $summaryLogFile];
-}
 
 function buildPayload($logFile, $logType, $lineCount)
 {
     $maxBytes = ($logType === 'debug') ? 500000 : 50000;
-    $safe = isSafeLogPath($logFile);
+    $safe = zfsas_log_is_safe_path($logFile);
     $exists = ($safe && is_file($logFile));
     $readable = ($exists && is_readable($logFile));
     $mtime = ($exists ? (int) @filemtime($logFile) : 0);
@@ -91,7 +16,7 @@ function buildPayload($logFile, $logType, $lineCount)
     $content = '';
 
     if ($exists && $readable) {
-        $content = tailFileLines($logFile, $lineCount, $maxBytes, $truncated);
+        $content = zfsas_log_tail_file_lines($logFile, $lineCount, $maxBytes, $truncated);
     }
 
     return [
@@ -127,7 +52,7 @@ if (!headers_sent()) {
     header('X-Content-Type-Options: nosniff');
 }
 
-list($logType, $logFile) = resolveLogTypeAndFile($_GET['type'] ?? 'summary', $summaryLogFile, $debugLogFile);
+list($logType, $logFile) = zfsas_log_resolve_type_and_file($_GET['type'] ?? 'summary', $summaryLogFile, $debugLogFile);
 $lineCount = (int) ($_GET['lines'] ?? 400);
 
 $maxSeconds = 55;
