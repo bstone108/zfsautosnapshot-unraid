@@ -51,6 +51,7 @@ function zfsas_diagnostics_redact($text)
     $patterns = [
         '/^.*\bsshd(?:-session)?\b.*\bAccepted\s+(?:password|keyboard-interactive\/pam|publickey)\b.*$/mi' => '[REDACTED_SSH_LOGIN]',
         '/^([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+\S+/' => '$1 [REDACTED_HOST]',
+        '/^(Linux)\\s+\\S+(\\s+)/m' => 'Linux [REDACTED_HOST]$2',
         '/\b(PASSWORD|PASS|API_KEY|APIKEY|TOKEN|SECRET|ACCESS_KEY|PRIVATE_KEY|WEBHOOK|AUTH|BEARER)\b\s*=\s*"[^"]*"/i' => '$1="[REDACTED]"',
         '/\b(PASSWORD|PASS|API_KEY|APIKEY|TOKEN|SECRET|ACCESS_KEY|PRIVATE_KEY|WEBHOOK|AUTH|BEARER)\b\s*=\s*\'[^\']*\'/i' => '$1=\'[REDACTED]\'',
         '/\b(PASSWORD|PASS|API_KEY|APIKEY|TOKEN|SECRET|ACCESS_KEY|PRIVATE_KEY|WEBHOOK|AUTH|BEARER)\b\s*=\s*[^\s#;]+/i' => '$1=[REDACTED]',
@@ -59,7 +60,8 @@ function zfsas_diagnostics_redact($text)
         '/\b([A-Za-z0-9._%+\-]+)@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b/' => '[REDACTED_EMAIL]@$2',
         '/\b(?:[A-Za-z0-9-]+\.)*[A-Za-z0-9-]+\.ts\.net\b/i' => '[REDACTED_HOST]',
         '/\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/' => '[REDACTED_IP]',
-        '/\b(?:[0-9a-f]{64}|[0-9a-f]{12,64})(?=\/merged|\b)/i' => '[REDACTED_DOCKER_ID]',
+        '/\b[0-9a-f]{12,64}(?=\/merged)\b/i' => '[REDACTED_DOCKER_ID]',
+        '/\b[0-9a-f]{32,64}\b/i' => '[REDACTED_HASH]',
         '#/(?:mnt|boot|var|usr/local)/(?:cache|zfs|disk[0-9]+|user|user0|docker|plugins)[A-Za-z0-9_./@:-]*#' => '/[REDACTED_PATH]',
         '#\b(?:cache|zfs)/[A-Za-z0-9_./@:-]+#' => '[REDACTED_ZFS_PATH]',
     ];
@@ -74,9 +76,9 @@ function zfsas_diagnostics_redact($text)
     return $text;
 }
 
-function zfsas_diagnostics_safe_source_path($path)
+function zfsas_diagnostics_safe_source_path($path, $allowKnownSymlink = false)
 {
-    if (!is_string($path) || $path === '' || is_link($path)) {
+    if (!is_string($path) || $path === '') {
         return false;
     }
 
@@ -88,15 +90,22 @@ function zfsas_diagnostics_safe_source_path($path)
         return false;
     }
 
-    $real = realpath($path);
-    if ($real === false) {
-        return false;
-    }
-
     $allowedExactPaths = [
         '/boot/config/plugins/zfs.autosnapshot.plg',
         '/var/log/plugins/zfs.autosnapshot.plg',
     ];
+    if ($allowKnownSymlink && is_link($path) && in_array($path, $allowedExactPaths, true)) {
+        return true;
+    }
+
+    if (is_link($path)) {
+        return false;
+    }
+
+    $real = realpath($path);
+    if ($real === false) {
+        return false;
+    }
     if (in_array($real, $allowedExactPaths, true)) {
         return true;
     }
@@ -133,9 +142,9 @@ function zfsas_diagnostics_write_file($baseDir, $relativePath, $content)
     return file_put_contents($target, zfsas_diagnostics_redact((string) $content)) !== false;
 }
 
-function zfsas_diagnostics_copy_text_file($baseDir, $relativePath, $sourcePath, $maxBytes = 1048576)
+function zfsas_diagnostics_copy_text_file($baseDir, $relativePath, $sourcePath, $maxBytes = 1048576, $allowKnownSymlink = false)
 {
-    if (!zfsas_diagnostics_safe_source_path($sourcePath)) {
+    if (!zfsas_diagnostics_safe_source_path($sourcePath, $allowKnownSymlink)) {
         return zfsas_diagnostics_write_file($baseDir, $relativePath, "Source failed diagnostics safety checks: {$sourcePath}\n");
     }
 
@@ -348,7 +357,7 @@ function zfsas_diagnostics_write_config_summary($baseDir, $autoConfigPath, $send
     return zfsas_diagnostics_write_file($baseDir, 'config/config-summary.txt', $content);
 }
 
-function zfsas_diagnostics_write_log_summary($baseDir, $relativePath, $sourcePath, $maxBytes = 1048576)
+function zfsas_diagnostics_write_log_summary($baseDir, $relativePath, $sourcePath, $maxBytes = 1048576, $includeNotableLines = true)
 {
     if (!is_file($sourcePath) || !is_readable($sourcePath)) {
         return zfsas_diagnostics_write_file($baseDir, $relativePath, "Log not present or not readable: {$sourcePath}\n");
@@ -389,9 +398,13 @@ function zfsas_diagnostics_write_log_summary($baseDir, $relativePath, $sourcePat
     foreach ($counts as $key => $count) {
         $content .= "{$key}: {$count}\n";
     }
-    $content .= "Recent notable lines (redacted):\n";
-    foreach ($notable as $line) {
-        $content .= zfsas_diagnostics_redact($line) . "\n";
+    if ($includeNotableLines) {
+        $content .= "Recent notable lines (redacted):\n";
+        foreach ($notable as $line) {
+            $content .= zfsas_diagnostics_redact($line) . "\n";
+        }
+    } else {
+        $content .= "Recent notable lines omitted for public-safe syslog summary\n";
     }
     return zfsas_diagnostics_write_file($baseDir, $relativePath, $content);
 }
@@ -521,7 +534,7 @@ $files = [
 ];
 
 foreach ($files as $relativePath => $sourcePath) {
-    zfsas_diagnostics_copy_text_file($payloadDir, $relativePath, $sourcePath, 262144);
+    zfsas_diagnostics_copy_text_file($payloadDir, $relativePath, $sourcePath, 262144, $relativePath === 'installed/plugin_manifest.plg');
 }
 
 zfsas_diagnostics_write_config_summary($payloadDir, '/boot/config/plugins/zfs.autosnapshot/zfs_autosnapshot.conf', '/boot/config/plugins/zfs.autosnapshot/zfs_send.conf');
@@ -529,7 +542,7 @@ zfsas_diagnostics_write_log_summary($payloadDir, 'logs/zfs_autosnapshot.summary.
 zfsas_diagnostics_write_log_summary($payloadDir, 'logs/zfs_autosnapshot.archive.summary.txt', '/var/log/zfs_autosnapshot.archive.log');
 zfsas_diagnostics_write_log_summary($payloadDir, 'logs/zfs_autosnapshot_send.summary.txt', '/var/log/zfs_autosnapshot_send.log');
 zfsas_diagnostics_write_log_summary($payloadDir, 'logs/zfs_autosnapshot_send.archive.summary.txt', '/var/log/zfs_autosnapshot_send.archive.log');
-zfsas_diagnostics_write_log_summary($payloadDir, 'logs/syslog.summary.txt', '/var/log/syslog');
+zfsas_diagnostics_write_log_summary($payloadDir, 'logs/syslog.summary.txt', '/var/log/syslog', 1048576, false);
 zfsas_diagnostics_write_directory_summary($payloadDir, 'state/queue-summary.txt', $configDir . '/queue');
 zfsas_diagnostics_write_directory_summary($payloadDir, 'state/failed-send-logs-summary.txt', $configDir . '/failed-send-logs');
 zfsas_diagnostics_write_zfs_summary($payloadDir);

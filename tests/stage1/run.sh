@@ -791,6 +791,7 @@ main() {
   python3 "${ROOT_DIR}/tests/stage1/send_settings_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/diagnostics_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/log_helpers_static_checks.py"
+  python3 "${ROOT_DIR}/tests/stage1/send_worker_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/send_queue_preflight_status_static_checks.py"
   php "${ROOT_DIR}/tests/stage1/prefix_overlap_contract.php"
   bash "${ROOT_DIR}/tests/stage1/zero_change_common_harness.sh"
