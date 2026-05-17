@@ -2031,7 +2031,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
       <div class="zfsas-card zfsas-placeholder-copy">
         <h3 class="zfsas-placeholder-title">Help and Diagnostics</h3>
         <div class="zfsas-help">
-          Report plugin bugs and enhancement requests on GitHub. Include a clear description of the problem, the Unraid version, the plugin version, relevant logs, and reproduction steps when you have them.
+          Report plugin bugs and enhancement requests on GitHub. Include a clear description of the problem, which system was affected, how to reproduce it if known, your plugin version, your Unraid version, and a copy of the diagnostics zip.
         </div>
         <div class="zfsas-tool-list">
           <div class="zfsas-tool-row">

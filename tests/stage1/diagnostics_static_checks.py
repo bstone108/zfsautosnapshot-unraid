@@ -80,14 +80,56 @@ def main() -> int:
     )
     assert_contains(
         diagnostics,
-        "zfs list",
-        "diagnostics archive must collect read-only ZFS dataset/snapshot state",
+        "zfsas_diagnostics_write_zfs_summary",
+        "diagnostics archive must summarize ZFS datasets/snapshots instead of dumping full inventories",
     )
+    assert_contains(
+        diagnostics,
+        "commands/zfs-summary.txt",
+        "diagnostics archive must include a public-safe ZFS summary file",
+    )
+    assert_contains(
+        diagnostics,
+        "commands/send-summary.txt",
+        "diagnostics archive must include send-checkpoint summary counts",
+    )
+    for forbidden in [
+        "commands/zfs-list-datasets.txt",
+        "commands/zfs-list-snapshots.txt",
+        "commands/df.txt",
+        "commands/mount.txt",
+    ]:
+        if forbidden in diagnostics:
+            raise AssertionError(f"diagnostics archive must not include raw high-detail topology file {forbidden}")
     assert_contains(
         diagnostics,
         "zpool status",
         "diagnostics archive must collect read-only zpool status",
     )
+    for redaction_marker in ["[REDACTED_HOST]", "[REDACTED_IP]", "[REDACTED_DOCKER_ID]", "[REDACTED_SSH_LOGIN]"]:
+        assert_contains(
+            diagnostics,
+            redaction_marker,
+            f"diagnostics redaction must include public-safe marker {redaction_marker}",
+        )
+    assert_contains(
+        diagnostics,
+        "'/boot/config/plugins/zfs.autosnapshot.plg'",
+        "diagnostics safety allowlist must permit the boot plugin manifest path",
+    )
+    for issue_field in [
+        "description of the problem",
+        "which system",
+        "how to reproduce",
+        "plugin version",
+        "Unraid version",
+        "diagnostics zip",
+    ]:
+        assert_contains(
+            settings,
+            issue_field,
+            f"Help page issue instructions must request {issue_field}",
+        )
 
     print("PASS: diagnostics help/export static contracts")
     return 0
