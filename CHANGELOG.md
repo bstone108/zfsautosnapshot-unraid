@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.17.t02 (Testing Branch Only)
+
+- Made the diagnostics zip safer for public GitHub issues by replacing raw dataset and snapshot inventories with aggregate ZFS and send-checkpoint summaries.
+- Added extra redaction for hostnames, IP addresses, Docker/container IDs, SSH login lines, and detailed filesystem paths in diagnostics output.
+- Expanded the Help page issue-reporting instructions to request the affected system, reproduction steps, plugin version, Unraid version, and diagnostics zip.
+
 ### 2026.05.17.t01 (Testing Branch Only)
 
 - Testing build; see commit history and linked issues.
