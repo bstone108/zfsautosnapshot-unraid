@@ -2041,7 +2041,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
             <div class="zfsas-tool-copy">
               <div class="zfsas-tool-title">Report an issue</div>
               <div class="zfsas-help zfsas-tool-description">
-                Open the repository issue tracker in a new tab. Attach diagnostics when reporting runtime, WebGUI, queue, send, or cleanup problems.
+                Open the repository issue tracker in a new tab. When reporting a problem, include a clear description of the problem, which system was affected, how to reproduce it if known, your plugin version, your Unraid version, and the diagnostics zip. Attach diagnostics when reporting runtime, WebGUI, queue, send, or cleanup problems.
               </div>
             </div>
           </div>

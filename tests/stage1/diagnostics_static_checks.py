@@ -15,6 +15,19 @@ def assert_contains(text: str, needle: str, message: str) -> None:
         raise AssertionError(message)
 
 
+def extract_report_issue_block(settings: str) -> str:
+    marker = "<div class=\"zfsas-tool-title\">Report an issue</div>"
+    start = settings.find(marker)
+    if start == -1:
+        raise AssertionError("Help tab must include a Report an issue tool block")
+    end = settings.find("<div class=\"zfsas-tool-row\">", start + len(marker))
+    if end == -1:
+        end = settings.find("</div>\n        </div>\n      </div>", start)
+    if end == -1:
+        raise AssertionError("Could not find end of Report an issue tool block")
+    return settings[start:end]
+
+
 def main() -> int:
     settings = SETTINGS_PAGE.read_text()
     if not DIAGNOSTICS_PAGE.is_file():
@@ -117,6 +130,7 @@ def main() -> int:
         "'/boot/config/plugins/zfs.autosnapshot.plg'",
         "diagnostics safety allowlist must permit the boot plugin manifest path",
     )
+    report_issue_block = extract_report_issue_block(settings)
     for issue_field in [
         "description of the problem",
         "which system",
@@ -126,9 +140,9 @@ def main() -> int:
         "diagnostics zip",
     ]:
         assert_contains(
-            settings,
+            report_issue_block,
             issue_field,
-            f"Help page issue instructions must request {issue_field}",
+            f"Report an issue help block must request {issue_field}",
         )
 
     print("PASS: diagnostics help/export static contracts")
