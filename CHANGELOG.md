@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.17.t04 (Testing Branch Only)
+
+- Testing build; see commit history and linked issues.
+
 ### 2026.05.17.t03 (Testing Branch Only)
 
 - Moved the expanded issue-reporting checklist into the Report an issue block so it appears next to the GitHub Issues button.
