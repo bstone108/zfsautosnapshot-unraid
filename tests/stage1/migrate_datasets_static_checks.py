@@ -33,7 +33,18 @@ require(
     r'renderPageStatus\(\'Previewing top-level folders\.\.\.\'\s*,\s*false\)',
     "Preview action must tell the user it is scanning/building the review list.",
 )
-
+require(
+    r'Preview Migration scans the selected parent dataset, finds top-level folders, and builds this review list without stopping containers or moving data\.',
+    "Dataset Migrator instructions must explain the non-destructive Preview step at the point of use.",
+)
+require(
+    r'Start Migration only begins work after you review the preview\.',
+    "Dataset Migrator instructions must explain Start is separate from Preview.",
+)
+require(
+    r'If space is too low before the next folder, containers stay running and the original folder stays in place until enough free space is available\.',
+    "Dataset Migrator instructions must state the pre-stop free-space wait semantics.",
+)
 # Start remains a distinct POST-only action and must not be the only way to
 # populate the preview table.
 require(

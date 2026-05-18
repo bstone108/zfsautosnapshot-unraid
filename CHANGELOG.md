@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.17.t06 (Testing Branch Only)
+
+- Improved Dataset Migrator safety for low-space migrations so each next folder waits for enough destination space before stopping containers or touching the original folder.
+- Clarified Dataset Migrator instructions for the Preview Migration review step, Start Migration handoff, and safe free-space waits.
+
 ### 2026.05.17.t05 (Testing Branch Only)
 
 - Testing build; see commit history and linked issues.
