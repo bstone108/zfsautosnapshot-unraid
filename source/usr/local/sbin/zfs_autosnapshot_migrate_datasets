@@ -11,18 +11,18 @@ else
   zfsas_log_prepare_for_append() { return 0; }
 fi
 
-PLUGIN_ROOT="/boot/config/plugins/zfs.autosnapshot/dataset_migrator"
-LOGS_DIR="${PLUGIN_ROOT}/logs"
-STATUS_FILE="${PLUGIN_ROOT}/status.env"
-FOLDERS_FILE="${PLUGIN_ROOT}/folders.tsv"
-CONTAINERS_FILE="${PLUGIN_ROOT}/containers.tsv"
-RECOVERY_STATE_FILE="${PLUGIN_ROOT}/recovery.env"
-LOG_FILE="/var/log/zfs_autosnapshot_migrate_datasets.log"
-LOG_ARCHIVE_FILE="/var/log/zfs_autosnapshot_migrate_datasets.archive.log"
-LOCK_FILE="/var/run/zfs-autosnapshot-migrator/migrator.lock"
-SPACE_RECHECK_SECONDS=300
-RESTART_RETRY_DELAY=300
-RECOVERY_BOOT_DELAY_SECONDS=900
+PLUGIN_ROOT="${ZFSAS_MIGRATOR_PLUGIN_ROOT:-/boot/config/plugins/zfs.autosnapshot/dataset_migrator}"
+LOGS_DIR="${ZFSAS_MIGRATOR_LOGS_DIR:-${PLUGIN_ROOT}/logs}"
+STATUS_FILE="${ZFSAS_MIGRATOR_STATUS_FILE:-${PLUGIN_ROOT}/status.env}"
+FOLDERS_FILE="${ZFSAS_MIGRATOR_FOLDERS_FILE:-${PLUGIN_ROOT}/folders.tsv}"
+CONTAINERS_FILE="${ZFSAS_MIGRATOR_CONTAINERS_FILE:-${PLUGIN_ROOT}/containers.tsv}"
+RECOVERY_STATE_FILE="${ZFSAS_MIGRATOR_RECOVERY_STATE_FILE:-${PLUGIN_ROOT}/recovery.env}"
+LOG_FILE="${ZFSAS_MIGRATOR_LOG_FILE:-/var/log/zfs_autosnapshot_migrate_datasets.log}"
+LOG_ARCHIVE_FILE="${ZFSAS_MIGRATOR_LOG_ARCHIVE_FILE:-/var/log/zfs_autosnapshot_migrate_datasets.archive.log}"
+LOCK_FILE="${ZFSAS_MIGRATOR_LOCK_FILE:-/var/run/zfs-autosnapshot-migrator/migrator.lock}"
+SPACE_RECHECK_SECONDS="${ZFSAS_MIGRATOR_SPACE_RECHECK_SECONDS:-300}"
+RESTART_RETRY_DELAY="${ZFSAS_MIGRATOR_RESTART_RETRY_DELAY:-300}"
+RECOVERY_BOOT_DELAY_SECONDS="${ZFSAS_MIGRATOR_RECOVERY_BOOT_DELAY_SECONDS:-900}"
 RUN_RECOVERY=0
 ABSOLUTE_SAFETY_MARGIN=$((1024 * 1024 * 1024))
 PERCENT_SAFETY_MARGIN=10
@@ -139,6 +139,10 @@ list_remove_word() {
     result="$(list_append_unique "$result" "$item")"
   done <<< "$list"
   printf '%s' "$result"
+}
+
+normalize_word_list() {
+  printf '%s\n' "$1" | tr '[:space:]' '\n' | sed '/^$/d'
 }
 
 log() {
@@ -358,6 +362,7 @@ load_recovery_state() {
   # shellcheck source=/dev/null
   source "$RECOVERY_STATE_FILE"
   ACTIVE_DATASET="${DATASET:-$ACTIVE_DATASET}"
+  RECOVERY_BATCH_CONTAINERS="$(normalize_word_list "${RECOVERY_BATCH_CONTAINERS:-}")"
   load_tsv_state_for_recovery
   return 0
 }

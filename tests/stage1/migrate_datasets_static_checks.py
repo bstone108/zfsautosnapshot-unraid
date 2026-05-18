@@ -81,8 +81,8 @@ require_worker(
 # then stop only the batch related to the interrupted folder, exact-sync with
 # rsync --delete, and restore container policies/starts.
 require_worker(
-    r'RECOVERY_STATE_FILE="\$\{PLUGIN_ROOT\}/recovery.env"',
-    "Worker must define a boot-persisted recovery state file under the migrator plugin root.",
+    r'RECOVERY_STATE_FILE="\$\{ZFSAS_MIGRATOR_RECOVERY_STATE_FILE:-\$\{PLUGIN_ROOT\}/recovery\.env\}"',
+    "Worker must define a boot-persisted recovery state file under the migrator plugin root, while allowing test harness isolation.",
 )
 require_worker(
     r'write_recovery_state\s*\(\)\s*{.*?RECOVERY_PHASE=.*?RECOVERY_FOLDER_INDEX=.*?RECOVERY_SOURCE_PATH=.*?RECOVERY_TEMP_PATH=.*?RECOVERY_TARGET_DATASET=.*?RECOVERY_BATCH_CONTAINERS=',
