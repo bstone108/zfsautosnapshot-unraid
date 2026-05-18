@@ -46,4 +46,21 @@ require(
     "Start button must remain the only action that posts the start request.",
 )
 
-print("PASS: Dataset Migrator static UI contracts")
+# The issue #19 safety requirement is that a folder must not trigger container
+# stops or source renames while the destination pool is already too full. The
+# worker must therefore perform a space wait/check before stop_container_batch()
+# in the main batch loop, not only inside migrate_one_directory() after Docker
+# has already been touched.
+WORKER = ROOT / "source/usr/local/sbin/zfs_autosnapshot_migrate_datasets"
+worker_text = WORKER.read_text(encoding="utf-8")
+require_worker = lambda pattern, message: (_ for _ in ()).throw(AssertionError(message)) if not re.search(pattern, worker_text, re.S) else None
+require_worker(
+    r'preflight_space_for_folder\s*\(\)\s*{.*?wait_for_free_space\s+"\$required_bytes"\s+"\$name"\s+"\$folder_index"',
+    "Worker must expose a pre-stop space gate that waits for enough free space for the next folder.",
+)
+require_worker(
+    r'while\s+CURRENT_FOLDER_INDEX=.*?select_batch_for_folder\s+"\$CURRENT_FOLDER_INDEX".*?preflight_space_for_folder\s+"\$CURRENT_FOLDER_INDEX".*?stop_container_batch\s+"\$CURRENT_BATCH_CONTAINERS"',
+    "Worker main loop must run the pre-stop space gate before stopping any containers for the batch.",
+)
+
+print("PASS: Dataset Migrator static UI and worker contracts")

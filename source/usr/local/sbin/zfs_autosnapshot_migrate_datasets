@@ -445,6 +445,24 @@ wait_for_free_space() {
   done
 }
 
+preflight_space_for_folder() {
+  local folder_index="$1"
+  local name="${FOLDER_NAMES[$folder_index]}"
+  local source_bytes="${FOLDER_SIZE_BYTES[$folder_index]:-0}"
+  local required_bytes
+
+  if [[ ! "$source_bytes" =~ ^[0-9]+$ ]] || (( source_bytes <= 0 )); then
+    source_bytes="$(get_directory_used_bytes "${FOLDER_SOURCE_PATHS[$folder_index]}")"
+    [[ "$source_bytes" =~ ^[0-9]+$ ]] || die "Could not determine source size for '${FOLDER_SOURCE_PATHS[$folder_index]}'"
+    FOLDER_SIZE_BYTES[folder_index]="$source_bytes"
+    write_status_file
+  fi
+
+  required_bytes="$(calculate_required_free_bytes "$source_bytes")"
+  folder_set "$folder_index" "checking_space" "0" "Checking free space before stopping containers or moving this folder."
+  wait_for_free_space "$required_bytes" "$name" "$folder_index"
+}
+
 wait_for_resume_space() {
   local label="$1"
   local folder_index="$2"
@@ -1351,6 +1369,7 @@ set_status "migrating" "migrating" "Starting folder-by-folder migration."
 
 while CURRENT_FOLDER_INDEX="$(next_pending_folder_index)"; do
   select_batch_for_folder "$CURRENT_FOLDER_INDEX"
+  preflight_space_for_folder "$CURRENT_FOLDER_INDEX" || exit 1
   if [[ -n "$CURRENT_BATCH_CONTAINERS" ]]; then
     stop_container_batch "$CURRENT_BATCH_CONTAINERS" || exit 1
   fi
