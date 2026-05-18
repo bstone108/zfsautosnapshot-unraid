@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.18.t03 (Testing Branch Only)
+
+- Improved Dataset Migrator live status accuracy when a stale status file still says work is active but the background worker is no longer running. The page now shows the run as interrupted instead of implying it is still waiting/running or ready.
+- Kept the low-space warning scoped to an actual live wait so users are not told a stopped worker will automatically continue.
+
 ### 2026.05.18.t02 (Testing Branch Only)
 
 - Added a non-destructive Dataset Migrator recovery simulation that exercises delayed boot recovery with fake ZFS, Docker, and rsync commands.

@@ -45,6 +45,16 @@ require(
     r'If space is too low before the next folder, containers stay running and the original folder stays in place until enough free space is available\.',
     "Dataset Migrator instructions must state the pre-stop free-space wait semantics.",
 )
+require(
+    r'status\s*&&\s*String\(status\.WAITING_FOR_SPACE\s*\|\|\s*\'0\'\)\s*===\s*\'1\'.*?Free space is too low.*?migration will continue automatically',
+    "Live summary must show a clear visible insufficient-space warning while the worker is actually waiting.",
+    re.S,
+)
+require(
+    r'status\s*&&\s*status\.isStale.*?Dataset migrator worker stopped before it finished',
+    "Live summary must warn clearly when a stale status file says work was active but the worker is no longer running.",
+    re.S,
+)
 # Start remains a distinct POST-only action and must not be the only way to
 # populate the preview table.
 require(

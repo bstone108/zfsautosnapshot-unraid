@@ -180,8 +180,18 @@ function zfsas_migrate_current_status()
 
     $state = (string) ($status['STATE'] ?? '');
     $pid = (int) ($status['PID'] ?? 0);
-    $status['isActive'] = in_array($state, ['preparing', 'stopping_containers', 'migrating', 'waiting_for_space', 'restarting_containers', 'retrying_container_start'], true)
-        && zfsas_migrate_is_pid_running($pid);
+    $activeStates = ['preparing', 'stopping_containers', 'migrating', 'waiting_for_space', 'restarting_containers', 'retrying_container_start'];
+    $stateShouldHaveWorker = in_array($state, $activeStates, true);
+    $pidIsRunning = zfsas_migrate_is_pid_running($pid);
+    $status['isActive'] = $stateShouldHaveWorker && $pidIsRunning;
+    $status['isStale'] = $stateShouldHaveWorker && !$pidIsRunning;
+    if ($status['isStale']) {
+        $status['STATE'] = 'failed';
+        $status['CURRENT_STEP'] = 'interrupted';
+        $status['MESSAGE'] = 'Dataset migrator worker stopped before it finished. Review the log and restart the migration or recovery if needed.';
+        $status['LAST_ERROR'] = $status['MESSAGE'];
+        $status['WAITING_FOR_SPACE'] = '0';
+    }
 
     return $status;
 }
