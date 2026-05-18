@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.17.t05 (Testing Branch Only)
+
+- Testing build; see commit history and linked issues.
+
 ### 2026.05.17.t04 (Testing Branch Only)
 
 - Testing build; see commit history and linked issues.
