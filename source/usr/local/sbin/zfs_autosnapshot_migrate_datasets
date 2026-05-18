@@ -16,11 +16,14 @@ LOGS_DIR="${PLUGIN_ROOT}/logs"
 STATUS_FILE="${PLUGIN_ROOT}/status.env"
 FOLDERS_FILE="${PLUGIN_ROOT}/folders.tsv"
 CONTAINERS_FILE="${PLUGIN_ROOT}/containers.tsv"
+RECOVERY_STATE_FILE="${PLUGIN_ROOT}/recovery.env"
 LOG_FILE="/var/log/zfs_autosnapshot_migrate_datasets.log"
 LOG_ARCHIVE_FILE="/var/log/zfs_autosnapshot_migrate_datasets.archive.log"
 LOCK_FILE="/var/run/zfs-autosnapshot-migrator/migrator.lock"
 SPACE_RECHECK_SECONDS=300
 RESTART_RETRY_DELAY=300
+RECOVERY_BOOT_DELAY_SECONDS=900
+RUN_RECOVERY=0
 ABSOLUTE_SAFETY_MARGIN=$((1024 * 1024 * 1024))
 PERCENT_SAFETY_MARGIN=10
 CURRENT_FOLDER_INDEX=-1
@@ -45,6 +48,12 @@ LAST_ERROR=""
 EXIT_CODE=0
 MIGRATION_COMPLETE=0
 NEEDS_CONTAINER_RECOVERY=0
+RECOVERY_PHASE=""
+RECOVERY_FOLDER_INDEX=-1
+RECOVERY_SOURCE_PATH=""
+RECOVERY_TEMP_PATH=""
+RECOVERY_TARGET_DATASET=""
+RECOVERY_BATCH_CONTAINERS=""
 
 TOTAL_FOLDERS=0
 COMPLETED_FOLDERS=0
@@ -248,6 +257,109 @@ EOF
   apply_owner "$STATUS_FILE"
   write_folders_file
   write_containers_file
+}
+
+write_recovery_state() {
+  [[ -n "$RECOVERY_TEMP_PATH" || -n "$RECOVERY_TARGET_DATASET" ]] || return 0
+  cat > "$RECOVERY_STATE_FILE" <<EOF
+RECOVERY_PHASE="$(kv_escape "$RECOVERY_PHASE")"
+RECOVERY_FOLDER_INDEX="$(kv_escape "$RECOVERY_FOLDER_INDEX")"
+RECOVERY_SOURCE_PATH="$(kv_escape "$RECOVERY_SOURCE_PATH")"
+RECOVERY_TEMP_PATH="$(kv_escape "$RECOVERY_TEMP_PATH")"
+RECOVERY_TARGET_DATASET="$(kv_escape "$RECOVERY_TARGET_DATASET")"
+RECOVERY_BATCH_CONTAINERS="$(kv_escape "$RECOVERY_BATCH_CONTAINERS")"
+DATASET="$(kv_escape "$ACTIVE_DATASET")"
+STARTED_EPOCH="$(kv_escape "$STARTED_EPOCH")"
+UPDATED_EPOCH="$(date +%s)"
+EOF
+  chmod 0640 "$RECOVERY_STATE_FILE" >/dev/null 2>&1 || true
+  apply_owner "$RECOVERY_STATE_FILE"
+}
+
+clear_recovery_state() {
+  RECOVERY_PHASE=""
+  RECOVERY_FOLDER_INDEX=-1
+  RECOVERY_SOURCE_PATH=""
+  RECOVERY_TEMP_PATH=""
+  RECOVERY_TARGET_DATASET=""
+  RECOVERY_BATCH_CONTAINERS=""
+  rm -f -- "$RECOVERY_STATE_FILE" >/dev/null 2>&1 || true
+}
+
+load_tsv_state_for_recovery() {
+  local line index name source_path target_ds size state progress message
+  FOLDER_NAMES=()
+  FOLDER_SOURCE_PATHS=()
+  FOLDER_TARGET_DATASETS=()
+  FOLDER_SIZE_BYTES=()
+  FOLDER_STATES=()
+  FOLDER_PROGRESS=()
+  FOLDER_MESSAGES=()
+  FOLDER_CONTAINER_INDEXES=()
+  FOLDER_INDEX_BY_NAME=()
+  if [[ -r "$FOLDERS_FILE" ]]; then
+    while IFS=$'\t' read -r name source_path target_ds size state progress message; do
+      [[ -n "${name:-}" ]] || continue
+      index="${#FOLDER_NAMES[@]}"
+      FOLDER_NAMES+=("$name")
+      FOLDER_SOURCE_PATHS+=("$source_path")
+      FOLDER_TARGET_DATASETS+=("$target_ds")
+      FOLDER_SIZE_BYTES+=("$size")
+      FOLDER_STATES+=("${state:-queued}")
+      FOLDER_PROGRESS+=("${progress:-0}")
+      FOLDER_MESSAGES+=("${message:-Queued for migration.}")
+      FOLDER_CONTAINER_INDEXES+=("")
+      FOLDER_INDEX_BY_NAME["$name"]="$index"
+    done < "$FOLDERS_FILE"
+  fi
+  TOTAL_FOLDERS="${#FOLDER_NAMES[@]}"
+
+  CONTAINER_IDS=()
+  CONTAINER_NAMES=()
+  CONTAINER_RESTART_NAMES=()
+  CONTAINER_RESTART_MAXS=()
+  CONTAINER_NETWORK_MODES=()
+  CONTAINER_FOLDER_INDEXES=()
+  CONTAINER_DEPENDENCY_REFS=()
+  CONTAINER_DEPENDENCY_INDEXES=()
+  CONTAINER_WAS_RUNNING=()
+  CONTAINER_CURRENTLY_RUNNING=()
+  CONTAINER_POLICY_DISABLED=()
+  CONTAINER_START_STATES=()
+  CONTAINER_LAST_ERRORS=()
+  CONTAINER_INDEX_BY_NAME=()
+  CONTAINER_INDEX_BY_ID=()
+  if [[ -r "$CONTAINERS_FILE" ]]; then
+    local id cname policy max was_running policy_disabled start_state last_error container_index
+    while IFS=$'\t' read -r id cname policy max was_running policy_disabled start_state last_error; do
+      [[ -n "${id:-}" ]] || continue
+      container_index="${#CONTAINER_IDS[@]}"
+      CONTAINER_IDS+=("$id")
+      CONTAINER_NAMES+=("$cname")
+      CONTAINER_RESTART_NAMES+=("${policy:-no}")
+      CONTAINER_RESTART_MAXS+=("${max:-0}")
+      CONTAINER_NETWORK_MODES+=("default")
+      CONTAINER_FOLDER_INDEXES+=("")
+      CONTAINER_DEPENDENCY_REFS+=("")
+      CONTAINER_DEPENDENCY_INDEXES+=("")
+      CONTAINER_WAS_RUNNING+=("${was_running:-1}")
+      CONTAINER_CURRENTLY_RUNNING+=("1")
+      CONTAINER_POLICY_DISABLED+=("${policy_disabled:-0}")
+      CONTAINER_START_STATES+=("${start_state:-recovery_pending}")
+      CONTAINER_LAST_ERRORS+=("${last_error:-}")
+      CONTAINER_INDEX_BY_NAME["$cname"]="$container_index"
+      CONTAINER_INDEX_BY_ID["$id"]="$container_index"
+    done < "$CONTAINERS_FILE"
+  fi
+}
+
+load_recovery_state() {
+  [[ -r "$RECOVERY_STATE_FILE" ]] || return 1
+  # shellcheck source=/dev/null
+  source "$RECOVERY_STATE_FILE"
+  ACTIVE_DATASET="${DATASET:-$ACTIVE_DATASET}"
+  load_tsv_state_for_recovery
+  return 0
 }
 
 set_status() {
@@ -1206,11 +1318,20 @@ migrate_one_directory() {
   [[ ! -e "$temp_path" ]] || { die "Temporary path already exists: $temp_path"; return 1; }
 
   mv -- "$entry_path" "$temp_path" || { die "Failed to rename '$entry_path' to temporary path '$temp_path'"; return 1; }
+  RECOVERY_PHASE="renamed_source"
+  RECOVERY_FOLDER_INDEX="$folder_index"
+  RECOVERY_SOURCE_PATH="$entry_path"
+  RECOVERY_TEMP_PATH="$temp_path"
+  RECOVERY_TARGET_DATASET="$child_ds"
+  RECOVERY_BATCH_CONTAINERS="$protected_container_indexes"
+  write_recovery_state
 
   wait_for_free_space "$required_bytes" "$name" "$folder_index" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
 
   log "Creating dataset: $child_ds"
   zfs create "$child_ds" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; die "Dataset creation failed: $child_ds"; return 1; }
+  RECOVERY_PHASE="dataset_created"
+  write_recovery_state
 
   assert_path_is_mountpoint_for_dataset "$child_ds" "$new_path" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
   verify_destination_is_empty "$new_path" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
@@ -1234,6 +1355,7 @@ migrate_one_directory() {
   compare_counts "$temp_path" "$new_path" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
 
   rm -rf --one-file-system -- "$temp_path" || { die "Failed to remove temporary source directory '$temp_path' after successful verification."; return 1; }
+  clear_recovery_state
   COMPLETED_FOLDERS=$((COMPLETED_FOLDERS + 1))
   folder_set "$folder_index" "complete" 100 "Migration complete."
   return 0
@@ -1284,6 +1406,59 @@ build_folder_plan() {
   fi
 }
 
+rsync_recover_exact() {
+  local src="$1"
+  local dst="$2"
+  [[ -d "$src" ]] || die "Recovery source temp folder is missing: $src"
+  [[ -d "$dst" ]] || die "Recovery destination dataset path is missing: $dst"
+  rsync -aHAXx --delete --numeric-ids "$src"/ "$dst"/ || die "Recovery exact rsync failed from '$src' to '$dst'"
+  sync
+}
+
+run_delayed_recovery() {
+  if ! load_recovery_state; then
+    log "No pending Dataset Migrator recovery state found."
+    return 0
+  fi
+
+  set_status "recovering" "boot_delay" "Dataset migration recovery is pending. Waiting for containers to finish starting before stopping only the affected batch."
+  sleep "$RECOVERY_BOOT_DELAY_SECONDS"
+
+  [[ -n "$RECOVERY_TEMP_PATH" ]] || die "Recovery state is missing the preserved source temp path."
+  [[ -n "$RECOVERY_TARGET_DATASET" ]] || die "Recovery state is missing the target dataset."
+  dataset_exists "$RECOVERY_TARGET_DATASET" || zfs create "$RECOVERY_TARGET_DATASET" || die "Recovery could not create target dataset: $RECOVERY_TARGET_DATASET"
+
+  local recovery_destination
+  recovery_destination="${RECOVERY_SOURCE_PATH:-}"
+  if [[ -z "$recovery_destination" ]]; then
+    recovery_destination="$(zfs get -H -o value mountpoint "$RECOVERY_TARGET_DATASET" 2>/dev/null | head -n 1 || true)"
+  fi
+  [[ -n "$recovery_destination" ]] || die "Recovery could not determine destination path for $RECOVERY_TARGET_DATASET"
+
+  NEEDS_CONTAINER_RECOVERY=1
+  if [[ -n "$RECOVERY_BATCH_CONTAINERS" ]]; then
+    stop_container_batch "$RECOVERY_BATCH_CONTAINERS" || return 1
+  fi
+
+  set_status "recovering" "exact_sync" "Recovery is exact-syncing the preserved folder into the child dataset."
+  rsync_recover_exact "$RECOVERY_TEMP_PATH" "$recovery_destination" || return 1
+  compare_manifests "$RECOVERY_TEMP_PATH" "$recovery_destination" || return 1
+  compare_counts "$RECOVERY_TEMP_PATH" "$recovery_destination" || return 1
+  rm -rf --one-file-system -- "$RECOVERY_TEMP_PATH" || die "Recovery could not remove preserved source temp folder: $RECOVERY_TEMP_PATH"
+
+  if [[ -n "$RECOVERY_BATCH_CONTAINERS" ]]; then
+    start_selected_containers "$RECOVERY_BATCH_CONTAINERS" || true
+  fi
+  clear_recovery_state
+  STATE="complete"
+  CURRENT_STEP="recovery_complete"
+  MESSAGE="Dataset migration recovery finished."
+  ENDED_EPOCH="$(date +%s)"
+  MIGRATION_COMPLETE=1
+  write_status_file
+  log "Dataset migration recovery finished for $ACTIVE_DATASET"
+}
+
 # shellcheck disable=SC2329
 cleanup() {
   local exit_code="$?"
@@ -1318,13 +1493,18 @@ while (( $# > 0 )); do
       shift
       DATASET="$(trim "${1:-}")"
       ;;
+    --recover-pending)
+      RUN_RECOVERY=1
+      ;;
   esac
   shift || true
 done
 
-[[ -n "$DATASET" ]] || die "Dataset is required."
-[[ "$DATASET" =~ ^[A-Za-z0-9._/:+\-]+$ ]] || die "Dataset name is invalid."
-ACTIVE_DATASET="$DATASET"
+if (( RUN_RECOVERY == 0 )); then
+  [[ -n "$DATASET" ]] || die "Dataset is required."
+  [[ "$DATASET" =~ ^[A-Za-z0-9._/:+\-]+$ ]] || die "Dataset name is invalid."
+  ACTIVE_DATASET="$DATASET"
+fi
 
 ensure_dir "$PLUGIN_ROOT"
 ensure_dir "$LOGS_DIR"
@@ -1342,6 +1522,11 @@ chmod 0640 "$LOCK_FILE" >/dev/null 2>&1 || true
 apply_owner "$LOCK_FILE"
 
 trap cleanup EXIT INT TERM
+
+if (( RUN_RECOVERY == 1 )); then
+  run_delayed_recovery
+  exit 0
+fi
 
 if parity_sync_in_progress; then
   die "A parity check or sync is currently running. Stop it before proceeding."

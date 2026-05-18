@@ -3,9 +3,15 @@ set -euo pipefail
 
 PLUGIN_DIR="/usr/local/emhttp/plugins/zfs.autosnapshot"
 SYNC_SCRIPT="${PLUGIN_DIR}/scripts/sync-cron.sh"
+MIGRATOR_RECOVERY_STATE="/boot/config/plugins/zfs.autosnapshot/dataset_migrator/recovery.env"
+MIGRATOR_WORKER="/usr/local/sbin/zfs_autosnapshot_migrate_datasets"
 
 if [[ -x "$SYNC_SCRIPT" ]]; then
   "$SYNC_SCRIPT" || true
+fi
+
+if [[ -r "$MIGRATOR_RECOVERY_STATE" && -x "$MIGRATOR_WORKER" ]]; then
+  nohup "$MIGRATOR_WORKER" --recover-pending >/dev/null 2>&1 &
 fi
 
 exit 0
