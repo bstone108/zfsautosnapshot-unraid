@@ -789,6 +789,7 @@ main() {
   echo "PASS: lock loser does not run log maintenance"
 
   python3 "${ROOT_DIR}/tests/stage1/send_settings_static_checks.py"
+  python3 "${ROOT_DIR}/tests/stage1/migrate_datasets_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/diagnostics_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/log_helpers_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/send_worker_static_checks.py"

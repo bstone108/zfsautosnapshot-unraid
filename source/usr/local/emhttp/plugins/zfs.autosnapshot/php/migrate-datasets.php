@@ -246,6 +246,7 @@ $csrfToken = zfsas_get_csrf_token();
       <div id="migrate_feedback"></div>
       <div class="zfsas-dm-toolbar">
         <select id="migrate_dataset" class="zfsas-dm-select"></select>
+        <button type="button" class="btn" id="migrate_preview">Preview Migration</button>
         <button type="button" class="btn btn-primary" id="migrate_start">Start Migration</button>
         <button type="button" class="btn" id="migrate_refresh">Refresh</button>
         <div id="migrate_page_status" class="zfsas-dm-status">Loading dataset migrator status...</div>
@@ -860,6 +861,14 @@ $csrfToken = zfsas_get_csrf_token();
   var refreshButton = byId('migrate_refresh');
   if (refreshButton) {
     refreshButton.addEventListener('click', function () {
+      refreshStatus();
+    });
+  }
+
+  var previewButton = byId('migrate_preview');
+  if (previewButton) {
+    previewButton.addEventListener('click', function () {
+      renderPageStatus('Previewing top-level folders...', false);
       refreshStatus();
     });
   }
