@@ -164,6 +164,21 @@ def main() -> int:
     )
     assert_contains(
         lib,
+        'send_pool_prep_has_unpurged_dependents "$prep_job_id"',
+        "pool prep jobs must not be pruned while any dependent send job still exists for finalizers/retry coordination",
+    )
+    pool_prep_dependents_body = lib.split("send_pool_prep_has_unpurged_dependents() {", 1)[1].split("\n}\n", 1)[0]
+    if "job_state_is_active" in pool_prep_dependents_body:
+        raise AssertionError(
+            "pool prep dependent detection must include completed child jobs until they are purged, not only active jobs"
+        )
+    assert_contains(
+        pool_prep_dependents_body,
+        '[[ "$(job_get dependent_job PREP_JOB_ID)" == "$prep_job_id" ]] || continue',
+        "pool prep dependent detection must match children by PREP_JOB_ID",
+    )
+    assert_contains(
+        lib,
         'defer_send_launch_approval "$job_path" launch_job "Waiting for pool prep." 3',
         "queue manager should leave prepped sends queued while destination cleanup prep is still running",
     )

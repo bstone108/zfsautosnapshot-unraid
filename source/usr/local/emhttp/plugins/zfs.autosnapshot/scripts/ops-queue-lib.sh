@@ -3553,7 +3553,7 @@ prune_old_jobs() {
         action="$(job_get job JOB_ACTION)"
         if [[ "$action" == "pool_prep" ]]; then
           prep_job_id="$(job_get job JOB_ID)"
-          if send_pool_prep_has_active_dependents "$prep_job_id"; then
+          if send_pool_prep_has_unpurged_dependents "$prep_job_id"; then
             continue
           fi
           rm -f "$file" >/dev/null 2>&1 || true
@@ -3587,9 +3587,9 @@ prune_old_jobs() {
   done
 }
 
-send_pool_prep_has_active_dependents() {
+send_pool_prep_has_unpurged_dependents() {
   local prep_job_id="$1"
-  local file state
+  local file
   local -A dependent_job=()
 
   [[ -n "$prep_job_id" ]] || return 1
@@ -3599,10 +3599,7 @@ send_pool_prep_has_active_dependents() {
     job_load "$file" dependent_job || continue
     [[ "$(job_get dependent_job JOB_TYPE)" == "send" ]] || continue
     [[ "$(job_get dependent_job PREP_JOB_ID)" == "$prep_job_id" ]] || continue
-    state="$(job_get dependent_job STATE)"
-    if job_state_is_active "$state"; then
-      return 0
-    fi
+    return 0
   done < <(list_job_files)
 
   return 1

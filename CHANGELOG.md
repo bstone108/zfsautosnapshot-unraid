@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.19.t02 (Testing Branch Only)
+
+- Fixed a ZFS Send queue finalizer stall where a completed child send could be pushed back into a pool-prep wait after its pool-prep coordination job was pruned too early. Pool-prep jobs are now kept while dependent send jobs still exist, so finalizers and retry coordination can observe the completed child state.
+
 ### 2026.05.19.t01 (Testing Branch Only)
 
 - Improved Dataset Migrator live table accuracy while an active or interrupted worker has not reported folder/container rows yet. The page now keeps showing that it is using live worker state instead of falling back to selected-dataset preview/preflight rows.
