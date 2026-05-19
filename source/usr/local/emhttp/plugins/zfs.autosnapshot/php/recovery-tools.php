@@ -169,7 +169,32 @@ $csrfToken = zfsas_get_csrf_token();
   </div>
 
   <div class="zfsas-alert zfsas-alert-warn">
-    <code>Recovery Tools</code> is still unfinished and may not work correctly yet. Treat the current workflows as preview diagnostics and verify any results manually before relying on them.
+    <strong>Use recovery actions carefully.</strong> Recovery techniques may or may not work for your situation; use them at your own risk. This tool makes a few common recovery attempts easier, but it is not a replacement for backups and makes no warranty about effectiveness or risk. No restore or delete action runs automatically; you must select an option and confirm it before anything changes data.
+  </div>
+
+  <div class="zfsas-rt-card">
+    <h3 style="margin-top:0;">Recovery Options</h3>
+    <div class="zfsas-rt-help">
+      When scrub output or a manual readability scan identifies a bad file, this section tracks background discovery for clean copies in local snapshots and ZFS send destinations. Destructive choices stay disabled until a later guarded confirmation flow is available.
+    </div>
+    <div class="zfsas-table-wrap">
+      <table class="zfsas-table">
+        <thead>
+          <tr>
+            <th>Dataset</th>
+            <th>Affected file</th>
+            <th>Source</th>
+            <th>Status</th>
+            <th>Recovery options</th>
+          </tr>
+        </thead>
+        <tbody id="recovery_options_rows">
+          <tr>
+            <td colspan="5" class="zfsas-rt-help">Recovery options will appear here after scrub output or a manual scan identifies affected files.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <div class="zfsas-rt-card">
@@ -501,6 +526,49 @@ $csrfToken = zfsas_get_csrf_token();
     }
   }
 
+  function renderRecoveryOptions(options) {
+    var tbody = byId('recovery_options_rows');
+    if (!tbody) {
+      return;
+    }
+    if (!Array.isArray(options) || options.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="zfsas-rt-help">No affected files are waiting for recovery option discovery.</td></tr>';
+      return;
+    }
+
+    var labels = {
+      aggressive_read: 'Aggressive read attempt',
+      snapshot_restore: 'Restore from local snapshot',
+      send_destination_restore: 'Restore from ZFS send destination',
+      delete_file: 'Delete affected file'
+    };
+    var html = '';
+    options.forEach(function (option) {
+      var state = String(option.state || 'searching');
+      var status = state;
+      if (option.state === 'searching') {
+        status = option.message || 'Searching snapshots and ZFS send destinations for clean recovery candidates.';
+      }
+      var actionTypes = Array.isArray(option.actionTypes) ? option.actionTypes : [];
+      var actionHtml = '';
+      if (actionTypes.length > 0) {
+        actionTypes.forEach(function (actionType) {
+          actionHtml += '<div><button type="button" class="btn" disabled title="Recovery actions require a later explicit confirmation step.">' + escapeHtml(labels[actionType] || actionType) + '</button></div>';
+        });
+      } else {
+        actionHtml = '<span class="zfsas-rt-help">No candidate actions yet.</span>';
+      }
+      html += '<tr>';
+      html += '<td><code>' + escapeHtml(option.dataset || 'unknown') + '</code></td>';
+      html += '<td><code>' + escapeHtml(option.path || '') + '</code></td>';
+      html += '<td>' + escapeHtml(option.source || '') + '</td>';
+      html += '<td>' + escapeHtml(status) + '</td>';
+      html += '<td>' + actionHtml + '<div class="zfsas-rt-help" style="margin-top:4px;">No restore or delete action runs automatically; select an option and confirm it before data changes.</div></td>';
+      html += '</tr>';
+    });
+    tbody.innerHTML = html;
+  }
+
   function renderScans(scans) {
     var tbody = byId('recovery_scan_rows');
     if (!tbody) {
@@ -534,6 +602,7 @@ $csrfToken = zfsas_get_csrf_token();
       function (payload) {
         renderPools(payload.pools || [], payload.poolError || null);
         renderDatasetOptions(payload.datasets || []);
+        renderRecoveryOptions(payload.recoveryOptions || []);
         renderScans(payload.scans || []);
         if (payload.datasetError) {
           renderFeedback([payload.datasetError], true);

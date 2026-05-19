@@ -11,6 +11,7 @@ if (!zfsas_recovery_ensure_storage()) {
 
 $datasets = zfsas_recovery_list_datasets($datasetError);
 $poolStatus = zfsas_recovery_pool_status();
+$scans = zfsas_recovery_list_scans();
 
 zfsas_emit_marked_json([
     'ok' => true,
@@ -18,5 +19,6 @@ zfsas_emit_marked_json([
     'datasets' => $datasets,
     'pools' => $poolStatus['pools'] ?? [],
     'poolError' => $poolStatus['error'] ?? null,
-    'scans' => zfsas_recovery_list_scans(),
+    'scans' => $scans,
+    'recoveryOptions' => zfsas_recovery_option_candidates($poolStatus, $scans),
 ]);

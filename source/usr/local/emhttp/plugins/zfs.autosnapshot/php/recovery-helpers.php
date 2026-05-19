@@ -268,6 +268,66 @@ function zfsas_recovery_list_scans()
     return $rows;
 }
 
+function zfsas_recovery_option_candidates($poolStatus = null, $scans = null)
+{
+    if (!is_array($poolStatus)) {
+        $poolStatus = zfsas_recovery_pool_status();
+    }
+    if (!is_array($scans)) {
+        $scans = zfsas_recovery_list_scans();
+    }
+
+    $rows = [];
+    $seen = [];
+    $actionTypes = ["aggressive_read", "snapshot_restore", "send_destination_restore", "delete_file"];
+    $addCandidate = function ($dataset, $path, $source, $state = 'searching') use (&$rows, &$seen, $actionTypes) {
+        $path = zfsas_recovery_trim($path);
+        if ($path === '') {
+            return;
+        }
+        $dataset = zfsas_recovery_trim($dataset);
+        $key = strtolower($dataset . "\n" . $path . "\n" . $source);
+        if (isset($seen[$key])) {
+            return;
+        }
+        $seen[$key] = true;
+        $rows[] = [
+            'dataset' => $dataset,
+            'path' => $path,
+            'source' => $source,
+            'state' => $state,
+            'message' => 'Searching snapshots and ZFS send destinations for clean recovery candidates.',
+            'actionTypes' => $actionTypes,
+            'actionsEnabled' => false,
+            'requiresConfirmation' => true,
+        ];
+    };
+
+    foreach (($poolStatus['pools'] ?? []) as $pool) {
+        foreach (($pool['identifiedFiles'] ?? []) as $path) {
+            $addCandidate('', $path, 'zpool status');
+        }
+    }
+
+    foreach ($scans as $scan) {
+        $dataset = (string) ($scan['dataset'] ?? '');
+        $resultsFile = (string) ($scan['resultsFile'] ?? '');
+        if ($resultsFile !== '' && is_file($resultsFile)) {
+            $lines = @file($resultsFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+            if (is_array($lines)) {
+                foreach ($lines as $line) {
+                    $addCandidate($dataset, $line, 'manual readability scan');
+                }
+            }
+        }
+        if ((int) ($scan['unreadableCount'] ?? 0) > 0 && empty($rows) && (string) ($scan['lastPath'] ?? '') !== '') {
+            $addCandidate($dataset, (string) $scan['lastPath'], 'manual readability scan');
+        }
+    }
+
+    return $rows;
+}
+
 function zfsas_recovery_start_scan($dataset, &$error = null)
 {
     $error = null;

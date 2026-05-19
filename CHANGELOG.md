@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.19.t03 (Testing Branch Only)
+
+- Started the Repair Tools completion pass with a prominent recovery-risk warning, a per-file Recovery Options scaffold, and status data for affected files found by scrub/manual scans. Recovery actions remain disabled until a later guarded confirmation flow is implemented.
+
 ### 2026.05.19.t02 (Testing Branch Only)
 
 - Fixed a ZFS Send queue finalizer stall where a completed child send could be pushed back into a pool-prep wait after its pool-prep coordination job was pruned too early. Pool-prep jobs are now kept while dependent send jobs still exist, so finalizers and retry coordination can observe the completed child state.
