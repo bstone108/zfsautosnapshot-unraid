@@ -55,6 +55,29 @@ require(
     "Live summary must warn clearly when a stale status file says work was active but the worker is no longer running.",
     re.S,
 )
+require(
+    r'id="migrate_folder_source_notice"',
+    "Folder table must have a scoped live/preview source notice so selected-dataset previews are not confused with active-run rows.",
+)
+require(
+    r'id="migrate_container_source_notice"',
+    "Container table must have a scoped live/preview source notice so container rows are not ambiguous during active runs.",
+)
+require(
+    r'function\s+statusMatchesSelectedDataset\s*\(\s*status\s*\).*?return\s+statusDataset\s*!==\s*\'\'\s*&&\s*selected\s*!==\s*\'\'\s*&&\s*statusDataset\s*===\s*selected',
+    "UI must explicitly distinguish the active worker dataset from the currently selected dataset.",
+    re.S,
+)
+require(
+    r'function\s+renderFolderSourceNotice\s*\(\s*preview\s*,\s*status\s*,\s*usingLiveRows\s*\).*?Showing live worker folder state for active dataset.*?Showing refreshed preview rows for selected dataset.*?Selected dataset.*?differs from the active migration dataset',
+    "Folder table must label whether rows came from the active worker or the selected-dataset preview, including mismatch cases.",
+    re.S,
+)
+require(
+    r'function\s+renderContainerSourceNotice\s*\(\s*docker\s*,\s*status\s*,\s*usingLiveRows\s*\)(?=.*?Showing live worker container state for active dataset)(?=.*?Showing Docker preflight for the selected dataset)(?=.*?Active migration dataset.*?differs from the selected dataset)',
+    "Container table must label live worker rows vs selected-dataset Docker preflight rows, including mismatch cases.",
+    re.S,
+)
 # Start remains a distinct POST-only action and must not be the only way to
 # populate the preview table.
 require(

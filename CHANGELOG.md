@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.18.t04 (Testing Branch Only)
+
+- Improved Dataset Migrator page accuracy when a selected dataset differs from an active migration dataset. Folder and container tables now label whether they are showing live worker state or refreshed selected-dataset preflight/preview data.
+- Kept live container worker rows scoped to the active dataset so selected-dataset preflight information is not mixed with another run's container status.
+
 ### 2026.05.18.t03 (Testing Branch Only)
 
 - Improved Dataset Migrator live status accuracy when a stale status file still says work is active but the background worker is no longer running. The page now shows the run as interrupted instead of implying it is still waiting/running or ready.

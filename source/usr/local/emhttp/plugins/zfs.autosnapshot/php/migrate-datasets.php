@@ -83,6 +83,13 @@ $csrfToken = zfsas_get_csrf_token();
       color: #8f2d2a;
       opacity: 1;
     }
+    .zfsas-dm-source-notice {
+      margin-top: 8px;
+      color: var(--text-color, #4f5a66);
+      opacity: 0.86;
+      font-size: 12px;
+      line-height: 1.4;
+    }
     .zfsas-alert {
       border-radius: 8px;
       padding: 10px 12px;
@@ -295,6 +302,7 @@ $csrfToken = zfsas_get_csrf_token();
   <div class="zfsas-dm-card">
     <h3 style="margin-top:0;">Top-Level Folder Plan</h3>
     <div class="zfsas-dm-help">Eligible rows will be migrated into child datasets. During an active run this table switches to the worker's live folder state.</div>
+    <div id="migrate_folder_source_notice" class="zfsas-dm-source-notice"></div>
     <div class="zfsas-table-wrap">
       <table class="zfsas-table">
         <thead>
@@ -319,6 +327,7 @@ $csrfToken = zfsas_get_csrf_token();
   <div class="zfsas-dm-card">
     <h3 style="margin-top:0;">Container Handling</h3>
     <div class="zfsas-dm-help">Before the copy starts, the tool records which containers were running, temporarily disables their Docker restart policy while the migration is active, then brings them back up afterward. If any container fails to start, the tool starts the rest, waits 5 minutes, and retries the failed ones once.</div>
+    <div id="migrate_container_source_notice" class="zfsas-dm-source-notice"></div>
     <div class="zfsas-table-wrap">
       <table class="zfsas-table">
         <thead>
@@ -628,6 +637,60 @@ $csrfToken = zfsas_get_csrf_token();
     return el ? String(el.value || '') : '';
   }
 
+  function statusMatchesSelectedDataset(status) {
+    var statusDataset = status && status.DATASET ? String(status.DATASET) : '';
+    var selected = selectedDatasetValue();
+    return statusDataset !== '' && selected !== '' && statusDataset === selected;
+  }
+
+  function renderSourceNotice(id, message, kind) {
+    var el = byId(id);
+    if (!el) {
+      return;
+    }
+    if (!message) {
+      el.innerHTML = '';
+      return;
+    }
+    el.innerHTML = '<span class="zfsas-chip' + (kind === 'warn' ? ' warn' : '') + '">' + escapeHtml(message) + '</span>';
+  }
+
+  function renderFolderSourceNotice(preview, status, usingLiveRows) {
+    var activeDataset = status && status.DATASET ? String(status.DATASET) : '';
+    var selected = selectedDatasetValue();
+    if (usingLiveRows) {
+      renderSourceNotice('migrate_folder_source_notice', 'Showing live worker folder state for active dataset ' + activeDataset + '.', '');
+      return;
+    }
+    if (preview && selected !== '') {
+      if (activeDataset !== '' && activeDataset !== selected) {
+        renderSourceNotice('migrate_folder_source_notice', 'Showing refreshed preview rows for selected dataset ' + selected + '. Selected dataset ' + selected + ' differs from the active migration dataset ' + activeDataset + '.', 'warn');
+        return;
+      }
+      renderSourceNotice('migrate_folder_source_notice', 'Showing refreshed preview rows for selected dataset ' + selected + '.', '');
+      return;
+    }
+    renderSourceNotice('migrate_folder_source_notice', '', '');
+  }
+
+  function renderContainerSourceNotice(docker, status, usingLiveRows) {
+    var activeDataset = status && status.DATASET ? String(status.DATASET) : '';
+    var selected = selectedDatasetValue();
+    if (usingLiveRows) {
+      if (selected !== '' && activeDataset !== '' && activeDataset !== selected) {
+        renderSourceNotice('migrate_container_source_notice', 'Showing live worker container state for active dataset ' + activeDataset + '. Active migration dataset ' + activeDataset + ' differs from the selected dataset ' + selected + '.', 'warn');
+        return;
+      }
+      renderSourceNotice('migrate_container_source_notice', 'Showing live worker container state for active dataset ' + activeDataset + '.', '');
+      return;
+    }
+    if (docker && selected !== '') {
+      renderSourceNotice('migrate_container_source_notice', 'Showing Docker preflight for the selected dataset ' + selected + '.', '');
+      return;
+    }
+    renderSourceNotice('migrate_container_source_notice', '', '');
+  }
+
   function populateDatasetSelect(datasets, preferredValue) {
     var el = byId('migrate_dataset');
     if (!el) {
@@ -700,7 +763,7 @@ $csrfToken = zfsas_get_csrf_token();
       return;
     }
 
-    var useStatusRows = status && status.DATASET && status.DATASET === selectedDatasetValue() && Array.isArray(status.folders) && status.folders.length > 0;
+    var useStatusRows = statusMatchesSelectedDataset(status) && Array.isArray(status.folders) && status.folders.length > 0;
     var rows = [];
 
     if (useStatusRows) {
@@ -726,6 +789,8 @@ $csrfToken = zfsas_get_csrf_token();
         };
       });
     }
+
+    renderFolderSourceNotice(preview, status, useStatusRows);
 
     if (!rows.length) {
       el.innerHTML = '<tr><td colspan="6" class="zfsas-dm-help">No top-level folders to show for the selected dataset.</td></tr>';
@@ -756,8 +821,9 @@ $csrfToken = zfsas_get_csrf_token();
 
     var html = '';
     var rows = [];
+    var useStatusRows = statusMatchesSelectedDataset(status) && Array.isArray(status.containers) && status.containers.length > 0;
 
-    if (status && Array.isArray(status.containers) && status.containers.length > 0) {
+    if (useStatusRows) {
       rows = status.containers.map(function (row) {
         return {
           name: row.name,
@@ -778,6 +844,8 @@ $csrfToken = zfsas_get_csrf_token();
         };
       });
     }
+
+    renderContainerSourceNotice(docker, status, useStatusRows);
 
     if (!rows.length) {
       el.innerHTML = '<tr><td colspan="4" class="zfsas-dm-help">No running containers are currently reported.</td></tr>';
