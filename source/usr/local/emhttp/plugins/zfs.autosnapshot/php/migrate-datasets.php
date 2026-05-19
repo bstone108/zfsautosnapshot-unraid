@@ -763,7 +763,7 @@ $csrfToken = zfsas_get_csrf_token();
       return;
     }
 
-    var useStatusRows = statusMatchesSelectedDataset(status) && Array.isArray(status.folders) && status.folders.length > 0;
+    var useStatusRows = statusMatchesSelectedDataset(status) && (status.isActive || status.isStale) && Array.isArray(status.folders) && status.folders.length > 0;
     var rows = [];
 
     if (useStatusRows) {
@@ -821,7 +821,7 @@ $csrfToken = zfsas_get_csrf_token();
 
     var html = '';
     var rows = [];
-    var useStatusRows = statusMatchesSelectedDataset(status) && Array.isArray(status.containers) && status.containers.length > 0;
+    var useStatusRows = statusMatchesSelectedDataset(status) && (status.isActive || status.isStale) && Array.isArray(status.containers) && status.containers.length > 0;
 
     if (useStatusRows) {
       rows = status.containers.map(function (row) {

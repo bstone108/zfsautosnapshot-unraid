@@ -15,8 +15,9 @@ $previewError = null;
 
 $datasets = zfsas_migrate_list_datasets($datasetError);
 $status = zfsas_migrate_current_status();
+$statusIsLive = (bool) (($status['isActive'] ?? false) || ($status['isStale'] ?? false));
 $preview = null;
-if ($selectedDataset !== '' && zfsas_migrate_trim($status['DATASET'] ?? '') !== $selectedDataset) {
+if ($selectedDataset !== '' && (!$statusIsLive || zfsas_migrate_trim($status['DATASET'] ?? '') !== $selectedDataset)) {
     $preview = zfsas_migrate_preview_dataset($selectedDataset, $previewError);
 }
 
