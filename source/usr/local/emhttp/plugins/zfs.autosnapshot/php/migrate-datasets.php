@@ -788,7 +788,7 @@ $csrfToken = zfsas_get_csrf_token();
       return;
     }
 
-    var useStatusRows = statusMatchesSelectedDataset(status) && (status.isActive || status.isStale) && Array.isArray(status.folders) && status.folders.length > 0;
+    var useStatusRows = statusMatchesSelectedDataset(status) && (status.isActive || status.isStale) && Array.isArray(status.folders);
     var rows = [];
 
     if (useStatusRows) {
@@ -816,6 +816,11 @@ $csrfToken = zfsas_get_csrf_token();
     }
 
     renderFolderSourceNotice(preview, status, useStatusRows);
+
+    if (useStatusRows && !rows.length) {
+      el.innerHTML = '<tr><td colspan="6" class="zfsas-dm-help">Live worker has not reported folder rows yet.</td></tr>';
+      return;
+    }
 
     if (!rows.length) {
       el.innerHTML = '<tr><td colspan="6" class="zfsas-dm-help">No top-level folders to show for the selected dataset.</td></tr>';
@@ -846,7 +851,7 @@ $csrfToken = zfsas_get_csrf_token();
 
     var html = '';
     var rows = [];
-    var useStatusRows = statusMatchesSelectedDataset(status) && (status.isActive || status.isStale) && Array.isArray(status.containers) && status.containers.length > 0;
+    var useStatusRows = statusMatchesSelectedDataset(status) && (status.isActive || status.isStale) && Array.isArray(status.containers);
 
     if (useStatusRows) {
       rows = status.containers.map(function (row) {
@@ -871,6 +876,11 @@ $csrfToken = zfsas_get_csrf_token();
     }
 
     renderContainerSourceNotice(docker, status, useStatusRows);
+
+    if (useStatusRows && !rows.length) {
+      el.innerHTML = '<tr><td colspan="4" class="zfsas-dm-help">Live worker has not reported container rows yet.</td></tr>';
+      return;
+    }
 
     if (!rows.length) {
       el.innerHTML = '<tr><td colspan="4" class="zfsas-dm-help">No running containers are currently reported.</td></tr>';
