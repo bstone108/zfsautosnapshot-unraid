@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.18.t06 (Testing Branch Only)
+
+- Improved Dataset Migrator live controls and status clarity: Start is disabled while a migration is running or interrupted, Preview is disabled until a dataset is selected, and the page-level status now calls out live free-space waits before the next folder is touched.
+
 ### 2026.05.18.t05 (Testing Branch Only)
 
 - Improved Dataset Migrator refresh accuracy after a migration finishes. Once the worker is no longer live, the page rebuilds the selected dataset preview and Docker preflight rows instead of continuing to treat old completed worker rows as current live state.
