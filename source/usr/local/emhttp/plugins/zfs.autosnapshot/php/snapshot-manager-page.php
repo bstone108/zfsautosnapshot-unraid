@@ -1065,6 +1065,11 @@ $csrfToken = zfsas_get_csrf_token();
   byId('snapshot_manager_select_all').addEventListener('change', function () {
     var checked = byId('snapshot_manager_select_all').checked;
     document.querySelectorAll('.snapshot-manager-select').forEach(function (checkbox) {
+      if (checkbox.disabled) {
+        checkbox.checked = false;
+        delete currentSelection[checkbox.value];
+        return;
+      }
       checkbox.checked = checked;
       currentSelection[checkbox.value] = checked;
     });

@@ -796,6 +796,7 @@ main() {
   php "${ROOT_DIR}/tests/stage1/recovery_tools_discovery_contract.php"
   php "${ROOT_DIR}/tests/stage1/recovery_tools_action_contract.php"
   php "${ROOT_DIR}/tests/stage1/snapshot_manager_pending_delete_contract.php"
+  python3 "${ROOT_DIR}/tests/stage1/snapshot_manager_ui_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/log_helpers_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/send_worker_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/send_queue_preflight_status_static_checks.py"
