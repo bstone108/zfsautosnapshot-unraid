@@ -802,11 +802,16 @@ $csrfToken = zfsas_get_csrf_token();
         currentSnapshotMap[row.snapshot] = row;
         var isSelected = !!currentSelection[row.snapshot];
         var holdLabel = row.held ? 'Release' : 'Hold';
-        html += '<tr data-snapshot="' + escapeHtml(row.snapshot) + '">';
-        html += '<td class="zfsas-select-cell"><input type="checkbox" class="snapshot-manager-select" value="' + escapeHtml(row.snapshot) + '"' + (isSelected ? ' checked' : '') + '></td>';
+        var pendingDelete = !!row.pendingDelete;
+        var pendingDeleteLabel = row.pendingDeleteState ? ('Delete ' + row.pendingDeleteState) : 'Delete queued';
+        html += '<tr data-snapshot="' + escapeHtml(row.snapshot) + '"' + (pendingDelete ? ' class="zfsas-sm-pending-delete"' : '') + '>';
+        html += '<td class="zfsas-select-cell"><input type="checkbox" class="snapshot-manager-select" value="' + escapeHtml(row.snapshot) + '"' + (isSelected ? ' checked' : '') + (pendingDelete ? ' disabled title="Snapshot deletion is already queued."' : '') + '></td>';
         html += '<td><code>' + escapeHtml(row.snapshotName) + '</code><div class="zfsas-sm-snapshot-meta">';
         if (row.sendProtected) {
           html += '<span class="zfsas-sm-meta-chip is-protected">Protected send checkpoint</span>';
+        }
+        if (pendingDelete) {
+          html += '<span class="zfsas-sm-meta-chip is-pending-delete">' + escapeHtml(pendingDeleteLabel) + '</span>';
         }
         if (row.held) {
           html += '<span class="zfsas-sm-meta-chip">Held: ' + escapeHtml((row.holdTags || []).join(', ') || 'yes') + '</span>';
@@ -817,10 +822,14 @@ $csrfToken = zfsas_get_csrf_token();
         html += '<td class="zfsas-center">' + escapeHtml(row.writtenText) + '</td>';
         html += '<td class="zfsas-center">' + String(row.userrefs || 0) + '</td>';
         html += '<td class="zfsas-actions-cell">';
-        html += '<button type="button" class="btn snapshot-manager-row-action" data-action="rollback" data-snapshot="' + escapeHtml(row.snapshot) + '"' + (row.sendProtected ? ' disabled' : '') + '>Rollback</button> ';
-        html += '<button type="button" class="btn snapshot-manager-row-action" data-action="delete" data-snapshot="' + escapeHtml(row.snapshot) + '">Delete</button> ';
-        html += '<button type="button" class="btn snapshot-manager-row-action" data-action="' + (row.held ? 'release' : 'hold') + '" data-snapshot="' + escapeHtml(row.snapshot) + '">' + holdLabel + '</button> ';
-        html += '<button type="button" class="btn snapshot-manager-row-action" data-action="send" data-snapshot="' + escapeHtml(row.snapshot) + '">Send</button>';
+        if (pendingDelete) {
+          html += '<span class="zfsas-sm-help">Delete already queued</span>';
+        } else {
+          html += '<button type="button" class="btn snapshot-manager-row-action" data-action="rollback" data-snapshot="' + escapeHtml(row.snapshot) + '"' + (row.sendProtected ? ' disabled' : '') + '>Rollback</button> ';
+          html += '<button type="button" class="btn snapshot-manager-row-action" data-action="delete" data-snapshot="' + escapeHtml(row.snapshot) + '">Delete</button> ';
+          html += '<button type="button" class="btn snapshot-manager-row-action" data-action="' + (row.held ? 'release' : 'hold') + '" data-snapshot="' + escapeHtml(row.snapshot) + '">' + holdLabel + '</button> ';
+          html += '<button type="button" class="btn snapshot-manager-row-action" data-action="send" data-snapshot="' + escapeHtml(row.snapshot) + '">Send</button>';
+        }
         html += '</td>';
         html += '</tr>';
       });

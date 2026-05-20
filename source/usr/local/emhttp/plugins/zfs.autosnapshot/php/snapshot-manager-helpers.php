@@ -412,9 +412,7 @@ function zfsas_sm_dataset_snapshots($dataset, &$error = null)
             continue;
         }
 
-        if (isset($queuedDeletes[$fullName])) {
-            continue;
-        }
+        $pendingDelete = $queuedDeletes[$fullName] ?? null;
 
         $createdEpoch = (int) $parts[1];
         $used = (int) $parts[2];
@@ -439,6 +437,9 @@ function zfsas_sm_dataset_snapshots($dataset, &$error = null)
             'holdTags' => $holdTags,
             'sendProtected' => $sendProtected,
             'sendScheduleJobId' => $sendScheduleJobId,
+            'pendingDelete' => is_array($pendingDelete),
+            'pendingDeleteState' => is_array($pendingDelete) ? (string) ($pendingDelete['STATE'] ?? 'queued') : '',
+            'pendingDeleteJobId' => is_array($pendingDelete) ? (string) ($pendingDelete['JOB_ID'] ?? '') : '',
         ];
     }
 
