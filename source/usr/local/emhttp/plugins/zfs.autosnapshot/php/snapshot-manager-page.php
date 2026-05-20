@@ -884,6 +884,23 @@ $csrfToken = zfsas_get_csrf_token();
     );
   }
 
+  function refreshSnapshotManagerState() {
+    loadDatasetList();
+    if (!currentDataset) {
+      return;
+    }
+    requestJson(
+      datasetUrl + '?dataset=' + encodeURIComponent(currentDataset) + '&_=' + Date.now(),
+      function (payload) {
+        renderSnapshotRows(currentDataset, payload.snapshots || [], payload.status || null);
+        refreshBulkCount();
+      },
+      function (error) {
+        renderFeedback('snapshot_manager_drawer_feedback', ['Unable to refresh snapshots for ' + currentDataset + ': ' + error.message], true);
+      }
+    );
+  }
+
   function requestAction(body, onSuccess) {
     requestJsonPost(
       actionUrl,
@@ -1104,7 +1121,7 @@ $csrfToken = zfsas_get_csrf_token();
   });
 
   loadDatasetList();
-  refreshTimer = window.setInterval(loadDatasetList, 5000);
+  refreshTimer = window.setInterval(refreshSnapshotManagerState, 5000);
 
   if (embeddedMode && window.parent !== window) {
     var heightObserver = new MutationObserver(function () {

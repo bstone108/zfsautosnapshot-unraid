@@ -13,21 +13,40 @@ def assert_contains(text: str, needle: str, message: str) -> None:
         raise AssertionError(message)
 
 
-def extract_select_all_handler(page: str) -> str:
-    marker = "byId('snapshot_manager_select_all').addEventListener('change', function () {"
+def extract_block(page: str, marker: str, end_marker: str, missing: str, unclosed: str) -> str:
     start = page.find(marker)
     if start == -1:
-        raise AssertionError("Snapshot Manager must define a select-all change handler")
-    end_marker = "  });"
+        raise AssertionError(missing)
     end = page.find(end_marker, start + len(marker))
     if end == -1:
-        raise AssertionError("Snapshot Manager select-all handler must be closed")
+        raise AssertionError(unclosed)
     return page[start : end + len(end_marker)]
+
+
+def extract_select_all_handler(page: str) -> str:
+    return extract_block(
+        page,
+        "byId('snapshot_manager_select_all').addEventListener('change', function () {",
+        "  });",
+        "Snapshot Manager must define a select-all change handler",
+        "Snapshot Manager select-all handler must be closed",
+    )
+
+
+def extract_refresh_state_function(page: str) -> str:
+    return extract_block(
+        page,
+        "function refreshSnapshotManagerState() {",
+        "  }\n\n  byId('snapshot_manager_refresh')",
+        "Snapshot Manager must define one periodic refresh function for datasets and the open drawer",
+        "Snapshot Manager periodic refresh function must be closed before event wiring",
+    )
 
 
 def main() -> int:
     page = PAGE.read_text()
     handler = extract_select_all_handler(page)
+    refresh_function = extract_refresh_state_function(page)
 
     assert_contains(
         page,
@@ -43,6 +62,36 @@ def main() -> int:
         handler,
         "delete currentSelection[checkbox.value];",
         "select-all must clear any stale selection state for disabled pending-delete rows",
+    )
+    assert_contains(
+        page,
+        "refreshTimer = window.setInterval(refreshSnapshotManagerState, 5000);",
+        "periodic refresh must use the combined Snapshot Manager state refresher",
+    )
+    assert_contains(
+        refresh_function,
+        "loadDatasetList();",
+        "periodic refresh must keep the dataset summary current",
+    )
+    assert_contains(
+        refresh_function,
+        "if (!currentDataset) {",
+        "periodic refresh must be safe when no drawer dataset is selected",
+    )
+    assert_contains(
+        refresh_function,
+        "datasetUrl + '?dataset=' + encodeURIComponent(currentDataset)",
+        "periodic refresh must reload the open drawer dataset instead of leaving Snapshot Manager details stale",
+    )
+    assert_contains(
+        refresh_function,
+        "renderSnapshotRows(currentDataset, payload.snapshots || [], payload.status || null);",
+        "periodic drawer refresh must repaint snapshot rows with fresh status/pending action data",
+    )
+    assert_contains(
+        refresh_function,
+        "refreshBulkCount();",
+        "periodic drawer refresh must keep selection counts synchronized after repainting rows",
     )
 
     print("PASS: Snapshot Manager UI static contracts")
