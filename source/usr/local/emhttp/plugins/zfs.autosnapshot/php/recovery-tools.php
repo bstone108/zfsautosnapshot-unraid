@@ -458,6 +458,45 @@ $csrfToken = zfsas_get_csrf_token();
       + '</div>';
   }
 
+  function performRecoveryAction(recoveryAction, dataset, path, candidateSha256) {
+    var confirmationMap = {
+      aggressive_read: 'READ',
+      restore_clean_copy: 'RESTORE',
+      delete_file: 'DELETE'
+    };
+    var token = confirmationMap[recoveryAction] || '';
+    var promptMessage = 'Type ' + token + ' to confirm this recovery action. These techniques are best-effort and may not work.';
+    var confirmation = window.prompt(promptMessage, '');
+    if (confirmation !== token) {
+      setStatus('Recovery action cancelled; exact confirmation was not entered.', true);
+      return;
+    }
+
+    var body = {
+      action: 'perform_recovery_action',
+      recovery_action: recoveryAction,
+      dataset: dataset,
+      path: path,
+      confirmation: confirmation
+    };
+    if (candidateSha256) {
+      body.candidate_sha256 = candidateSha256;
+    }
+
+    setStatus('Running confirmed recovery action...', false);
+    requestJsonPost(
+      actionUrl,
+      body,
+      function (payload) {
+        setStatus(payload.message || 'Recovery action completed.', false);
+        loadStatus();
+      },
+      function (error, payload) {
+        setStatus((payload && payload.error) ? payload.error : error.message, true);
+      }
+    );
+  }
+
   function renderPools(pools, poolError) {
     var tbody = byId('recovery_pool_rows');
     if (!tbody) {
@@ -550,12 +589,27 @@ $csrfToken = zfsas_get_csrf_token();
         status = option.message || 'Searching snapshots and ZFS send destinations for clean recovery candidates.';
       }
       var actionTypes = Array.isArray(option.actionTypes) ? option.actionTypes : [];
-      var actionHtml = '';
-      if (actionTypes.length > 0) {
-        actionTypes.forEach(function (actionType) {
-          actionHtml += '<div><button type="button" class="btn" disabled title="Recovery actions require a later explicit confirmation step.">' + escapeHtml(labels[actionType] || actionType) + '</button></div>';
+      var cleanCandidates = Array.isArray(option.cleanCandidates) ? option.cleanCandidates : [];
+      var candidateLabels = {
+        local_snapshot: 'local snapshot',
+        send_destination_snapshot: 'ZFS send destination'
+      };
+      var candidatesHtml = '';
+      if (cleanCandidates.length > 0) {
+        candidatesHtml += '<div class="zfsas-rt-help" style="margin-bottom:6px;">Readable candidates found:</div>';
+        cleanCandidates.forEach(function (candidate) {
+          candidatesHtml += '<div class="zfsas-rt-help">'
+            + escapeHtml(candidateLabels[candidate.type] || candidate.type || 'candidate')
+            + ' <code>' + escapeHtml(candidate.dataset || '') + '@' + escapeHtml(candidate.snapshot || '') + '</code> '
+            + '<button type="button" class="btn zfsas-recovery-action" data-recovery-action="restore_clean_copy" data-dataset="' + escapeHtml(option.dataset || '') + '" data-path="' + escapeHtml(option.path || '') + '" data-candidate-sha256="' + escapeHtml(candidate.sha256 || '') + '">Restore this copy</button>'
+            + '</div>';
         });
-      } else {
+      }
+      var actionHtml = '';
+      var canAct = state === 'ready' || state === 'no_candidates';
+      actionHtml += '<div><button type="button" class="btn zfsas-recovery-action" ' + (canAct ? '' : 'disabled ') + 'data-recovery-action="aggressive_read" data-dataset="' + escapeHtml(option.dataset || '') + '" data-path="' + escapeHtml(option.path || '') + '">' + escapeHtml(labels.aggressive_read) + '</button></div>';
+      actionHtml += '<div><button type="button" class="btn zfsas-recovery-action" ' + (canAct ? '' : 'disabled ') + 'data-recovery-action="delete_file" data-dataset="' + escapeHtml(option.dataset || '') + '" data-path="' + escapeHtml(option.path || '') + '">' + escapeHtml(labels.delete_file) + '</button></div>';
+      if (actionTypes.length === 0) {
         actionHtml = '<span class="zfsas-rt-help">No candidate actions yet.</span>';
       }
       html += '<tr>';
@@ -563,7 +617,7 @@ $csrfToken = zfsas_get_csrf_token();
       html += '<td><code>' + escapeHtml(option.path || '') + '</code></td>';
       html += '<td>' + escapeHtml(option.source || '') + '</td>';
       html += '<td>' + escapeHtml(status) + '</td>';
-      html += '<td>' + actionHtml + '<div class="zfsas-rt-help" style="margin-top:4px;">No restore or delete action runs automatically; select an option and confirm it before data changes.</div></td>';
+      html += '<td>' + candidatesHtml + actionHtml + '<div class="zfsas-rt-help" style="margin-top:4px;">No restore or delete action runs automatically; select an option and confirm it before data changes.</div></td>';
       html += '</tr>';
     });
     tbody.innerHTML = html;
@@ -618,6 +672,19 @@ $csrfToken = zfsas_get_csrf_token();
   }
 
   byId('recovery_refresh').addEventListener('click', loadStatus);
+  document.addEventListener('click', function (event) {
+    var button = event.target && event.target.closest ? event.target.closest('.zfsas-recovery-action') : null;
+    if (!button || button.disabled) {
+      return;
+    }
+    event.preventDefault();
+    performRecoveryAction(
+      button.getAttribute('data-recovery-action') || '',
+      button.getAttribute('data-dataset') || '',
+      button.getAttribute('data-path') || '',
+      button.getAttribute('data-candidate-sha256') || ''
+    );
+  });
   byId('recovery_start_scan').addEventListener('click', function () {
     var dataset = (byId('recovery_dataset').value || '').trim();
     if (dataset === '') {

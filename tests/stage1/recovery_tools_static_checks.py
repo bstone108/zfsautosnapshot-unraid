@@ -56,6 +56,41 @@ def main() -> int:
         re.S,
     )
     require(
+        page,
+        r'cleanCandidates.*?local snapshot.*?ZFS send destination',
+        "Recovery option rows must render readable local snapshot and ZFS send destination candidates when discovery finds them.",
+        re.S,
+    )
+    require(
+        page,
+        r'function\s+performRecoveryAction\s*\(.*?confirmation.*?perform_recovery_action',
+        "Recovery Tools UI must submit guarded recovery actions only through an explicit confirmation flow.",
+        re.S,
+    )
+    require(
+        page,
+        r'restore_clean_copy.*?candidate\.sha256',
+        "Recovery Tools UI must identify selected clean-copy candidates by discovered sha256 when requesting restore.",
+        re.S,
+    )
+    require(
+        helpers,
+        r'function\s+zfsas_recovery_perform_guarded_action\s*\(',
+        "Recovery helpers must expose a guarded backend action dispatcher for confirmed repair actions.",
+    )
+    require(
+        helpers,
+        r'READ.*?RESTORE.*?DELETE',
+        "Guarded recovery actions must require explicit action-specific confirmation tokens.",
+        re.S,
+    )
+    require(
+        helpers,
+        r'cleanCandidates.*?candidateSha256',
+        "Clean-copy restore must validate the selected candidate against discovered candidates for the affected file.",
+        re.S,
+    )
+    require(
         helpers,
         r'function\s+zfsas_recovery_option_candidates\s*\(',
         "Recovery helpers must expose a recovery option candidate inventory function for the status endpoint.",
