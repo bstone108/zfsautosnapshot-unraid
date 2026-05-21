@@ -146,6 +146,14 @@ if ($action === 'take_snapshot') {
         return ((int) ($a['createdEpoch'] ?? 0)) <=> ((int) ($b['createdEpoch'] ?? 0));
     });
 
+    $skippedIneligible = 0;
+    $ordered = zfsas_sm_actionable_snapshot_rows($action, $ordered, $skippedIneligible);
+    if (count($ordered) === 0) {
+        zfsas_sm_json_error('No selected snapshots are eligible for ' . strtolower(zfsas_sm_action_label($action)) . '. Refresh the snapshot list and try again.', 409, [
+            'skippedCount' => $skippedIneligible,
+        ]);
+    }
+
     if ($action === 'send') {
         if (count($ordered) !== 1) {
             zfsas_sm_json_error('Send works on one snapshot at a time.');

@@ -377,6 +377,39 @@ function zfsas_sm_snapshot_hold_tags($snapshot)
     return array_values(array_unique($tags));
 }
 
+function zfsas_sm_actionable_snapshot_rows($action, array $rows, &$skippedCount = 0)
+{
+    $skippedCount = 0;
+    $action = (string) $action;
+    $filtered = [];
+
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            $skippedCount++;
+            continue;
+        }
+
+        if (!empty($row['pendingDelete'])) {
+            $skippedCount++;
+            continue;
+        }
+
+        if ($action === 'hold' && !empty($row['held'])) {
+            $skippedCount++;
+            continue;
+        }
+
+        if ($action === 'release' && empty($row['held'])) {
+            $skippedCount++;
+            continue;
+        }
+
+        $filtered[] = $row;
+    }
+
+    return $filtered;
+}
+
 function zfsas_sm_dataset_snapshots($dataset, &$error = null)
 {
     $error = null;
