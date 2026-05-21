@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.21.t01 (Testing Branch Only)
+
+- Improved Snapshot Manager queue awareness and drawer refresh behavior for testing. Pending snapshot deletes now remain visible with queued/running state, disabled queued rows are kept out of bulk selection, hold/release actions filter ineligible snapshots on both the page and server, and accepted action feedback now stays visible while the drawer refreshes.
+
 ### 2026.05.19.t04 (Testing Branch Only)
 
 - Expanded Repair Tools recovery options so affected files can discover readable local snapshot and ZFS send-destination copies, then run guarded user-confirmed actions for aggressive read, restoring a selected clean copy, or deleting an affected file. Restore/delete actions require exact confirmation text and never run automatically.
