@@ -53,11 +53,33 @@ def extract_actionable_selected_function(page: str) -> str:
     )
 
 
+def extract_request_action_function(page: str) -> str:
+    return extract_block(
+        page,
+        "function requestAction(body, onSuccess) {",
+        "  }\n\n  function buildDefaultSnapshotName()",
+        "Snapshot Manager must centralize action request handling",
+        "Snapshot Manager action request handler must be closed before buildDefaultSnapshotName",
+    )
+
+
+def extract_reload_current_dataset_function(page: str) -> str:
+    return extract_block(
+        page,
+        "function reloadCurrentDatasetDetails(errorPrefix) {",
+        "  }\n\n  function refreshSnapshotManagerState()",
+        "Snapshot Manager must define a drawer detail refresh helper",
+        "Snapshot Manager drawer detail refresh helper must be closed before periodic refresh",
+    )
+
+
 def main() -> int:
     page = PAGE.read_text()
     handler = extract_select_all_handler(page)
     refresh_function = extract_refresh_state_function(page)
     actionable_function = extract_actionable_selected_function(page)
+    request_action_function = extract_request_action_function(page)
+    reload_current_dataset_function = extract_reload_current_dataset_function(page)
 
     assert_contains(
         page,
@@ -91,16 +113,21 @@ def main() -> int:
     )
     assert_contains(
         refresh_function,
-        "datasetUrl + '?dataset=' + encodeURIComponent(currentDataset)",
+        "reloadCurrentDatasetDetails();",
         "periodic refresh must reload the open drawer dataset instead of leaving Snapshot Manager details stale",
     )
     assert_contains(
-        refresh_function,
+        reload_current_dataset_function,
+        "datasetUrl + '?dataset=' + encodeURIComponent(currentDataset)",
+        "drawer detail refresh must call the dataset endpoint for the current drawer dataset",
+    )
+    assert_contains(
+        reload_current_dataset_function,
         "renderSnapshotRows(currentDataset, payload.snapshots || [], payload.status || null);",
         "periodic drawer refresh must repaint snapshot rows with fresh status/pending action data",
     )
     assert_contains(
-        refresh_function,
+        reload_current_dataset_function,
         "refreshBulkCount();",
         "periodic drawer refresh must keep selection counts synchronized after repainting rows",
     )
@@ -119,6 +146,20 @@ def main() -> int:
         "var snapshots = actionableSelectedSnapshots(action);",
         "bulk actions must use the action-aware filtered selection list",
     )
+    assert_contains(
+        page,
+        "function reloadCurrentDatasetDetails(errorPrefix) {",
+        "Snapshot Manager must have a drawer refresh path that preserves action feedback after an accepted operation",
+    )
+    assert_contains(
+        request_action_function,
+        "reloadCurrentDatasetDetails();",
+        "action success refresh must preserve the accepted-operation feedback instead of clearing it via loadDataset",
+    )
+    if "loadDataset(currentDataset);" in request_action_function:
+        raise AssertionError(
+            "action success refresh must not call loadDataset(currentDataset), which clears drawer feedback immediately after showing success"
+        )
 
     print("PASS: Snapshot Manager UI static contracts")
     return 0

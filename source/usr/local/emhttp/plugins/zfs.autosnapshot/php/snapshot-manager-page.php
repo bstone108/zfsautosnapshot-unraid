@@ -888,20 +888,10 @@ $csrfToken = zfsas_get_csrf_token();
     refreshBulkCount();
     renderFeedback('snapshot_manager_drawer_feedback', [], false);
     openDrawer();
-    requestJson(
-      datasetUrl + '?dataset=' + encodeURIComponent(dataset) + '&_=' + Date.now(),
-      function (payload) {
-        renderSnapshotRows(dataset, payload.snapshots || [], payload.status || null);
-        refreshBulkCount();
-      },
-      function (error) {
-        renderFeedback('snapshot_manager_drawer_feedback', ['Unable to load snapshots for ' + dataset + ': ' + error.message], true);
-      }
-    );
+    reloadCurrentDatasetDetails('Unable to load snapshots for ' + dataset + ': ');
   }
 
-  function refreshSnapshotManagerState() {
-    loadDatasetList();
+  function reloadCurrentDatasetDetails(errorPrefix) {
     if (!currentDataset) {
       return;
     }
@@ -912,9 +902,17 @@ $csrfToken = zfsas_get_csrf_token();
         refreshBulkCount();
       },
       function (error) {
-        renderFeedback('snapshot_manager_drawer_feedback', ['Unable to refresh snapshots for ' + currentDataset + ': ' + error.message], true);
+        renderFeedback('snapshot_manager_drawer_feedback', [(errorPrefix || 'Unable to refresh snapshots for ' + currentDataset + ': ') + error.message], true);
       }
     );
+  }
+
+  function refreshSnapshotManagerState() {
+    loadDatasetList();
+    if (!currentDataset) {
+      return;
+    }
+    reloadCurrentDatasetDetails();
   }
 
   function requestAction(body, onSuccess) {
@@ -926,7 +924,7 @@ $csrfToken = zfsas_get_csrf_token();
         loadDatasetList();
         if (currentDataset) {
           window.setTimeout(function () {
-            loadDataset(currentDataset);
+            reloadCurrentDatasetDetails();
           }, 250);
         }
         if (typeof onSuccess === 'function') {
