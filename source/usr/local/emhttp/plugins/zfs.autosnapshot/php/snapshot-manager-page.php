@@ -747,6 +747,22 @@ $csrfToken = zfsas_get_csrf_token();
     });
   }
 
+  function actionableSelectedSnapshots(action) {
+    return selectedSnapshots().filter(function (snapshot) {
+      var row = currentSnapshotMap[snapshot] || null;
+      if (!row || row.pendingDelete) {
+        return false;
+      }
+      if (action === 'hold' && row.held) {
+        return false;
+      }
+      if (action === 'release' && !row.held) {
+        return false;
+      }
+      return true;
+    });
+  }
+
   function refreshBulkCount() {
     var node = byId('snapshot_manager_bulk_count');
     if (!node) {
@@ -937,9 +953,16 @@ $csrfToken = zfsas_get_csrf_token();
       return;
     }
 
-    var snapshots = selectedSnapshots();
-    if (snapshots.length === 0) {
+    var selected = selectedSnapshots();
+    if (selected.length === 0) {
       renderFeedback('snapshot_manager_drawer_feedback', ['Select at least one snapshot first.'], true);
+      return;
+    }
+
+    var snapshots = actionableSelectedSnapshots(action);
+    if (snapshots.length === 0) {
+      var actionLabel = action === 'hold' ? 'hold' : (action === 'release' ? 'release' : action);
+      renderFeedback('snapshot_manager_drawer_feedback', ['No selected snapshots are eligible to ' + actionLabel + '.'], true);
       return;
     }
 

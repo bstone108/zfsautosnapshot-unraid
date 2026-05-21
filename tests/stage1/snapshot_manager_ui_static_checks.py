@@ -43,10 +43,21 @@ def extract_refresh_state_function(page: str) -> str:
     )
 
 
+def extract_actionable_selected_function(page: str) -> str:
+    return extract_block(
+        page,
+        "function actionableSelectedSnapshots(action) {",
+        "  }\n\n  function refreshBulkCount()",
+        "Snapshot Manager must filter selected snapshots by the requested bulk action",
+        "Snapshot Manager actionable selected snapshot filter must be closed before refreshBulkCount",
+    )
+
+
 def main() -> int:
     page = PAGE.read_text()
     handler = extract_select_all_handler(page)
     refresh_function = extract_refresh_state_function(page)
+    actionable_function = extract_actionable_selected_function(page)
 
     assert_contains(
         page,
@@ -92,6 +103,21 @@ def main() -> int:
         refresh_function,
         "refreshBulkCount();",
         "periodic drawer refresh must keep selection counts synchronized after repainting rows",
+    )
+    assert_contains(
+        actionable_function,
+        "if (action === 'hold' && row.held) {",
+        "bulk Hold Selected must skip snapshots that are already held instead of queueing duplicate zfs hold work",
+    )
+    assert_contains(
+        actionable_function,
+        "if (action === 'release' && !row.held) {",
+        "bulk Release Selected must skip snapshots that are not held instead of queueing no-op releases",
+    )
+    assert_contains(
+        page,
+        "var snapshots = actionableSelectedSnapshots(action);",
+        "bulk actions must use the action-aware filtered selection list",
     )
 
     print("PASS: Snapshot Manager UI static contracts")
