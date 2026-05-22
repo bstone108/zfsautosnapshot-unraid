@@ -66,6 +66,41 @@ def main() -> int:
     )
     assert_contains(
         text,
+        "SEND_SSH_HOST",
+        "send settings must persist SSH receiver host configuration before enabling SSH transport",
+    )
+    assert_contains(
+        text,
+        "SEND_SSH_PORT",
+        "send settings must persist SSH receiver port configuration before enabling SSH transport",
+    )
+    assert_contains(
+        text,
+        "SEND_SSH_USER",
+        "send settings must persist SSH receiver user configuration before enabling SSH transport",
+    )
+    assert_contains(
+        text,
+        "SEND_SSH_KEY_PATH",
+        "send settings must persist SSH key path configuration without storing raw key material",
+    )
+    assert_contains(
+        settings,
+        'name="send_ssh_host"',
+        "send settings UI must expose an SSH host field near network transport controls",
+    )
+    assert_contains(
+        settings,
+        'name="send_ssh_key_path"',
+        "send settings UI must expose an SSH key path field rather than a raw private-key/password field",
+    )
+    assert_contains(
+        example,
+        "SEND_SSH_HOST",
+        "example send config must document SSH receiver settings",
+    )
+    assert_contains(
+        text,
         "function zfsas_send_write_config_atomically",
         "send settings must write zfs_send.conf through an atomic temp-file + rename helper",
     )

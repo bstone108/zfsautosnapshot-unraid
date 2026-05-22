@@ -52,9 +52,59 @@ function zfsas_send_transport_options()
 {
     return [
         'local' => 'Local pool/dataset',
-        'ssh' => 'SSH (network, not enabled yet)',
+        'ssh' => 'SSH (key/preconfigured auth)',
         'spiped' => 'spiped (network, not enabled yet)',
     ];
+}
+
+function zfsas_send_normalize_ssh_host($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '';
+    }
+
+    return (preg_match('/^[A-Za-z0-9._:-]+$/', $value) === 1) ? $value : null;
+}
+
+function zfsas_send_normalize_ssh_user($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return 'root';
+    }
+
+    return (preg_match('/^[A-Za-z0-9._-]+$/', $value) === 1) ? $value : null;
+}
+
+function zfsas_send_normalize_ssh_port($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '22';
+    }
+    if (preg_match('/^[0-9]+$/', $value) !== 1) {
+        return null;
+    }
+
+    $port = (int) $value;
+    return ($port >= 1 && $port <= 65535) ? (string) $port : null;
+}
+
+function zfsas_send_normalize_ssh_key_path($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '';
+    }
+    if ($value[0] !== '/') {
+        return null;
+    }
+    if (strpos($value, "\0") !== false || strpos($value, "\n") !== false || strpos($value, "\r") !== false) {
+        return null;
+    }
+
+    return $value;
 }
 
 function zfsas_send_legacy_frequency_upgrades()
@@ -232,6 +282,10 @@ function zfsas_send_defaults()
         'SEND_KEEP_ALL_FOR_DAYS' => '14',
         'SEND_KEEP_DAILY_UNTIL_DAYS' => '30',
         'SEND_KEEP_WEEKLY_UNTIL_DAYS' => '183',
+        'SEND_SSH_HOST' => '',
+        'SEND_SSH_PORT' => '22',
+        'SEND_SSH_USER' => 'root',
+        'SEND_SSH_KEY_PATH' => '',
         'SEND_JOBS' => '',
     ];
 }
@@ -632,6 +686,12 @@ function zfsas_send_render_config($config)
     $lines[] = 'SEND_KEEP_DAILY_UNTIL_DAYS=' . zfsas_send_normalize_retention_days($config['SEND_KEEP_DAILY_UNTIL_DAYS'], 30);
     $lines[] = 'SEND_KEEP_WEEKLY_UNTIL_DAYS=' . zfsas_send_normalize_retention_days($config['SEND_KEEP_WEEKLY_UNTIL_DAYS'], 183);
     $lines[] = '';
+    $lines[] = '# SSH transport receiver settings. SSH uses keys or other preconfigured non-interactive auth; raw passwords are not stored here.';
+    $lines[] = 'SEND_SSH_HOST=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_host($config['SEND_SSH_HOST'] ?? '') ?? '');
+    $lines[] = 'SEND_SSH_PORT=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_port($config['SEND_SSH_PORT'] ?? '22') ?? '22');
+    $lines[] = 'SEND_SSH_USER=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_user($config['SEND_SSH_USER'] ?? 'root') ?? 'root');
+    $lines[] = 'SEND_SSH_KEY_PATH=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_key_path($config['SEND_SSH_KEY_PATH'] ?? '') ?? '');
+    $lines[] = '';
     $lines[] = '# Semicolon-separated jobs encoded as:';
     $lines[] = '#   jobid|source|destination|frequency|threshold|children|transport';
     $lines[] = '# frequency values: 6h, 12h, 1d, 7d';
@@ -679,6 +739,10 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
     $submitted['SEND_KEEP_ALL_FOR_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_all_for_days'] ?? $submitted['SEND_KEEP_ALL_FOR_DAYS'], 14);
     $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_daily_until_days'] ?? $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'], 30);
     $submitted['SEND_KEEP_WEEKLY_UNTIL_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_weekly_until_days'] ?? $submitted['SEND_KEEP_WEEKLY_UNTIL_DAYS'], 183);
+    $submitted['SEND_SSH_HOST'] = zfsas_send_normalize_ssh_host($post['send_ssh_host'] ?? ($submitted['SEND_SSH_HOST'] ?? ''));
+    $submitted['SEND_SSH_PORT'] = zfsas_send_normalize_ssh_port($post['send_ssh_port'] ?? ($submitted['SEND_SSH_PORT'] ?? '22'));
+    $submitted['SEND_SSH_USER'] = zfsas_send_normalize_ssh_user($post['send_ssh_user'] ?? ($submitted['SEND_SSH_USER'] ?? 'root'));
+    $submitted['SEND_SSH_KEY_PATH'] = zfsas_send_normalize_ssh_key_path($post['send_ssh_key_path'] ?? ($submitted['SEND_SSH_KEY_PATH'] ?? ''));
     $submittedJobs = zfsas_send_collect_submitted_jobs($post, $errors);
 
     if ($submitted['SEND_SNAPSHOT_PREFIX'] === '') {
@@ -697,6 +761,23 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
         || (int) $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'] >= (int) $submitted['SEND_KEEP_WEEKLY_UNTIL_DAYS']
     ) {
         $errors[] = 'Send retention order is invalid. Keep all days must be less than keep daily until, and keep daily until must be less than keep weekly until.';
+    }
+
+    if ($submitted['SEND_SSH_HOST'] === null) {
+        $errors[] = 'SSH host may contain only letters, numbers, dot, dash, underscore, colon, and IPv6 brackets are not required.';
+        $submitted['SEND_SSH_HOST'] = zfsas_send_trim($post['send_ssh_host'] ?? '');
+    }
+    if ($submitted['SEND_SSH_PORT'] === null) {
+        $errors[] = 'SSH port must be a number from 1 to 65535.';
+        $submitted['SEND_SSH_PORT'] = zfsas_send_trim($post['send_ssh_port'] ?? '');
+    }
+    if ($submitted['SEND_SSH_USER'] === null) {
+        $errors[] = 'SSH user may contain only letters, numbers, dot, dash, and underscore.';
+        $submitted['SEND_SSH_USER'] = zfsas_send_trim($post['send_ssh_user'] ?? '');
+    }
+    if ($submitted['SEND_SSH_KEY_PATH'] === null) {
+        $errors[] = 'SSH key path must be an absolute local path. Raw key contents and passwords are not stored in this config.';
+        $submitted['SEND_SSH_KEY_PATH'] = zfsas_send_trim($post['send_ssh_key_path'] ?? '');
     }
 
     if (empty($errors)) {

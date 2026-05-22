@@ -49,6 +49,26 @@ def main() -> int:
         "Unsupported ZFS send transport",
         "send pipeline must fail closed for unknown or not-yet-implemented network transports",
     )
+    assert_contains(
+        ops_lib,
+        "SEND_SSH_HOST",
+        "queue library must load SSH receiver host configuration before SSH transport can run",
+    )
+    assert_contains(
+        ops_lib,
+        "build_ssh_receive_command()",
+        "queue library must build SSH receive commands in one audited helper",
+    )
+    assert_contains(
+        ops_lib,
+        "ssh -o BatchMode=yes",
+        "SSH transport must default to non-interactive key/preconfigured authentication, not raw password prompts",
+    )
+    assert_contains(
+        ops_lib,
+        "zfs receive -uF --",
+        "SSH receive helper must pass remote destination to zfs receive after -- for safer dataset handling",
+    )
 
     print("PASS: send worker helper static contracts")
     return 0

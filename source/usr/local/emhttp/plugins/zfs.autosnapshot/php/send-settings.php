@@ -513,6 +513,32 @@ if ($isPostRequest) {
         </div>
       </div>
 
+      <div class="zfsas-send-card" style="margin-top: 14px;">
+        <h4 style="margin-top:0;">SSH receiver settings</h4>
+        <div class="zfsas-send-help">
+          SSH transport uses keys or other preconfigured non-interactive authentication. This page stores connection metadata and an optional local private-key path only; it does not store raw passwords or private-key contents.
+        </div>
+        <div class="zfsas-send-retention-grid" style="margin-top: 12px;">
+          <div class="zfsas-send-field">
+            <label for="send_ssh_host">SSH host</label>
+            <input id="send_ssh_host" name="send_ssh_host" class="zfsas-send-input" value="<?php echo zfsas_send_h($config['SEND_SSH_HOST'] ?? ''); ?>" placeholder="backup.example.lan">
+          </div>
+          <div class="zfsas-send-field">
+            <label for="send_ssh_port">SSH port</label>
+            <input id="send_ssh_port" name="send_ssh_port" class="zfsas-send-input" type="number" min="1" max="65535" value="<?php echo zfsas_send_h($config['SEND_SSH_PORT'] ?? '22'); ?>">
+          </div>
+          <div class="zfsas-send-field">
+            <label for="send_ssh_user">SSH user</label>
+            <input id="send_ssh_user" name="send_ssh_user" class="zfsas-send-input" value="<?php echo zfsas_send_h($config['SEND_SSH_USER'] ?? 'root'); ?>" placeholder="root">
+          </div>
+        </div>
+        <div class="zfsas-send-field" style="margin-top: 12px;">
+          <label for="send_ssh_key_path">SSH private key path</label>
+          <input id="send_ssh_key_path" name="send_ssh_key_path" class="zfsas-send-input" value="<?php echo zfsas_send_h($config['SEND_SSH_KEY_PATH'] ?? ''); ?>" placeholder="/boot/config/ssh/root_id_ed25519">
+          <div class="zfsas-send-help">Leave blank to use the system SSH agent/default keys. Prefer a key restricted to the receiver and keep file permissions tight.</div>
+        </div>
+      </div>
+
       <?php if (count($formJobs) === 0) : ?>
         <div class="zfsas-send-empty">No ZFS send jobs are configured yet. Add one below, then save.</div>
       <?php endif; ?>

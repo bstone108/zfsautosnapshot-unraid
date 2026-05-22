@@ -51,6 +51,8 @@ DEFAULT_SEND_PREP_EXTRA_WORKERS="16"
 DEFAULT_SEND_KEEP_ALL_FOR_DAYS="14"
 DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS="30"
 DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS="183"
+DEFAULT_SEND_SSH_PORT="22"
+DEFAULT_SEND_SSH_USER="root"
 DEFAULT_RETRY_DELAYS=(60 300 900)
 POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS:-3}"
 POST_DELETE_RECHECK_INTERVAL_SECONDS="${POST_DELETE_RECHECK_INTERVAL_SECONDS:-1}"
@@ -63,6 +65,10 @@ SEND_PREP_EXTRA_WORKERS="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
 SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
 SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
 SEND_KEEP_WEEKLY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS"
+SEND_SSH_HOST=""
+SEND_SSH_PORT="$DEFAULT_SEND_SSH_PORT"
+SEND_SSH_USER="$DEFAULT_SEND_SSH_USER"
+SEND_SSH_KEY_PATH=""
 SEND_JOBS=""
 
 SCHEDULE_JOB_IDS=()
@@ -715,6 +721,10 @@ load_send_config() {
   SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
   SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
   SEND_KEEP_WEEKLY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS"
+  SEND_SSH_HOST=""
+  SEND_SSH_PORT="$DEFAULT_SEND_SSH_PORT"
+  SEND_SSH_USER="$DEFAULT_SEND_SSH_USER"
+  SEND_SSH_KEY_PATH=""
   SEND_JOBS=""
 
   [[ -f "$SEND_CONFIG_FILE" ]] || return 0
@@ -728,7 +738,7 @@ load_send_config() {
       raw="${BASH_REMATCH[2]}"
       value="$(parse_config_value "$raw")"
       case "$key" in
-        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_JOBS)
+        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_SSH_HOST|SEND_SSH_PORT|SEND_SSH_USER|SEND_SSH_KEY_PATH|SEND_JOBS)
           printf -v "$key" '%s' "$value"
           ;;
       esac
@@ -2659,6 +2669,64 @@ send_transport_for_current_job() {
   return 1
 }
 
+is_valid_ssh_host() {
+  [[ "$1" =~ ^[A-Za-z0-9._:-]+$ ]]
+}
+
+is_valid_ssh_user() {
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+is_valid_ssh_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+}
+
+is_valid_ssh_key_path() {
+  local key_path="$1"
+  [[ -z "$key_path" ]] && return 0
+  [[ "$key_path" == /* ]] || return 1
+  [[ "$key_path" != *$'\n'* && "$key_path" != *$'\r'* && "$key_path" != *$'\0'* ]]
+}
+
+shell_quote_word() {
+  printf '%q' "$1"
+}
+
+build_ssh_receive_command() {
+  local destination="$1"
+  local result_var="$2"
+  local ssh_host="$SEND_SSH_HOST"
+  local ssh_port="${SEND_SSH_PORT:-$DEFAULT_SEND_SSH_PORT}"
+  local ssh_user="${SEND_SSH_USER:-$DEFAULT_SEND_SSH_USER}"
+  local ssh_key_path="$SEND_SSH_KEY_PATH"
+  local remote_target remote_receive command
+  local -a ssh_parts=(ssh -o BatchMode=yes -o PasswordAuthentication=no)
+
+  printf -v "$result_var" ''
+  is_valid_dataset_name "$destination" || return 1
+  [[ -n "$ssh_host" ]] || return 1
+  is_valid_ssh_host "$ssh_host" || return 1
+  is_valid_ssh_user "$ssh_user" || return 1
+  is_valid_ssh_port "$ssh_port" || return 1
+  is_valid_ssh_key_path "$ssh_key_path" || return 1
+
+  ssh_parts+=(-p "$ssh_port")
+  if [[ -n "$ssh_key_path" ]]; then
+    ssh_parts+=(-i "$ssh_key_path")
+  fi
+  remote_target="${ssh_user}@${ssh_host}"
+  remote_receive="zfs receive -uF -- $(shell_quote_word "$destination")"
+
+  command=""
+  local part
+  for part in "${ssh_parts[@]}"; do
+    command+="$(shell_quote_word "$part") "
+  done
+  command+="$(shell_quote_word "$remote_target") $(shell_quote_word "$remote_receive")"
+  printf -v "$result_var" '%s' "$command"
+  return 0
+}
+
 run_pipeline_with_status() {
   local description="$1"
   local base_snapshot="$2"
@@ -2693,6 +2761,16 @@ run_pipeline_with_status() {
     log "Refusing send pipeline for invalid transport: $send_transport"
     return 1
   }
+  if [[ "$send_transport" == "ssh" ]]; then
+    local ssh_receive_command
+    if ! build_ssh_receive_command "$destination" ssh_receive_command; then
+      log "Unsupported ZFS send transport '$send_transport' requested for $description; SSH receiver settings are incomplete or invalid."
+      return 1
+    fi
+    log "Unsupported ZFS send transport '$send_transport' requested for $description; SSH receive command is valid but remote snapshot discovery/cleanup plumbing is not enabled yet."
+    zfsas_send_debug_marker "pipeline_ssh_deferred snapshot=${snapshot} destination=${destination} ssh_receive_command=${ssh_receive_command}"
+    return 1
+  fi
   if [[ "$send_transport" != "local" ]]; then
     log "Unsupported ZFS send transport '$send_transport' requested for $description; receiver plumbing is not configured yet."
     return 1

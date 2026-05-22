@@ -26,6 +26,15 @@ SEND_KEEP_ALL_FOR_DAYS=14
 SEND_KEEP_DAILY_UNTIL_DAYS=30
 SEND_KEEP_WEEKLY_UNTIL_DAYS=183
 
+# SEND_SSH_HOST / SEND_SSH_PORT / SEND_SSH_USER / SEND_SSH_KEY_PATH
+# SSH transport receiver connection settings. SSH sends use keys or other
+# preconfigured non-interactive auth; this config stores only connection metadata
+# and an optional local key path, not raw passwords or private-key contents.
+SEND_SSH_HOST=""
+SEND_SSH_PORT="22"
+SEND_SSH_USER="root"
+SEND_SSH_KEY_PATH=""
+
 # SEND_JOBS
 # Semicolon-separated entries encoded as:
 #   jobid|source|destination|frequency|threshold|children|transport
