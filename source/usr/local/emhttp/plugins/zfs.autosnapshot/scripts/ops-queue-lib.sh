@@ -2692,18 +2692,18 @@ shell_quote_word() {
   printf '%q' "$1"
 }
 
-build_ssh_receive_command() {
-  local destination="$1"
+build_ssh_zfs_command() {
+  local remote_zfs_command="$1"
   local result_var="$2"
   local ssh_host="$SEND_SSH_HOST"
   local ssh_port="${SEND_SSH_PORT:-$DEFAULT_SEND_SSH_PORT}"
   local ssh_user="${SEND_SSH_USER:-$DEFAULT_SEND_SSH_USER}"
   local ssh_key_path="$SEND_SSH_KEY_PATH"
-  local remote_target remote_receive command
+  local remote_target command part
   local -a ssh_parts=(ssh -o BatchMode=yes -o PasswordAuthentication=no)
 
   printf -v "$result_var" ''
-  is_valid_dataset_name "$destination" || return 1
+  [[ -n "$remote_zfs_command" ]] || return 1
   [[ -n "$ssh_host" ]] || return 1
   is_valid_ssh_host "$ssh_host" || return 1
   is_valid_ssh_user "$ssh_user" || return 1
@@ -2715,16 +2715,58 @@ build_ssh_receive_command() {
     ssh_parts+=(-i "$ssh_key_path")
   fi
   remote_target="${ssh_user}@${ssh_host}"
-  remote_receive="zfs receive -uF -- $(shell_quote_word "$destination")"
 
   command=""
-  local part
   for part in "${ssh_parts[@]}"; do
     command+="$(shell_quote_word "$part") "
   done
-  command+="$(shell_quote_word "$remote_target") $(shell_quote_word "$remote_receive")"
+  command+="$(shell_quote_word "$remote_target") $(shell_quote_word "$remote_zfs_command")"
   printf -v "$result_var" '%s' "$command"
   return 0
+}
+
+build_ssh_receive_command() {
+  local destination="$1"
+  local result_var="$2"
+  local remote_receive
+
+  printf -v "$result_var" ''
+  is_valid_dataset_name "$destination" || return 1
+  remote_receive="zfs receive -uF -- $(shell_quote_word "$destination")"
+  build_ssh_zfs_command "$remote_receive" "$result_var"
+}
+
+ssh_dataset_exists() {
+  local dataset="$1"
+  local command
+  is_valid_dataset_name "$dataset" || return 1
+  build_ssh_zfs_command "zfs list -H -o name -- $(shell_quote_word "$dataset") >/dev/null" command || return 1
+  eval "$command" >/dev/null 2>&1
+}
+
+ssh_snapshot_exists() {
+  local snapshot="$1"
+  local command
+  is_valid_snapshot_name "$snapshot" || return 1
+  build_ssh_zfs_command "zfs list -H -o name -t snapshot -- $(shell_quote_word "$snapshot") >/dev/null" command || return 1
+  eval "$command" >/dev/null 2>&1
+}
+
+ssh_dataset_has_any_snapshots() {
+  local dataset="$1"
+  local output command
+  is_valid_dataset_name "$dataset" || return 1
+  build_ssh_zfs_command "zfs list -H -t snapshot -o name -r -- $(shell_quote_word "$dataset") 2>/dev/null" command || return 1
+  output="$(eval "$command" 2>/dev/null || true)"
+  [[ -n "$output" ]]
+}
+
+ssh_snapshot_inventory() {
+  local dataset="$1"
+  local command
+  is_valid_dataset_name "$dataset" || return 1
+  build_ssh_zfs_command "zfs list -H -p -s creation -t snapshot -o name,creation -d 1 -- $(shell_quote_word "$dataset") 2>/dev/null" command || return 1
+  eval "$command" 2>/dev/null || true
 }
 
 run_pipeline_with_status() {
@@ -2741,6 +2783,7 @@ run_pipeline_with_status() {
   local receive_rc=0
   local progress_supported=0
   local send_transport
+  local ssh_receive_command=""
 
   is_valid_snapshot_name "$snapshot" || {
     log "Refusing pipeline for invalid snapshot name: $snapshot"
@@ -2762,16 +2805,12 @@ run_pipeline_with_status() {
     return 1
   }
   if [[ "$send_transport" == "ssh" ]]; then
-    local ssh_receive_command
     if ! build_ssh_receive_command "$destination" ssh_receive_command; then
       log "Unsupported ZFS send transport '$send_transport' requested for $description; SSH receiver settings are incomplete or invalid."
       return 1
     fi
-    log "Unsupported ZFS send transport '$send_transport' requested for $description; SSH receive command is valid but remote snapshot discovery/cleanup plumbing is not enabled yet."
-    zfsas_send_debug_marker "pipeline_ssh_deferred snapshot=${snapshot} destination=${destination} ssh_receive_command=${ssh_receive_command}"
-    return 1
   fi
-  if [[ "$send_transport" != "local" ]]; then
+  if [[ "$send_transport" != "local" && "$send_transport" != "ssh" ]]; then
     log "Unsupported ZFS send transport '$send_transport' requested for $description; receiver plumbing is not configured yet."
     return 1
   fi
@@ -2784,13 +2823,21 @@ run_pipeline_with_status() {
 
   if [[ -n "$base_snapshot" ]]; then
     if (( progress_supported == 1 )); then
-      zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | zfs receive -uF "$destination"
+      if [[ "$send_transport" == "ssh" ]]; then
+        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$ssh_receive_command"
+      else
+        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | zfs receive -uF "$destination"
+      fi
       pipeline_rc=$?
       send_rc=${PIPESTATUS[0]:-0}
       meter_rc=${PIPESTATUS[1]:-0}
       receive_rc=${PIPESTATUS[2]:-0}
     else
-      zfs send -I "$base_snapshot" "$snapshot" | zfs receive -uF "$destination"
+      if [[ "$send_transport" == "ssh" ]]; then
+        zfs send -I "$base_snapshot" "$snapshot" | eval "$ssh_receive_command"
+      else
+        zfs send -I "$base_snapshot" "$snapshot" | zfs receive -uF "$destination"
+      fi
       pipeline_rc=$?
       send_rc=${PIPESTATUS[0]:-0}
       receive_rc=${PIPESTATUS[1]:-0}
@@ -2802,13 +2849,21 @@ run_pipeline_with_status() {
     fi
   else
     if (( progress_supported == 1 )); then
-      zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | zfs receive -uF "$destination"
+      if [[ "$send_transport" == "ssh" ]]; then
+        zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$ssh_receive_command"
+      else
+        zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | zfs receive -uF "$destination"
+      fi
       pipeline_rc=$?
       send_rc=${PIPESTATUS[0]:-0}
       meter_rc=${PIPESTATUS[1]:-0}
       receive_rc=${PIPESTATUS[2]:-0}
     else
-      zfs send "$snapshot" | zfs receive -uF "$destination"
+      if [[ "$send_transport" == "ssh" ]]; then
+        zfs send "$snapshot" | eval "$ssh_receive_command"
+      else
+        zfs send "$snapshot" | zfs receive -uF "$destination"
+      fi
       pipeline_rc=$?
       send_rc=${PIPESTATUS[0]:-0}
       receive_rc=${PIPESTATUS[1]:-0}
@@ -3106,6 +3161,81 @@ find_latest_common_snapshot_for_target() {
     [[ -n "$snap_name" ]] || continue
     dest_map["${snap_name##*@}"]=1
   done < <(zfs list -H -p -s creation -t snapshot -o name,creation -d 1 "$dest_dataset" 2>/dev/null || true)
+
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" ]] || continue
+    snap_base="${snap_name##*@}"
+    if [[ -n "${dest_map[$snap_base]:-}" ]]; then
+      latest_common="$snap_base"
+    fi
+    if [[ "$snap_base" == "$target_basename" ]]; then
+      break
+    fi
+  done < <(zfs list -H -p -s creation -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null || true)
+
+  printf -v "$result_var" '%s' "$latest_common"
+}
+
+find_latest_common_basename_for_member_transport() {
+  local source_dataset="$1"
+  local dest_dataset="$2"
+  local prefix="$3"
+  local result_name_var="$4"
+  local transport="${5:-local}"
+  local source_inventory dest_inventory snap_name snap_epoch snap_base
+  local source_count dest_count
+  local -A dest_basenames=()
+
+  printf -v "$result_name_var" ''
+  if [[ "$transport" == "ssh" ]]; then
+    ssh_dataset_exists "$dest_dataset" || return 0
+    dest_inventory="$(ssh_snapshot_inventory "$dest_dataset" | grep -F "@${prefix}" || true)"
+  else
+    dataset_exists "$dest_dataset" || return 0
+    dest_inventory="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$dest_dataset" 2>/dev/null | grep -F "@${prefix}" | sort -t $'\t' -k2,2n || true)"
+  fi
+  source_inventory="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null | grep -F "@${prefix}" | sort -t $'\t' -k2,2n || true)"
+  source_count="$(printf '%s\n' "$source_inventory" | awk 'NF { c++ } END { print c+0 }')"
+  dest_count="$(printf '%s\n' "$dest_inventory" | awk 'NF { c++ } END { print c+0 }')"
+
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+    dest_basenames["${snap_name##*@}"]="$snap_epoch"
+  done <<< "$dest_inventory"
+
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+    snap_base="${snap_name##*@}"
+    if [[ -n "${dest_basenames[$snap_base]:-}" ]]; then
+      printf -v "$result_name_var" '%s' "$snap_base"
+    fi
+  done <<< "$source_inventory"
+  zfsas_send_debug_marker "latest_common_scan source=${source_dataset} destination=${dest_dataset} prefix=${prefix} transport=${transport} source_matches=${source_count} destination_matches=${dest_count} latest_common=${!result_name_var:-none}"
+}
+
+find_latest_common_snapshot_for_target_transport() {
+  local source_dataset="$1"
+  local dest_dataset="$2"
+  local target_basename="$3"
+  local result_var="$4"
+  local transport="${5:-local}"
+  local snap_name snap_epoch snap_base latest_common=""
+  local -A dest_map=()
+
+  printf -v "$result_var" ''
+  if [[ "$transport" == "ssh" ]]; then
+    ssh_dataset_exists "$dest_dataset" || return 0
+    while IFS=$'\t' read -r snap_name snap_epoch; do
+      [[ -n "$snap_name" ]] || continue
+      dest_map["${snap_name##*@}"]=1
+    done < <(ssh_snapshot_inventory "$dest_dataset")
+  else
+    dataset_exists "$dest_dataset" || return 0
+    while IFS=$'\t' read -r snap_name snap_epoch; do
+      [[ -n "$snap_name" ]] || continue
+      dest_map["${snap_name##*@}"]=1
+    done < <(zfs list -H -p -s creation -t snapshot -o name,creation -d 1 "$dest_dataset" 2>/dev/null || true)
+  fi
 
   while IFS=$'\t' read -r snap_name snap_epoch; do
     [[ -n "$snap_name" ]] || continue

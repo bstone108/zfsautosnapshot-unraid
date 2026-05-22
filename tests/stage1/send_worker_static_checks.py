@@ -69,6 +69,31 @@ def main() -> int:
         "zfs receive -uF --",
         "SSH receive helper must pass remote destination to zfs receive after -- for safer dataset handling",
     )
+    assert_contains(
+        ops_lib,
+        "build_ssh_zfs_command()",
+        "SSH transport must share one audited non-interactive remote zfs command builder",
+    )
+    assert_contains(
+        ops_lib,
+        "ssh_snapshot_inventory()",
+        "SSH transport must expose non-destructive remote snapshot inventory before base selection is enabled",
+    )
+    assert_contains(
+        ops_lib,
+        "ssh_dataset_exists()",
+        "SSH transport must check remote destination dataset state over SSH rather than local zfs for base selection",
+    )
+    assert_contains(
+        worker,
+        "destination_snapshot_exists_for_transport",
+        "send worker must verify received snapshots using transport-aware destination checks",
+    )
+    assert_contains(
+        worker,
+        "find_latest_common_basename_for_member_transport",
+        "send worker must use transport-aware latest-common base selection before network pipelines run",
+    )
 
     print("PASS: send worker helper static contracts")
     return 0
