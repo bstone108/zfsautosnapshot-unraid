@@ -24,7 +24,7 @@ SEND_CHILD_JOB_WRITE_KEYS=(
   WINDOW_KEY RUN_GROUP_ID PREP_JOB_ID PREP_DEST_POOL SCHEDULE_JOB_ID PARENT_RUN_ID MEMBER_INDEX
   SOURCE_ROOT DESTINATION_ROOT INCLUDE_CHILDREN FREQUENCY THRESHOLD THRESHOLD_BYTES
   SNAPSHOT_PREFIX_BASE SNAPSHOT_PREFIX SOURCE_SNAPSHOT SOURCE_SNAPSHOT_NAME PREVIOUS_SNAPSHOT_NAME
-  ATTEMPT_COUNT RETRY_AT LAST_ERROR LAST_MESSAGE
+  SEND_TRANSPORT ATTEMPT_COUNT RETRY_AT LAST_ERROR LAST_MESSAGE
   WORKER_PID PROGRESS_PERCENT MEMBER_COUNT MEMBER_0_SOURCE MEMBER_0_DESTINATION MEMBER_0_SNAPSHOT
   COMPLETES_SCHEDULE_WINDOW
 )
@@ -32,7 +32,7 @@ SEND_CHILD_JOB_WRITE_KEYS=(
 SEND_FINALIZE_JOB_WRITE_KEYS=(
   JOB_ID JOB_TYPE JOB_MODE JOB_ACTION STATE PHASE REQUESTED_EPOCH REQUESTED_AT QUEUE_SORT
   WINDOW_KEY SCHEDULE_JOB_ID PARENT_RUN_ID SOURCE_ROOT DESTINATION_ROOT SNAPSHOT_PREFIX
-  SOURCE_SNAPSHOT_NAME PREVIOUS_SNAPSHOT_NAME ATTEMPT_COUNT RETRY_AT LAST_ERROR LAST_MESSAGE
+  SOURCE_SNAPSHOT_NAME PREVIOUS_SNAPSHOT_NAME SEND_TRANSPORT ATTEMPT_COUNT RETRY_AT LAST_ERROR LAST_MESSAGE
   WORKER_PID PROGRESS_PERCENT COMPLETES_SCHEDULE_WINDOW
 )
 
@@ -671,7 +671,7 @@ build_resume_members_for_current_job() {
 queue_child_send_jobs() {
   local member_count requested_epoch base_sort snapshot_basename schedule_job_id prefix previous_basename run_root_id
   local requested_at window_key frequency threshold threshold_bytes snapshot_prefix_base source_root destination_root completes_schedule_window
-  local run_group_id prep_job_id prep_dest_pool
+  local run_group_id prep_job_id prep_dest_pool send_transport
   local index source_dataset destination_dataset snapshot sort_key child_job_id finalize_job_id fanout_started fanout_elapsed
   # shellcheck disable=SC2034
   local -A queued_job=()
@@ -706,6 +706,7 @@ queue_child_send_jobs() {
   run_group_id="$(job_get job RUN_GROUP_ID)"
   prep_job_id="$(job_get job PREP_JOB_ID)"
   prep_dest_pool="$(job_get job PREP_DEST_POOL)"
+  send_transport="$(job_get job SEND_TRANSPORT local)"
 
   for ((index = 0; index < member_count; index++)); do
     source_dataset="$(job_get job MEMBER_${index}_SOURCE)"
@@ -743,6 +744,7 @@ queue_child_send_jobs() {
     queued_job[SOURCE_SNAPSHOT]="$snapshot"
     queued_job[SOURCE_SNAPSHOT_NAME]="$snapshot_basename"
     queued_job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
+    queued_job[SEND_TRANSPORT]="$send_transport"
     queued_job[ATTEMPT_COUNT]="0"
     queued_job[RETRY_AT]="0"
     queued_job[LAST_ERROR]=""
@@ -780,6 +782,7 @@ queue_child_send_jobs() {
   queued_job[SNAPSHOT_PREFIX]="$prefix"
   queued_job[SOURCE_SNAPSHOT_NAME]="$snapshot_basename"
   queued_job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
+  queued_job[SEND_TRANSPORT]="$send_transport"
   queued_job[ATTEMPT_COUNT]="0"
   queued_job[RETRY_AT]="0"
   queued_job[LAST_ERROR]=""

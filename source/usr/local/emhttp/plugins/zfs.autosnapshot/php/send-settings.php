@@ -525,6 +525,7 @@ if ($isPostRequest) {
               <th>Destination dataset</th>
               <th>Frequency</th>
               <th>Children</th>
+              <th>Transport</th>
               <th>Destination free-space target</th>
               <th style="width:90px;">Remove</th>
             </tr>
@@ -552,6 +553,13 @@ if ($isPostRequest) {
                   <select name="job_children[<?php echo (int) $index; ?>]" class="zfsas-send-select">
                     <option value="0" <?php echo (($job['children'] ?? '0') === '0') ? 'selected' : ''; ?>>No</option>
                     <option value="1" <?php echo (($job['children'] ?? '0') === '1') ? 'selected' : ''; ?>>Yes</option>
+                  </select>
+                </td>
+                <td>
+                  <select name="job_transport[<?php echo (int) $index; ?>]" class="zfsas-send-select">
+                    <?php foreach (zfsas_send_transport_options() as $value => $label) : ?>
+                      <option value="<?php echo zfsas_send_h($value); ?>" <?php echo ($value === ($job['transport'] ?? 'local')) ? 'selected' : ''; ?>><?php echo zfsas_send_h($label); ?></option>
+                    <?php endforeach; ?>
                   </select>
                 </td>
                 <td><input class="zfsas-send-input" name="job_threshold[<?php echo (int) $index; ?>]" value="<?php echo zfsas_send_h($job['threshold']); ?>"></td>
@@ -593,6 +601,15 @@ if ($isPostRequest) {
             <option value="0">No</option>
             <option value="1">Yes</option>
           </select>
+        </div>
+        <div class="zfsas-send-field">
+          <label for="new_job_transport">Transport</label>
+          <select id="new_job_transport" name="new_job_transport" class="zfsas-send-select">
+            <?php foreach (zfsas_send_transport_options() as $value => $label) : ?>
+              <option value="<?php echo zfsas_send_h($value); ?>"><?php echo zfsas_send_h($label); ?></option>
+            <?php endforeach; ?>
+          </select>
+          <div class="zfsas-send-help">Network transport choices are saved for future receiver plumbing; local sends remain the active transfer path.</div>
         </div>
         <div class="zfsas-send-field">
           <label for="new_job_threshold">Destination free-space target</label>
@@ -1426,11 +1443,13 @@ if ($isPostRequest) {
       var destinationEl = byId('new_job_destination');
       var frequencyEl = byId('new_job_frequency');
       var childrenEl = byId('new_job_children');
+      var transportEl = byId('new_job_transport');
       var thresholdEl = byId('new_job_threshold');
       var source = sourceEl ? sourceEl.value.trim() : '';
       var destination = destinationEl ? destinationEl.value.trim() : '';
       var frequency = frequencyEl ? frequencyEl.value : '6h';
       var children = childrenEl ? childrenEl.value : '0';
+      var transport = transportEl ? transportEl.value : 'local';
       var threshold = thresholdEl ? thresholdEl.value.trim() : '100G';
 
       if (source === '' || destination === '') {
@@ -1442,6 +1461,7 @@ if ($isPostRequest) {
       var sourceOptions = sourceEl ? sourceEl.innerHTML : '';
       var frequencyOptions = frequencyEl ? frequencyEl.innerHTML : '';
       var childrenOptions = childrenEl ? childrenEl.innerHTML : '<option value="0">No</option><option value="1">Yes</option>';
+      var transportOptions = transportEl ? transportEl.innerHTML : '<option value="local">Local pool/dataset</option>';
       var row = document.createElement('tr');
       row.innerHTML = '' +
         '<td>' +
@@ -1451,6 +1471,7 @@ if ($isPostRequest) {
         '<td><input class="zfsas-send-input" name="job_destination[' + index + ']" value="' + escapeHtml(destination) + '"></td>' +
         '<td><select name="job_frequency[' + index + ']" class="zfsas-send-select">' + frequencyOptions + '</select></td>' +
         '<td><select name="job_children[' + index + ']" class="zfsas-send-select">' + childrenOptions + '</select></td>' +
+        '<td><select name="job_transport[' + index + ']" class="zfsas-send-select">' + transportOptions + '</select></td>' +
         '<td><input class="zfsas-send-input" name="job_threshold[' + index + ']" value="' + escapeHtml(threshold) + '"></td>' +
         '<td><input type="hidden" name="job_remove[' + index + ']" value="0" class="zfsas-send-remove-flag"><button type="button" class="btn zfsas-send-remove-row">Remove</button></td>';
       if (jobsBody) {
@@ -1469,6 +1490,10 @@ if ($isPostRequest) {
       if (childrenSelect) {
         childrenSelect.value = children;
       }
+      var transportSelect = row.querySelector('select[name^="job_transport["]');
+      if (transportSelect) {
+        transportSelect.value = transport;
+      }
 
       if (sourceEl) {
         sourceEl.value = '';
@@ -1478,6 +1503,9 @@ if ($isPostRequest) {
       }
       if (childrenEl) {
         childrenEl.value = '0';
+      }
+      if (transportEl) {
+        transportEl.value = 'local';
       }
       if (thresholdEl) {
         thresholdEl.value = '100G';

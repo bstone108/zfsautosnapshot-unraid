@@ -28,13 +28,17 @@ SEND_KEEP_WEEKLY_UNTIL_DAYS=183
 
 # SEND_JOBS
 # Semicolon-separated entries encoded as:
-#   jobid|source|destination|frequency|threshold|children
+#   jobid|source|destination|frequency|threshold|children|transport
 #
 # Example:
-#   SEND_JOBS="1a2b3c4d5e6f|tank/appdata|backup/appdata|6h|200G|0"
+#   SEND_JOBS="1a2b3c4d5e6f|tank/appdata|backup/appdata|6h|200G|0|local"
 #
 # frequency values:
 #   6h, 12h, 1d, 7d
+# transport values:
+#   local, ssh, spiped
+#   Network transports are stored for receiver setup plumbing and fail closed
+#   until the matching receiver settings/pipeline support are enabled.
 #
 # threshold = minimum effective free space that must remain on the destination
 # dataset's active pool/quota constraints before a send run proceeds.

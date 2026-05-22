@@ -72,6 +72,7 @@ declare -A SCHEDULE_FREQUENCY=()
 declare -A SCHEDULE_THRESHOLD_RAW=()
 declare -A SCHEDULE_THRESHOLD_BYTES=()
 declare -A SCHEDULE_INCLUDE_CHILDREN=()
+declare -A SCHEDULE_TRANSPORT=()
 declare -A SCHEDULE_PREFIX=()
 declare -A SCHEDULE_LAST_COMPLETED_WINDOW=()
 QUEUE_DELETE_LAST_ADDED=0
@@ -854,8 +855,22 @@ is_valid_snapshot_name() {
   is_valid_snapshot_basename "${snapshot#*@}"
 }
 
+parse_send_transport() {
+  local value="${1:-local}"
+  value="$(trim "$value")"
+  value="${value,,}"
+  [[ -n "$value" ]] || value="local"
+  case "$value" in
+    local|ssh|spiped)
+      printf '%s' "$value"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 parse_send_jobs_config() {
-  local raw_jobs pair job_id source dest freq thresh children threshold_bytes
+  local raw_jobs pair job_id source dest freq thresh children transport threshold_bytes
   local -A seen=()
 
   SCHEDULE_JOB_IDS=()
@@ -865,6 +880,7 @@ parse_send_jobs_config() {
   SCHEDULE_THRESHOLD_RAW=()
   SCHEDULE_THRESHOLD_BYTES=()
   SCHEDULE_INCLUDE_CHILDREN=()
+  SCHEDULE_TRANSPORT=()
   SCHEDULE_PREFIX=()
 
   IFS=';' read -r -a raw_jobs <<<"$SEND_JOBS"
@@ -872,7 +888,7 @@ parse_send_jobs_config() {
     pair="$(trim "$pair")"
     [[ -n "$pair" ]] || continue
 
-    IFS='|' read -r job_id source dest freq thresh children <<<"$pair"
+    IFS='|' read -r job_id source dest freq thresh children transport <<<"$pair"
     job_id="$(trim "$job_id")"
     source="$(trim "$source")"
     dest="$(trim "$dest")"
@@ -882,6 +898,7 @@ parse_send_jobs_config() {
     thresh="$(trim "$thresh")"
     children="$(trim "${children:-0}")"
     [[ -n "$children" ]] || children="0"
+    transport="$(parse_send_transport "${transport:-local}" 2>/dev/null || true)"
 
     [[ "$job_id" =~ ^[a-f0-9]{12}$ ]] || continue
     [[ -n "$source" && -n "$dest" && -n "$freq" && -n "$thresh" ]] || continue
@@ -894,6 +911,7 @@ parse_send_jobs_config() {
     threshold_bytes="$(threshold_to_bytes "$thresh" 2>/dev/null || true)"
     [[ "$threshold_bytes" =~ ^[0-9]+$ ]] || continue
     [[ "$children" == "1" ]] || children="0"
+    [[ -n "$transport" ]] || continue
     jobs_are_same_pool_overlap "$source" "$dest" && continue
 
     seen[$job_id]=1
@@ -904,6 +922,7 @@ parse_send_jobs_config() {
     SCHEDULE_THRESHOLD_RAW["$job_id"]="$thresh"
     SCHEDULE_THRESHOLD_BYTES["$job_id"]="$threshold_bytes"
     SCHEDULE_INCLUDE_CHILDREN["$job_id"]="$children"
+    SCHEDULE_TRANSPORT["$job_id"]="$transport"
     SCHEDULE_PREFIX["$job_id"]="${SEND_SNAPSHOT_PREFIX}${job_id}-"
   done
 }
@@ -1261,6 +1280,7 @@ enqueue_resume_prepare_job() {
   job[SOURCE_ROOT]="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]}"
   job[DESTINATION_ROOT]="${SCHEDULE_DEST_ROOT[$schedule_job_id]}"
   job[INCLUDE_CHILDREN]="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]}"
+  job[SEND_TRANSPORT]="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
   job[FREQUENCY]="${SCHEDULE_FREQUENCY[$schedule_job_id]}"
   job[THRESHOLD]="${SCHEDULE_THRESHOLD_RAW[$schedule_job_id]}"
   job[THRESHOLD_BYTES]="${SCHEDULE_THRESHOLD_BYTES[$schedule_job_id]}"
@@ -1350,6 +1370,7 @@ enqueue_scheduled_prepare_job() {
   job[SOURCE_ROOT]="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]}"
   job[DESTINATION_ROOT]="${SCHEDULE_DEST_ROOT[$schedule_job_id]}"
   job[INCLUDE_CHILDREN]="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]}"
+  job[SEND_TRANSPORT]="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
   job[FREQUENCY]="${SCHEDULE_FREQUENCY[$schedule_job_id]}"
   job[THRESHOLD]="${SCHEDULE_THRESHOLD_RAW[$schedule_job_id]}"
   job[THRESHOLD_BYTES]="${SCHEDULE_THRESHOLD_BYTES[$schedule_job_id]}"
@@ -2623,6 +2644,21 @@ monitor_dd_zfs_send_progress() {
   done < <(tr '\r' '\n')
 }
 
+send_transport_for_current_job() {
+  local transport
+  transport="$(job_get job SEND_TRANSPORT local)"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  case "$transport" in
+    local|ssh|spiped)
+      printf '%s' "$transport"
+      return 0
+      ;;
+  esac
+  printf '%s' "$transport"
+  return 1
+}
+
 run_pipeline_with_status() {
   local description="$1"
   local base_snapshot="$2"
@@ -2636,6 +2672,7 @@ run_pipeline_with_status() {
   local meter_rc=0
   local receive_rc=0
   local progress_supported=0
+  local send_transport
 
   is_valid_snapshot_name "$snapshot" || {
     log "Refusing pipeline for invalid snapshot name: $snapshot"
@@ -2652,8 +2689,17 @@ run_pipeline_with_status() {
     }
   fi
 
-  log "$description"
-  zfsas_send_debug_marker "pipeline_start mode=$([[ -n "$base_snapshot" ]] && printf incremental || printf full) base=${base_snapshot:-none} snapshot=${snapshot} destination=${destination} progress_total_bytes=${progress_total_bytes} progress_window=${progress_start_percent}-${progress_end_percent}"
+  send_transport="$(send_transport_for_current_job)" || {
+    log "Refusing send pipeline for invalid transport: $send_transport"
+    return 1
+  }
+  if [[ "$send_transport" != "local" ]]; then
+    log "Unsupported ZFS send transport '$send_transport' requested for $description; receiver plumbing is not configured yet."
+    return 1
+  fi
+
+  log "$description (transport=$send_transport)"
+  zfsas_send_debug_marker "pipeline_start mode=$([[ -n "$base_snapshot" ]] && printf incremental || printf full) base=${base_snapshot:-none} snapshot=${snapshot} destination=${destination} transport=${send_transport} progress_total_bytes=${progress_total_bytes} progress_window=${progress_start_percent}-${progress_end_percent}"
   if [[ "$progress_total_bytes" =~ ^[0-9]+$ ]] && (( progress_total_bytes > 0 )) && dd_status_progress_supported; then
     progress_supported=1
   fi

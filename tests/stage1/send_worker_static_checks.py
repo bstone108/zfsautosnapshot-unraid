@@ -34,6 +34,22 @@ def main() -> int:
         "queue manager library must define send_space_buffer_bytes before using it for reservation approval",
     )
 
+    assert_contains(
+        worker,
+        "SEND_TRANSPORT",
+        "send worker must carry the selected transport through queued jobs before network pipelines are enabled",
+    )
+    assert_contains(
+        ops_lib,
+        "send_transport_for_current_job()",
+        "queue library must expose an explicit transport helper for local/ssh/spiped send pipelines",
+    )
+    assert_contains(
+        ops_lib,
+        "Unsupported ZFS send transport",
+        "send pipeline must fail closed for unknown or not-yet-implemented network transports",
+    )
+
     print("PASS: send worker helper static contracts")
     return 0
 
