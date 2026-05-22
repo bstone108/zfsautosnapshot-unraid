@@ -3038,10 +3038,59 @@ send_destination_actionable() {
   return 0
 }
 
+send_destination_actionable_for_schedule_transport() {
+  local destination="$1"
+  local transport="${2:-local}"
+  local message_var="${3:-}"
+  local pool parent command
+
+  [[ -n "$message_var" ]] && printf -v "$message_var" ''
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+
+  case "$transport" in
+    local)
+      send_destination_actionable "$destination" "$message_var"
+      ;;
+    ssh)
+      if ! is_valid_dataset_name "$destination"; then
+        [[ -n "$message_var" ]] && printf -v "$message_var" "destination dataset '${destination}' is invalid"
+        return 1
+      fi
+      pool="${destination%%/*}"
+      parent="${destination%/*}"
+      if [[ "$parent" != "$pool" ]]; then
+        build_ssh_zfs_command "zfs list -H -o name -- $(shell_quote_word "$pool") >/dev/null && { zfs list -H -o name -- $(shell_quote_word "$parent") >/dev/null || zfs create -p -- $(shell_quote_word "$parent"); }" command || {
+          [[ -n "$message_var" ]] && printf -v "$message_var" "SSH receiver settings are incomplete or invalid"
+          return 1
+        }
+      else
+        build_ssh_zfs_command "zfs list -H -o name -- $(shell_quote_word "$pool") >/dev/null" command || {
+          [[ -n "$message_var" ]] && printf -v "$message_var" "SSH receiver settings are incomplete or invalid"
+          return 1
+        }
+      fi
+      eval "$command" >/dev/null 2>&1 || {
+        [[ -n "$message_var" ]] && printf -v "$message_var" "remote destination pool/parent '${parent}' is not ready over SSH"
+        return 1
+      }
+      return 0
+      ;;
+    spiped)
+      [[ -n "$message_var" ]] && printf -v "$message_var" "spiped receiver readiness is not implemented yet"
+      return 1
+      ;;
+    *)
+      [[ -n "$message_var" ]] && printf -v "$message_var" "unknown send transport '${transport}'"
+      return 1
+      ;;
+  esac
+}
+
 function scheduled_send_job_zfs_actionable() {
   local schedule_job_id="$1"
   local message_var="${2:-}"
-  local source_root include_children dest_root source_message dest_message
+  local source_root include_children dest_root send_transport source_message dest_message
 
   if [[ -n "$message_var" ]]; then
     printf -v "$message_var" ''
@@ -3049,12 +3098,13 @@ function scheduled_send_job_zfs_actionable() {
   source_root="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}"
   include_children="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]:-0}"
   dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
+  send_transport="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
 
   if ! zfs_dataset_tree_actionable "$source_root" "$include_children" source_message; then
     [[ -n "$message_var" ]] && printf -v "$message_var" "%s" "$source_message"
     return 1
   fi
-  if ! send_destination_actionable "$dest_root" dest_message; then
+  if ! send_destination_actionable_for_schedule_transport "$dest_root" "$send_transport" dest_message; then
     [[ -n "$message_var" ]] && printf -v "$message_var" "%s" "$dest_message"
     return 1
   fi

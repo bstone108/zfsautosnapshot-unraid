@@ -94,6 +94,24 @@ def main() -> int:
         "find_latest_common_basename_for_member_transport",
         "send worker must use transport-aware latest-common base selection before network pipelines run",
     )
+    assert_contains(
+        ops_lib,
+        "send_destination_actionable_for_schedule_transport()",
+        "scheduled send enqueue readiness must use a transport-aware destination check before SSH jobs can be queued",
+    )
+    scheduled_ready_body = ops_lib.split("function scheduled_send_job_zfs_actionable() {", 1)[1].split("\n}\n", 1)[0]
+    assert_contains(
+        scheduled_ready_body,
+        "SCHEDULE_TRANSPORT",
+        "scheduled send readiness must inspect the configured transport, not assume a local destination",
+    )
+    assert_contains(
+        scheduled_ready_body,
+        "send_destination_actionable_for_schedule_transport",
+        "scheduled send readiness must probe SSH destinations over SSH instead of local zfs",
+    )
+    if "send_destination_actionable \"$dest_root\"" in scheduled_ready_body:
+        raise AssertionError("scheduled send readiness must not call the local-only destination readiness helper directly")
 
     print("PASS: send worker helper static contracts")
     return 0
