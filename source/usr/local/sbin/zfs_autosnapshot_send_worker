@@ -248,7 +248,7 @@ destination_has_any_snapshots_for_transport() {
 send_destination_actionable_for_transport() {
   local destination="$1"
   local message_var="${2:-}"
-  local pool parent command
+  local pool parent command spipe_command
 
   [[ -n "$message_var" ]] && printf -v "$message_var" ''
   case "$(current_send_transport)" in
@@ -272,6 +272,17 @@ send_destination_actionable_for_transport() {
       fi
       eval "$command" >/dev/null 2>&1 || {
         [[ -n "$message_var" ]] && printf -v "$message_var" "remote destination pool/parent '${parent}' is not ready over SSH"
+        return 1
+      }
+      return 0
+      ;;
+    spiped)
+      if ! is_valid_dataset_name "$destination"; then
+        [[ -n "$message_var" ]] && printf -v "$message_var" "destination dataset '${destination}' is invalid"
+        return 1
+      fi
+      build_spipe_send_command spipe_command || {
+        [[ -n "$message_var" ]] && printf -v "$message_var" "spiped sender target/key settings are incomplete or invalid"
         return 1
       }
       return 0

@@ -143,6 +143,20 @@ def main() -> int:
     if "send_destination_actionable \"$dest_root\"" in scheduled_ready_body:
         raise AssertionError("scheduled send readiness must not call the local-only destination readiness helper directly")
 
+    worker_destination_ready_body = worker.split("send_destination_actionable_for_transport() {", 1)[1].split("\n}\n", 1)[0]
+    assert_contains(
+        worker_destination_ready_body,
+        "spiped)",
+        "worker destination readiness must handle spiped explicitly instead of falling through to local ZFS checks",
+    )
+    assert_contains(
+        worker_destination_ready_body,
+        "build_spipe_send_command spipe_command",
+        "spiped readiness must validate sender endpoint/key settings before creating source checkpoints",
+    )
+    if "spiped)" not in worker_destination_ready_body and "send_destination_actionable \"$destination\"" in worker_destination_ready_body:
+        raise AssertionError("spiped worker readiness must not use local-only destination readiness")
+
     print("PASS: send worker helper static contracts")
     return 0
 

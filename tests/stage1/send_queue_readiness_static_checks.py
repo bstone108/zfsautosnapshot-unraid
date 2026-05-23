@@ -78,14 +78,14 @@ def main() -> int:
     )
     assert_contains(
         prepare_snapshot_body,
-        "send_destination_actionable \"$destination_root\" readiness_message || {",
-        "scheduled prepare must recheck destination readiness before creating source checkpoints",
+        "send_destination_actionable_for_transport \"$destination_root\" readiness_message || {",
+        "scheduled prepare must recheck transport-aware destination readiness before creating source checkpoints",
     )
     scheduled_actionable_body = lib.split("function scheduled_send_job_zfs_actionable() {", 1)[1].split("\n}\n", 1)[0]
     assert_contains(
         scheduled_actionable_body,
-        "send_destination_actionable \"$dest_root\" dest_message",
-        "scheduled enqueue readiness must require the destination parent/root to be actionable, not just the pool",
+        "send_destination_actionable_for_schedule_transport \"$dest_root\" \"$send_transport\" dest_message",
+        "scheduled enqueue readiness must require the transport-specific destination parent/root to be actionable, not just the pool",
     )
 
     destination_actionable_body = lib.split("send_destination_actionable() {", 1)[1].split("\n}\n", 1)[0]
@@ -101,14 +101,14 @@ def main() -> int:
     )
     assert_in_order(
         prepare_snapshot_body,
-        "send_destination_actionable \"$destination_root\" readiness_message || {",
+        "send_destination_actionable_for_transport \"$destination_root\" readiness_message || {",
         "log \"Creating scheduled send checkpoint ${source_root}@${basename}\"",
-        "scheduled prepare must defer on destination readiness before snapshot creation to avoid phantom/churny checkpoints",
+        "scheduled prepare must defer on transport-aware destination readiness before snapshot creation to avoid phantom/churny checkpoints",
     )
     assert_contains(
         worker,
-        "send_destination_actionable \"$destination\" readiness_message || {",
-        "send members must defer when destination pool/parent is not actionable instead of final-failing",
+        "send_destination_actionable_for_transport \"$destination\" readiness_message || {",
+        "send members must defer when the transport-specific destination is not actionable instead of final-failing",
     )
     assert_contains(
         worker,
