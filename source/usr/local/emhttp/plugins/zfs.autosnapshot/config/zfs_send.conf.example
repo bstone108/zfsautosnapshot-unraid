@@ -35,6 +35,14 @@ SEND_SSH_PORT="22"
 SEND_SSH_USER="root"
 SEND_SSH_KEY_PATH=""
 
+# SEND_SPIPED_LISTEN_HOST / SEND_SPIPED_PORT / SEND_SPIPED_KEY_PATH
+# spiped receiver settings. spiped uses a shared symmetric key file on both
+# sending and receiving sides; this config stores only the local key path, not
+# raw key material. Pipeline support stays fail-closed until both sides are set.
+SEND_SPIPED_LISTEN_HOST="0.0.0.0"
+SEND_SPIPED_PORT="8023"
+SEND_SPIPED_KEY_PATH=""
+
 # SEND_JOBS
 # Semicolon-separated entries encoded as:
 #   jobid|source|destination|frequency|threshold|children|transport

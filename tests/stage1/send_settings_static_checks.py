@@ -101,6 +101,36 @@ def main() -> int:
     )
     assert_contains(
         text,
+        "SEND_SPIPED_LISTEN_HOST",
+        "send settings must persist spiped receiver listen host before enabling spiped transport",
+    )
+    assert_contains(
+        text,
+        "SEND_SPIPED_PORT",
+        "send settings must persist spiped receiver port before enabling spiped transport",
+    )
+    assert_contains(
+        text,
+        "SEND_SPIPED_KEY_PATH",
+        "send settings must persist a spiped key path without storing raw key material",
+    )
+    assert_contains(
+        settings,
+        'name="send_spiped_key_path"',
+        "send settings UI must expose a spiped key path field rather than raw key contents",
+    )
+    assert_contains(
+        settings,
+        'name="send_spiped_port"',
+        "send settings UI must expose a spiped port field near network transport controls",
+    )
+    assert_contains(
+        example,
+        "SEND_SPIPED_KEY_PATH",
+        "example send config must document spiped receiver key-path settings",
+    )
+    assert_contains(
+        text,
         "function zfsas_send_write_config_atomically",
         "send settings must write zfs_send.conf through an atomic temp-file + rename helper",
     )

@@ -93,6 +93,40 @@ function zfsas_send_normalize_ssh_port($value)
 
 function zfsas_send_normalize_ssh_key_path($value)
 {
+    return zfsas_send_normalize_absolute_secret_path($value);
+}
+
+function zfsas_send_normalize_spiped_listen_host($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '0.0.0.0';
+    }
+
+    return (preg_match('/^[A-Za-z0-9._:-]+$/', $value) === 1) ? $value : null;
+}
+
+function zfsas_send_normalize_spiped_port($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '8023';
+    }
+    if (preg_match('/^[0-9]+$/', $value) !== 1) {
+        return null;
+    }
+
+    $port = (int) $value;
+    return ($port >= 1 && $port <= 65535) ? (string) $port : null;
+}
+
+function zfsas_send_normalize_spiped_key_path($value)
+{
+    return zfsas_send_normalize_absolute_secret_path($value);
+}
+
+function zfsas_send_normalize_absolute_secret_path($value)
+{
     $value = zfsas_send_trim($value);
     if ($value === '') {
         return '';
@@ -286,6 +320,9 @@ function zfsas_send_defaults()
         'SEND_SSH_PORT' => '22',
         'SEND_SSH_USER' => 'root',
         'SEND_SSH_KEY_PATH' => '',
+        'SEND_SPIPED_LISTEN_HOST' => '0.0.0.0',
+        'SEND_SPIPED_PORT' => '8023',
+        'SEND_SPIPED_KEY_PATH' => '',
         'SEND_JOBS' => '',
     ];
 }
@@ -692,6 +729,11 @@ function zfsas_send_render_config($config)
     $lines[] = 'SEND_SSH_USER=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_user($config['SEND_SSH_USER'] ?? 'root') ?? 'root');
     $lines[] = 'SEND_SSH_KEY_PATH=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_key_path($config['SEND_SSH_KEY_PATH'] ?? '') ?? '');
     $lines[] = '';
+    $lines[] = '# spiped receiver settings. Store only the local symmetric-key file path; never paste raw key material here.';
+    $lines[] = 'SEND_SPIPED_LISTEN_HOST=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_listen_host($config['SEND_SPIPED_LISTEN_HOST'] ?? '0.0.0.0') ?? '0.0.0.0');
+    $lines[] = 'SEND_SPIPED_PORT=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_port($config['SEND_SPIPED_PORT'] ?? '8023') ?? '8023');
+    $lines[] = 'SEND_SPIPED_KEY_PATH=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_key_path($config['SEND_SPIPED_KEY_PATH'] ?? '') ?? '');
+    $lines[] = '';
     $lines[] = '# Semicolon-separated jobs encoded as:';
     $lines[] = '#   jobid|source|destination|frequency|threshold|children|transport';
     $lines[] = '# frequency values: 6h, 12h, 1d, 7d';
@@ -743,6 +785,9 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
     $submitted['SEND_SSH_PORT'] = zfsas_send_normalize_ssh_port($post['send_ssh_port'] ?? ($submitted['SEND_SSH_PORT'] ?? '22'));
     $submitted['SEND_SSH_USER'] = zfsas_send_normalize_ssh_user($post['send_ssh_user'] ?? ($submitted['SEND_SSH_USER'] ?? 'root'));
     $submitted['SEND_SSH_KEY_PATH'] = zfsas_send_normalize_ssh_key_path($post['send_ssh_key_path'] ?? ($submitted['SEND_SSH_KEY_PATH'] ?? ''));
+    $submitted['SEND_SPIPED_LISTEN_HOST'] = zfsas_send_normalize_spiped_listen_host($post['send_spiped_listen_host'] ?? ($submitted['SEND_SPIPED_LISTEN_HOST'] ?? '0.0.0.0'));
+    $submitted['SEND_SPIPED_PORT'] = zfsas_send_normalize_spiped_port($post['send_spiped_port'] ?? ($submitted['SEND_SPIPED_PORT'] ?? '8023'));
+    $submitted['SEND_SPIPED_KEY_PATH'] = zfsas_send_normalize_spiped_key_path($post['send_spiped_key_path'] ?? ($submitted['SEND_SPIPED_KEY_PATH'] ?? ''));
     $submittedJobs = zfsas_send_collect_submitted_jobs($post, $errors);
 
     if ($submitted['SEND_SNAPSHOT_PREFIX'] === '') {
@@ -778,6 +823,18 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
     if ($submitted['SEND_SSH_KEY_PATH'] === null) {
         $errors[] = 'SSH key path must be an absolute local path. Raw key contents and passwords are not stored in this config.';
         $submitted['SEND_SSH_KEY_PATH'] = zfsas_send_trim($post['send_ssh_key_path'] ?? '');
+    }
+    if ($submitted['SEND_SPIPED_LISTEN_HOST'] === null) {
+        $errors[] = 'spiped listen host may contain only letters, numbers, dot, dash, underscore, and colon.';
+        $submitted['SEND_SPIPED_LISTEN_HOST'] = zfsas_send_trim($post['send_spiped_listen_host'] ?? '');
+    }
+    if ($submitted['SEND_SPIPED_PORT'] === null) {
+        $errors[] = 'spiped port must be a number from 1 to 65535.';
+        $submitted['SEND_SPIPED_PORT'] = zfsas_send_trim($post['send_spiped_port'] ?? '');
+    }
+    if ($submitted['SEND_SPIPED_KEY_PATH'] === null) {
+        $errors[] = 'spiped key path must be an absolute local path. Raw symmetric-key contents are not stored in this config.';
+        $submitted['SEND_SPIPED_KEY_PATH'] = zfsas_send_trim($post['send_spiped_key_path'] ?? '');
     }
 
     if (empty($errors)) {

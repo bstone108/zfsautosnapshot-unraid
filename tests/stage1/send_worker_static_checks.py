@@ -99,6 +99,21 @@ def main() -> int:
         "send_destination_actionable_for_schedule_transport()",
         "scheduled send enqueue readiness must use a transport-aware destination check before SSH jobs can be queued",
     )
+    assert_contains(
+        ops_lib,
+        "SEND_SPIPED_KEY_PATH",
+        "queue library must load spiped key-path configuration before spiped transport can run",
+    )
+    assert_contains(
+        ops_lib,
+        "build_spiped_receive_command()",
+        "spiped transport must have one audited receiver command builder before pipeline plumbing is enabled",
+    )
+    assert_contains(
+        ops_lib,
+        "spiped -d -s '",
+        "spiped receiver command must run in decrypt/server mode on the configured receiver side",
+    )
     scheduled_ready_body = ops_lib.split("function scheduled_send_job_zfs_actionable() {", 1)[1].split("\n}\n", 1)[0]
     assert_contains(
         scheduled_ready_body,

@@ -53,6 +53,8 @@ DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS="30"
 DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS="183"
 DEFAULT_SEND_SSH_PORT="22"
 DEFAULT_SEND_SSH_USER="root"
+DEFAULT_SEND_SPIPED_LISTEN_HOST="0.0.0.0"
+DEFAULT_SEND_SPIPED_PORT="8023"
 DEFAULT_RETRY_DELAYS=(60 300 900)
 POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS:-3}"
 POST_DELETE_RECHECK_INTERVAL_SECONDS="${POST_DELETE_RECHECK_INTERVAL_SECONDS:-1}"
@@ -69,6 +71,9 @@ SEND_SSH_HOST=""
 SEND_SSH_PORT="$DEFAULT_SEND_SSH_PORT"
 SEND_SSH_USER="$DEFAULT_SEND_SSH_USER"
 SEND_SSH_KEY_PATH=""
+SEND_SPIPED_LISTEN_HOST="$DEFAULT_SEND_SPIPED_LISTEN_HOST"
+SEND_SPIPED_PORT="$DEFAULT_SEND_SPIPED_PORT"
+SEND_SPIPED_KEY_PATH=""
 SEND_JOBS=""
 
 SCHEDULE_JOB_IDS=()
@@ -725,6 +730,9 @@ load_send_config() {
   SEND_SSH_PORT="$DEFAULT_SEND_SSH_PORT"
   SEND_SSH_USER="$DEFAULT_SEND_SSH_USER"
   SEND_SSH_KEY_PATH=""
+  SEND_SPIPED_LISTEN_HOST="$DEFAULT_SEND_SPIPED_LISTEN_HOST"
+  SEND_SPIPED_PORT="$DEFAULT_SEND_SPIPED_PORT"
+  SEND_SPIPED_KEY_PATH=""
   SEND_JOBS=""
 
   [[ -f "$SEND_CONFIG_FILE" ]] || return 0
@@ -738,7 +746,7 @@ load_send_config() {
       raw="${BASH_REMATCH[2]}"
       value="$(parse_config_value "$raw")"
       case "$key" in
-        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_SSH_HOST|SEND_SSH_PORT|SEND_SSH_USER|SEND_SSH_KEY_PATH|SEND_JOBS)
+        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_SSH_HOST|SEND_SSH_PORT|SEND_SSH_USER|SEND_SSH_KEY_PATH|SEND_SPIPED_LISTEN_HOST|SEND_SPIPED_PORT|SEND_SPIPED_KEY_PATH|SEND_JOBS)
           printf -v "$key" '%s' "$value"
           ;;
       esac
@@ -2688,6 +2696,21 @@ is_valid_ssh_key_path() {
   [[ "$key_path" != *$'\n'* && "$key_path" != *$'\r'* && "$key_path" != *$'\0'* ]]
 }
 
+is_valid_spiped_listen_host() {
+  [[ "$1" =~ ^[A-Za-z0-9._:-]+$ ]]
+}
+
+is_valid_spiped_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+}
+
+is_valid_spiped_key_path() {
+  local key_path="$1"
+  [[ -n "$key_path" ]] || return 1
+  [[ "$key_path" == /* ]] || return 1
+  [[ "$key_path" != *$'\n'* && "$key_path" != *$'\r'* && "$key_path" != *$'\0'* ]]
+}
+
 shell_quote_word() {
   printf '%q' "$1"
 }
@@ -2734,6 +2757,25 @@ build_ssh_receive_command() {
   is_valid_dataset_name "$destination" || return 1
   remote_receive="zfs receive -uF -- $(shell_quote_word "$destination")"
   build_ssh_zfs_command "$remote_receive" "$result_var"
+}
+
+build_spiped_receive_command() {
+  local destination="$1"
+  local result_var="$2"
+  local listen_host="${SEND_SPIPED_LISTEN_HOST:-$DEFAULT_SEND_SPIPED_LISTEN_HOST}"
+  local listen_port="${SEND_SPIPED_PORT:-$DEFAULT_SEND_SPIPED_PORT}"
+  local key_path="$SEND_SPIPED_KEY_PATH"
+  local listen_addr command
+
+  printf -v "$result_var" ''
+  is_valid_dataset_name "$destination" || return 1
+  is_valid_spiped_listen_host "$listen_host" || return 1
+  is_valid_spiped_port "$listen_port" || return 1
+  is_valid_spiped_key_path "$key_path" || return 1
+
+  listen_addr="${listen_host}:${listen_port}"
+  command="spiped -d -s '$(shell_quote_word "$listen_addr")' -k $(shell_quote_word "$key_path") | zfs receive -uF -- $(shell_quote_word "$destination")"
+  printf -v "$result_var" '%s' "$command"
 }
 
 ssh_dataset_exists() {
