@@ -111,6 +111,21 @@ def main() -> int:
     )
     assert_contains(
         ops_lib,
+        "build_spipe_send_command()",
+        "spiped sender pipelines must use the stdin/stdout spipe client, not try to pipe a zfs stream into the spiped daemon",
+    )
+    assert_contains(
+        ops_lib,
+        "spipe -t",
+        "spiped sender helper must target the remote receiver using spipe -t host:port",
+    )
+    assert_contains(
+        ops_lib,
+        "SEND_SPIPED_REMOTE_HOST",
+        "queue library must load sender-side remote spiped host configuration before spiped transport can run",
+    )
+    assert_contains(
+        ops_lib,
         "spiped -d -s '",
         "spiped receiver command must run in decrypt/server mode on the configured receiver side",
     )

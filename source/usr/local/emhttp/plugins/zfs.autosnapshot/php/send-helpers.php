@@ -106,6 +106,16 @@ function zfsas_send_normalize_spiped_listen_host($value)
     return (preg_match('/^[A-Za-z0-9._:-]+$/', $value) === 1) ? $value : null;
 }
 
+function zfsas_send_normalize_spiped_remote_host($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '';
+    }
+
+    return (preg_match('/^[A-Za-z0-9._:-]+$/', $value) === 1) ? $value : null;
+}
+
 function zfsas_send_normalize_spiped_port($value)
 {
     $value = zfsas_send_trim($value);
@@ -118,6 +128,11 @@ function zfsas_send_normalize_spiped_port($value)
 
     $port = (int) $value;
     return ($port >= 1 && $port <= 65535) ? (string) $port : null;
+}
+
+function zfsas_send_normalize_spiped_remote_port($value)
+{
+    return zfsas_send_normalize_spiped_port($value);
 }
 
 function zfsas_send_normalize_spiped_key_path($value)
@@ -322,6 +337,8 @@ function zfsas_send_defaults()
         'SEND_SSH_KEY_PATH' => '',
         'SEND_SPIPED_LISTEN_HOST' => '0.0.0.0',
         'SEND_SPIPED_PORT' => '8023',
+        'SEND_SPIPED_REMOTE_HOST' => '',
+        'SEND_SPIPED_REMOTE_PORT' => '8023',
         'SEND_SPIPED_KEY_PATH' => '',
         'SEND_JOBS' => '',
     ];
@@ -729,9 +746,12 @@ function zfsas_send_render_config($config)
     $lines[] = 'SEND_SSH_USER=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_user($config['SEND_SSH_USER'] ?? 'root') ?? 'root');
     $lines[] = 'SEND_SSH_KEY_PATH=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_key_path($config['SEND_SSH_KEY_PATH'] ?? '') ?? '');
     $lines[] = '';
-    $lines[] = '# spiped receiver settings. Store only the local symmetric-key file path; never paste raw key material here.';
+    $lines[] = '# spiped receiver/listener settings. Store only the local symmetric-key file path; never paste raw key material here.';
     $lines[] = 'SEND_SPIPED_LISTEN_HOST=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_listen_host($config['SEND_SPIPED_LISTEN_HOST'] ?? '0.0.0.0') ?? '0.0.0.0');
     $lines[] = 'SEND_SPIPED_PORT=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_port($config['SEND_SPIPED_PORT'] ?? '8023') ?? '8023');
+    $lines[] = '# spiped sender target endpoint for spipe -t host:port.';
+    $lines[] = 'SEND_SPIPED_REMOTE_HOST=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_remote_host($config['SEND_SPIPED_REMOTE_HOST'] ?? '') ?? '');
+    $lines[] = 'SEND_SPIPED_REMOTE_PORT=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_remote_port($config['SEND_SPIPED_REMOTE_PORT'] ?? '8023') ?? '8023');
     $lines[] = 'SEND_SPIPED_KEY_PATH=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_key_path($config['SEND_SPIPED_KEY_PATH'] ?? '') ?? '');
     $lines[] = '';
     $lines[] = '# Semicolon-separated jobs encoded as:';
@@ -787,6 +807,8 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
     $submitted['SEND_SSH_KEY_PATH'] = zfsas_send_normalize_ssh_key_path($post['send_ssh_key_path'] ?? ($submitted['SEND_SSH_KEY_PATH'] ?? ''));
     $submitted['SEND_SPIPED_LISTEN_HOST'] = zfsas_send_normalize_spiped_listen_host($post['send_spiped_listen_host'] ?? ($submitted['SEND_SPIPED_LISTEN_HOST'] ?? '0.0.0.0'));
     $submitted['SEND_SPIPED_PORT'] = zfsas_send_normalize_spiped_port($post['send_spiped_port'] ?? ($submitted['SEND_SPIPED_PORT'] ?? '8023'));
+    $submitted['SEND_SPIPED_REMOTE_HOST'] = zfsas_send_normalize_spiped_remote_host($post['send_spiped_remote_host'] ?? ($submitted['SEND_SPIPED_REMOTE_HOST'] ?? ''));
+    $submitted['SEND_SPIPED_REMOTE_PORT'] = zfsas_send_normalize_spiped_remote_port($post['send_spiped_remote_port'] ?? ($submitted['SEND_SPIPED_REMOTE_PORT'] ?? '8023'));
     $submitted['SEND_SPIPED_KEY_PATH'] = zfsas_send_normalize_spiped_key_path($post['send_spiped_key_path'] ?? ($submitted['SEND_SPIPED_KEY_PATH'] ?? ''));
     $submittedJobs = zfsas_send_collect_submitted_jobs($post, $errors);
 
@@ -831,6 +853,14 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
     if ($submitted['SEND_SPIPED_PORT'] === null) {
         $errors[] = 'spiped port must be a number from 1 to 65535.';
         $submitted['SEND_SPIPED_PORT'] = zfsas_send_trim($post['send_spiped_port'] ?? '');
+    }
+    if ($submitted['SEND_SPIPED_REMOTE_HOST'] === null) {
+        $errors[] = 'spiped remote host may contain only letters, numbers, dot, dash, underscore, and colon.';
+        $submitted['SEND_SPIPED_REMOTE_HOST'] = zfsas_send_trim($post['send_spiped_remote_host'] ?? '');
+    }
+    if ($submitted['SEND_SPIPED_REMOTE_PORT'] === null) {
+        $errors[] = 'spiped remote port must be a number from 1 to 65535.';
+        $submitted['SEND_SPIPED_REMOTE_PORT'] = zfsas_send_trim($post['send_spiped_remote_port'] ?? '');
     }
     if ($submitted['SEND_SPIPED_KEY_PATH'] === null) {
         $errors[] = 'spiped key path must be an absolute local path. Raw symmetric-key contents are not stored in this config.';

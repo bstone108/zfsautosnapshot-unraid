@@ -540,9 +540,9 @@ if ($isPostRequest) {
       </div>
 
       <div class="zfsas-send-card" style="margin-top: 14px;">
-        <h4 style="margin-top:0;">spiped receiver settings</h4>
+        <h4 style="margin-top:0;">spiped receiver and sender settings</h4>
         <div class="zfsas-send-help">
-          spiped uses a shared symmetric key file on both sides. Store only the local key-file path here; do not paste raw key contents into the WebGUI or config. Pipeline support remains fail-closed until the sender/receiver plumbing is complete.
+          spiped uses a shared symmetric key file on both sides. Store only the local key-file path here; do not paste raw key contents into the WebGUI or config. Receiver/listener fields describe the local <code>spiped -d</code> endpoint; sender target fields describe the remote <code>spipe -t host:port</code> endpoint.
         </div>
         <div class="zfsas-send-retention-grid" style="margin-top: 12px;">
           <div class="zfsas-send-field">
@@ -550,8 +550,16 @@ if ($isPostRequest) {
             <input id="send_spiped_listen_host" name="send_spiped_listen_host" class="zfsas-send-input" value="<?php echo zfsas_send_h($config['SEND_SPIPED_LISTEN_HOST'] ?? '0.0.0.0'); ?>" placeholder="0.0.0.0">
           </div>
           <div class="zfsas-send-field">
-            <label for="send_spiped_port">spiped port</label>
+            <label for="send_spiped_port">spiped listen port</label>
             <input id="send_spiped_port" name="send_spiped_port" class="zfsas-send-input" type="number" min="1" max="65535" value="<?php echo zfsas_send_h($config['SEND_SPIPED_PORT'] ?? '8023'); ?>">
+          </div>
+          <div class="zfsas-send-field">
+            <label for="send_spiped_remote_host">spiped remote host</label>
+            <input id="send_spiped_remote_host" name="send_spiped_remote_host" class="zfsas-send-input" value="<?php echo zfsas_send_h($config['SEND_SPIPED_REMOTE_HOST'] ?? ''); ?>" placeholder="backup.example.lan">
+          </div>
+          <div class="zfsas-send-field">
+            <label for="send_spiped_remote_port">spiped remote port</label>
+            <input id="send_spiped_remote_port" name="send_spiped_remote_port" class="zfsas-send-input" type="number" min="1" max="65535" value="<?php echo zfsas_send_h($config['SEND_SPIPED_REMOTE_PORT'] ?? '8023'); ?>">
           </div>
           <div class="zfsas-send-field">
             <label for="send_spiped_key_path">spiped key path</label>

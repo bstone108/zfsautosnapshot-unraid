@@ -115,9 +115,24 @@ def main() -> int:
         "send settings must persist a spiped key path without storing raw key material",
     )
     assert_contains(
+        text,
+        "SEND_SPIPED_REMOTE_HOST",
+        "send settings must persist the remote spiped receiver host before spiped sender pipelines can run",
+    )
+    assert_contains(
+        text,
+        "SEND_SPIPED_REMOTE_PORT",
+        "send settings must persist the remote spiped receiver port separately from the local listener",
+    )
+    assert_contains(
         settings,
         'name="send_spiped_key_path"',
         "send settings UI must expose a spiped key path field rather than raw key contents",
+    )
+    assert_contains(
+        settings,
+        'name="send_spiped_remote_host"',
+        "send settings UI must expose the remote spiped host used by sender-side spipe",
     )
     assert_contains(
         settings,
@@ -128,6 +143,11 @@ def main() -> int:
         example,
         "SEND_SPIPED_KEY_PATH",
         "example send config must document spiped receiver key-path settings",
+    )
+    assert_contains(
+        example,
+        "SEND_SPIPED_REMOTE_HOST",
+        "example send config must document sender-side remote spiped endpoint settings",
     )
     assert_contains(
         text,

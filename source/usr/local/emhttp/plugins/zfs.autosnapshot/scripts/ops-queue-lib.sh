@@ -55,6 +55,7 @@ DEFAULT_SEND_SSH_PORT="22"
 DEFAULT_SEND_SSH_USER="root"
 DEFAULT_SEND_SPIPED_LISTEN_HOST="0.0.0.0"
 DEFAULT_SEND_SPIPED_PORT="8023"
+DEFAULT_SEND_SPIPED_REMOTE_PORT="8023"
 DEFAULT_RETRY_DELAYS=(60 300 900)
 POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS:-3}"
 POST_DELETE_RECHECK_INTERVAL_SECONDS="${POST_DELETE_RECHECK_INTERVAL_SECONDS:-1}"
@@ -73,6 +74,8 @@ SEND_SSH_USER="$DEFAULT_SEND_SSH_USER"
 SEND_SSH_KEY_PATH=""
 SEND_SPIPED_LISTEN_HOST="$DEFAULT_SEND_SPIPED_LISTEN_HOST"
 SEND_SPIPED_PORT="$DEFAULT_SEND_SPIPED_PORT"
+SEND_SPIPED_REMOTE_HOST=""
+SEND_SPIPED_REMOTE_PORT="$DEFAULT_SEND_SPIPED_REMOTE_PORT"
 SEND_SPIPED_KEY_PATH=""
 SEND_JOBS=""
 
@@ -732,6 +735,8 @@ load_send_config() {
   SEND_SSH_KEY_PATH=""
   SEND_SPIPED_LISTEN_HOST="$DEFAULT_SEND_SPIPED_LISTEN_HOST"
   SEND_SPIPED_PORT="$DEFAULT_SEND_SPIPED_PORT"
+  SEND_SPIPED_REMOTE_HOST=""
+  SEND_SPIPED_REMOTE_PORT="$DEFAULT_SEND_SPIPED_REMOTE_PORT"
   SEND_SPIPED_KEY_PATH=""
   SEND_JOBS=""
 
@@ -746,7 +751,7 @@ load_send_config() {
       raw="${BASH_REMATCH[2]}"
       value="$(parse_config_value "$raw")"
       case "$key" in
-        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_SSH_HOST|SEND_SSH_PORT|SEND_SSH_USER|SEND_SSH_KEY_PATH|SEND_SPIPED_LISTEN_HOST|SEND_SPIPED_PORT|SEND_SPIPED_KEY_PATH|SEND_JOBS)
+        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_SSH_HOST|SEND_SSH_PORT|SEND_SSH_USER|SEND_SSH_KEY_PATH|SEND_SPIPED_LISTEN_HOST|SEND_SPIPED_PORT|SEND_SPIPED_REMOTE_HOST|SEND_SPIPED_REMOTE_PORT|SEND_SPIPED_KEY_PATH|SEND_JOBS)
           printf -v "$key" '%s' "$value"
           ;;
       esac
@@ -2700,6 +2705,10 @@ is_valid_spiped_listen_host() {
   [[ "$1" =~ ^[A-Za-z0-9._:-]+$ ]]
 }
 
+is_valid_spiped_remote_host() {
+  [[ "$1" =~ ^[A-Za-z0-9._:-]+$ ]]
+}
+
 is_valid_spiped_port() {
   [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 ))
 }
@@ -2778,6 +2787,24 @@ build_spiped_receive_command() {
   printf -v "$result_var" '%s' "$command"
 }
 
+build_spipe_send_command() {
+  local result_var="$1"
+  local remote_host="$SEND_SPIPED_REMOTE_HOST"
+  local remote_port="${SEND_SPIPED_REMOTE_PORT:-$DEFAULT_SEND_SPIPED_REMOTE_PORT}"
+  local key_path="$SEND_SPIPED_KEY_PATH"
+  local remote_addr command
+
+  printf -v "$result_var" ''
+  [[ -n "$remote_host" ]] || return 1
+  is_valid_spiped_remote_host "$remote_host" || return 1
+  is_valid_spiped_port "$remote_port" || return 1
+  is_valid_spiped_key_path "$key_path" || return 1
+
+  remote_addr="${remote_host}:${remote_port}"
+  command="spipe -t $(shell_quote_word "$remote_addr") -k $(shell_quote_word "$key_path")"
+  printf -v "$result_var" '%s' "$command"
+}
+
 ssh_dataset_exists() {
   local dataset="$1"
   local command
@@ -2825,7 +2852,7 @@ run_pipeline_with_status() {
   local receive_rc=0
   local progress_supported=0
   local send_transport
-  local ssh_receive_command=""
+  local receive_command=""
 
   is_valid_snapshot_name "$snapshot" || {
     log "Refusing pipeline for invalid snapshot name: $snapshot"
@@ -2847,14 +2874,16 @@ run_pipeline_with_status() {
     return 1
   }
   if [[ "$send_transport" == "ssh" ]]; then
-    if ! build_ssh_receive_command "$destination" ssh_receive_command; then
+    if ! build_ssh_receive_command "$destination" receive_command; then
       log "Unsupported ZFS send transport '$send_transport' requested for $description; SSH receiver settings are incomplete or invalid."
       return 1
     fi
   fi
-  if [[ "$send_transport" != "local" && "$send_transport" != "ssh" ]]; then
-    log "Unsupported ZFS send transport '$send_transport' requested for $description; receiver plumbing is not configured yet."
-    return 1
+  if [[ "$send_transport" == "spiped" ]]; then
+    if ! build_spipe_send_command receive_command; then
+      log "Unsupported ZFS send transport '$send_transport' requested for $description; spiped sender target/key settings are incomplete or invalid."
+      return 1
+    fi
   fi
 
   log "$description (transport=$send_transport)"
@@ -2865,8 +2894,8 @@ run_pipeline_with_status() {
 
   if [[ -n "$base_snapshot" ]]; then
     if (( progress_supported == 1 )); then
-      if [[ "$send_transport" == "ssh" ]]; then
-        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$ssh_receive_command"
+      if [[ "$send_transport" == "ssh" || "$send_transport" == "spiped" ]]; then
+        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command"
       else
         zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | zfs receive -uF "$destination"
       fi
@@ -2875,8 +2904,8 @@ run_pipeline_with_status() {
       meter_rc=${PIPESTATUS[1]:-0}
       receive_rc=${PIPESTATUS[2]:-0}
     else
-      if [[ "$send_transport" == "ssh" ]]; then
-        zfs send -I "$base_snapshot" "$snapshot" | eval "$ssh_receive_command"
+      if [[ "$send_transport" == "ssh" || "$send_transport" == "spiped" ]]; then
+        zfs send -I "$base_snapshot" "$snapshot" | eval "$receive_command"
       else
         zfs send -I "$base_snapshot" "$snapshot" | zfs receive -uF "$destination"
       fi
@@ -2891,8 +2920,8 @@ run_pipeline_with_status() {
     fi
   else
     if (( progress_supported == 1 )); then
-      if [[ "$send_transport" == "ssh" ]]; then
-        zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$ssh_receive_command"
+      if [[ "$send_transport" == "ssh" || "$send_transport" == "spiped" ]]; then
+        zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command"
       else
         zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | zfs receive -uF "$destination"
       fi
@@ -2901,8 +2930,8 @@ run_pipeline_with_status() {
       meter_rc=${PIPESTATUS[1]:-0}
       receive_rc=${PIPESTATUS[2]:-0}
     else
-      if [[ "$send_transport" == "ssh" ]]; then
-        zfs send "$snapshot" | eval "$ssh_receive_command"
+      if [[ "$send_transport" == "ssh" || "$send_transport" == "spiped" ]]; then
+        zfs send "$snapshot" | eval "$receive_command"
       else
         zfs send "$snapshot" | zfs receive -uF "$destination"
       fi
