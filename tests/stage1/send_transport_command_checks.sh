@@ -66,4 +66,17 @@ fi
 assert_contains "$spipe_command" "spipe -t receiver.example.test:8023" "spiped sender command must target configured receiver"
 assert_contains "$spipe_command" "-k /boot/config/plugins/zfs.autosnapshot/spiped/key.bin" "spiped sender command must include valid configured key file"
 
+command=""
+if ! build_spipe_send_command command; then
+  fail "spiped sender command should support a caller result variable named command"
+fi
+assert_contains "$command" "spipe -t receiver.example.test:8023" "spiped sender command must populate a caller variable named command"
+
+command=""
+if ! build_spiped_receive_command "backup/root" command; then
+  fail "spiped receiver command should support a caller result variable named command"
+fi
+assert_contains "$command" "spiped -d" "spiped receiver command must populate a caller variable named command"
+assert_contains "$command" "zfs receive" "spiped receiver command must pipe to zfs receive"
+
 printf '%s\n' "PASS: send transport command checks"

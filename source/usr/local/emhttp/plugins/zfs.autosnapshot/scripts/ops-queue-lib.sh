@@ -2776,7 +2776,7 @@ build_spiped_receive_command() {
   local listen_host="${SEND_SPIPED_LISTEN_HOST:-$DEFAULT_SEND_SPIPED_LISTEN_HOST}"
   local listen_port="${SEND_SPIPED_PORT:-$DEFAULT_SEND_SPIPED_PORT}"
   local key_path="$SEND_SPIPED_KEY_PATH"
-  local listen_addr command
+  local listen_addr built_command
 
   printf -v "$result_var" ''
   is_valid_dataset_name "$destination" || return 1
@@ -2785,8 +2785,8 @@ build_spiped_receive_command() {
   is_valid_spiped_key_path "$key_path" || return 1
 
   listen_addr="${listen_host}:${listen_port}"
-  command="spiped -d -s '$(shell_quote_word "$listen_addr")' -k $(shell_quote_word "$key_path") | zfs receive -uF -- $(shell_quote_word "$destination")"
-  printf -v "$result_var" '%s' "$command"
+  built_command="spiped -d -s '$(shell_quote_word "$listen_addr")' -k $(shell_quote_word "$key_path") | zfs receive -uF -- $(shell_quote_word "$destination")"
+  printf -v "$result_var" '%s' "$built_command"
 }
 
 build_spipe_send_command() {
@@ -2794,7 +2794,7 @@ build_spipe_send_command() {
   local remote_host="$SEND_SPIPED_REMOTE_HOST"
   local remote_port="${SEND_SPIPED_REMOTE_PORT:-$DEFAULT_SEND_SPIPED_REMOTE_PORT}"
   local key_path="$SEND_SPIPED_KEY_PATH"
-  local remote_addr command
+  local remote_addr built_command
 
   printf -v "$result_var" ''
   [[ -n "$remote_host" ]] || return 1
@@ -2803,8 +2803,8 @@ build_spipe_send_command() {
   is_valid_spiped_key_path "$key_path" || return 1
 
   remote_addr="${remote_host}:${remote_port}"
-  command="spipe -t $(shell_quote_word "$remote_addr") -k $(shell_quote_word "$key_path")"
-  printf -v "$result_var" '%s' "$command"
+  built_command="spipe -t $(shell_quote_word "$remote_addr") -k $(shell_quote_word "$key_path")"
+  printf -v "$result_var" '%s' "$built_command"
 }
 
 ssh_dataset_exists() {
