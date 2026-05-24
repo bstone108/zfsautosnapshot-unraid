@@ -53,7 +53,7 @@ function zfsas_send_transport_options()
     return [
         'local' => 'Local pool/dataset',
         'ssh' => 'SSH (key/preconfigured auth)',
-        'spiped' => 'spiped (network, not enabled yet)',
+        'spiped' => 'spiped (encrypted network)',
     ];
 }
 

@@ -34,6 +34,8 @@ def main() -> int:
         "function zfsas_send_normalize_transport",
         "send settings must have explicit transport-mode normalization before network-send fields are accepted",
     )
+    if "spiped (network, not enabled yet)" in text:
+        raise AssertionError("send transport selector must not label spiped as disabled after sender pipeline support is wired")
     assert_contains(
         text,
         "$transportRaw = $pieces[6] ?? 'local';",
@@ -139,6 +141,18 @@ def main() -> int:
         'name="send_spiped_port"',
         "send settings UI must expose a spiped port field near network transport controls",
     )
+    assert_contains(
+        settings,
+        "SSH sends run zfs send through an audited ssh receive command",
+        "send settings UI must explain that SSH transport is an active transfer path, not only saved future metadata",
+    )
+    assert_contains(
+        settings,
+        "spiped sends stream through the configured remote spipe endpoint",
+        "send settings UI must explain the active sender-side spiped path and remote receiver prerequisite",
+    )
+    if "Network transport choices are saved for future receiver plumbing; local sends remain the active transfer path." in settings:
+        raise AssertionError("send settings UI must not keep stale network-transport copy after SSH/spiped pipeline support is wired")
     assert_contains(
         example,
         "SEND_SPIPED_KEY_PATH",
