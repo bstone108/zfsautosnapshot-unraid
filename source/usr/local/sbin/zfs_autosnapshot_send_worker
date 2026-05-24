@@ -314,6 +314,15 @@ ensure_destination_parent_exists_for_transport() {
   esac
 }
 
+spiped_transport_requires_receiver_inventory() {
+  if [[ "$(current_send_transport)" != "spiped" ]]; then
+    return 1
+  fi
+
+  fail_current_job_final "Spiped send transport is configured, but receiver-side snapshot inventory and receive verification are not implemented yet. Use SSH for network sends that require base selection, or wait for the spiped receiver coordination slice before running spiped jobs."
+  return 0
+}
+
 register_active_send_datasets_for_current_job() {
   local mode action source_root include_children dataset file tmp source_dataset
 
@@ -952,6 +961,10 @@ send_member_snapshot() {
     defer_current_job "Destination dataset is not ready for scheduled send; waiting for ZFS import/mount." 15
     return 2
   }
+
+  if spiped_transport_requires_receiver_inventory; then
+    return 1
+  fi
 
   zfs_dataset_tree_actionable "$source_dataset" "0" readiness_message || {
     log "Source dataset is not ready for ${source_dataset}; deferring send member: ${readiness_message}"

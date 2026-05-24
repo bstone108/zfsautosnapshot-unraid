@@ -157,6 +157,22 @@ def main() -> int:
     if "spiped)" not in worker_destination_ready_body and "send_destination_actionable \"$destination\"" in worker_destination_ready_body:
         raise AssertionError("spiped worker readiness must not use local-only destination readiness")
 
+    assert_contains(
+        worker,
+        "spiped_transport_requires_receiver_inventory()",
+        "spiped sends must fail closed until receiver-side inventory/verification exists; opaque spipe streams cannot safely use local destination state",
+    )
+    send_member_body = worker.split("send_member_snapshot() {", 1)[1].split("\n}\n\ncleanup_source_checkpoints_for_verified_member()", 1)[0]
+    assert_contains(
+        send_member_body,
+        "spiped_transport_requires_receiver_inventory",
+        "send member processing must stop spiped jobs before local-only base selection or verification can run",
+    )
+    spiped_guard_index = send_member_body.find("spiped_transport_requires_receiver_inventory")
+    local_base_index = send_member_body.find("find_latest_common_basename_for_member_transport")
+    if spiped_guard_index == -1 or local_base_index == -1 or spiped_guard_index > local_base_index:
+        raise AssertionError("spiped fail-closed guard must run before latest-common base selection")
+
     print("PASS: send worker helper static contracts")
     return 0
 

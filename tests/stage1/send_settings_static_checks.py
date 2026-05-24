@@ -148,11 +148,13 @@ def main() -> int:
     )
     assert_contains(
         settings,
-        "spiped sends stream through the configured remote spipe endpoint",
-        "send settings UI must explain the active sender-side spiped path and remote receiver prerequisite",
+        "spiped settings are staged for encrypted sender/receiver coordination",
+        "send settings UI must explain that spiped is not active until receiver-side inventory/verification is implemented",
     )
+    if "spiped sends stream through the configured remote spipe endpoint" in settings:
+        raise AssertionError("send settings UI must not claim spiped jobs are active while worker fail-closed receiver inventory is still pending")
     if "Network transport choices are saved for future receiver plumbing; local sends remain the active transfer path." in settings:
-        raise AssertionError("send settings UI must not keep stale network-transport copy after SSH/spiped pipeline support is wired")
+        raise AssertionError("send settings UI must not keep stale network-transport copy after SSH pipeline support is wired")
     assert_contains(
         example,
         "SEND_SPIPED_KEY_PATH",

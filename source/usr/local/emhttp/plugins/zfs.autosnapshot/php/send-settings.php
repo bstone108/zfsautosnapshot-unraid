@@ -664,7 +664,7 @@ if ($isPostRequest) {
               <option value="<?php echo zfsas_send_h($value); ?>"><?php echo zfsas_send_h($label); ?></option>
             <?php endforeach; ?>
           </select>
-          <div class="zfsas-send-help">SSH sends run zfs send through an audited ssh receive command on the configured receiver. spiped sends stream through the configured remote spipe endpoint; make sure the receiver-side spiped listener and zfs receive path are already prepared before using it.</div>
+          <div class="zfsas-send-help">SSH sends run zfs send through an audited ssh receive command on the configured receiver. spiped settings are staged for encrypted sender/receiver coordination, but spiped jobs fail closed until receiver-side snapshot inventory and receive verification are implemented.</div>
         </div>
         <div class="zfsas-send-field">
           <label for="new_job_threshold">Destination free-space target</label>
