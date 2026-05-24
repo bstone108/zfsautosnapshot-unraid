@@ -2698,7 +2698,7 @@ is_valid_ssh_key_path() {
   local key_path="$1"
   [[ -z "$key_path" ]] && return 0
   [[ "$key_path" == /* ]] || return 1
-  [[ "$key_path" != *$'\n'* && "$key_path" != *$'\r'* && "$key_path" != *$'\0'* ]]
+  [[ "$key_path" != *$'\n'* && "$key_path" != *$'\r'* ]]
 }
 
 is_valid_spiped_listen_host() {
@@ -2717,7 +2717,7 @@ is_valid_spiped_key_path() {
   local key_path="$1"
   [[ -n "$key_path" ]] || return 1
   [[ "$key_path" == /* ]] || return 1
-  [[ "$key_path" != *$'\n'* && "$key_path" != *$'\r'* && "$key_path" != *$'\0'* ]]
+  [[ "$key_path" != *$'\n'* && "$key_path" != *$'\r'* ]]
 }
 
 shell_quote_word() {
@@ -2731,7 +2731,7 @@ build_ssh_zfs_command() {
   local ssh_port="${SEND_SSH_PORT:-$DEFAULT_SEND_SSH_PORT}"
   local ssh_user="${SEND_SSH_USER:-$DEFAULT_SEND_SSH_USER}"
   local ssh_key_path="$SEND_SSH_KEY_PATH"
-  local remote_target command part
+  local remote_target built_command part
   local -a ssh_parts=(ssh -o BatchMode=yes -o PasswordAuthentication=no)
 
   printf -v "$result_var" ''
@@ -2740,7 +2740,9 @@ build_ssh_zfs_command() {
   is_valid_ssh_host "$ssh_host" || return 1
   is_valid_ssh_user "$ssh_user" || return 1
   is_valid_ssh_port "$ssh_port" || return 1
-  is_valid_ssh_key_path "$ssh_key_path" || return 1
+  if [[ -n "$ssh_key_path" ]]; then
+    is_valid_ssh_key_path "$ssh_key_path" || return 1
+  fi
 
   ssh_parts+=(-p "$ssh_port")
   if [[ -n "$ssh_key_path" ]]; then
@@ -2748,12 +2750,12 @@ build_ssh_zfs_command() {
   fi
   remote_target="${ssh_user}@${ssh_host}"
 
-  command=""
+  built_command=""
   for part in "${ssh_parts[@]}"; do
-    command+="$(shell_quote_word "$part") "
+    built_command+="$(shell_quote_word "$part") "
   done
-  command+="$(shell_quote_word "$remote_target") $(shell_quote_word "$remote_zfs_command")"
-  printf -v "$result_var" '%s' "$command"
+  built_command+="$(shell_quote_word "$remote_target") $(shell_quote_word "$remote_zfs_command")"
+  printf -v "$result_var" '%s' "$built_command"
   return 0
 }
 
