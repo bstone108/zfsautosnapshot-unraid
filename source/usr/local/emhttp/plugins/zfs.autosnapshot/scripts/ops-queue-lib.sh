@@ -3421,12 +3421,15 @@ collect_latest_common_checkpoint_basenames_for_schedule() {
   local result_name="$2"
   # shellcheck disable=SC2178
   local -n result_ref="$result_name"
-  local source_root dest_root include_children prefix
+  local source_root dest_root include_children prefix transport
   local source_dataset dest_dataset relative latest_common
 
   source_root="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}"
   dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
   include_children="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]:-0}"
+  transport="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
   prefix="$(job_prefix_for_schedule "$schedule_job_id")"
 
   [[ -n "$source_root" && -n "$dest_root" ]] || return 0
@@ -3442,7 +3445,7 @@ collect_latest_common_checkpoint_basenames_for_schedule() {
     fi
 
     latest_common=""
-    find_latest_common_basename_for_member "$source_dataset" "$dest_dataset" "$prefix" latest_common || true
+    find_latest_common_basename_for_member_transport "$source_dataset" "$dest_dataset" "$prefix" latest_common "$transport" || true
     [[ -n "$latest_common" ]] && result_ref["$latest_common"]=1
   done < <(list_tree_datasets "$source_root" "$include_children")
 }
