@@ -672,6 +672,10 @@ prepare_scheduled_job_snapshot() {
     return 2
   }
 
+  if spiped_transport_requires_receiver_inventory; then
+    return 1
+  fi
+
   if [[ -n "$(job_get job SOURCE_SNAPSHOT)" ]]; then
     if ! snapshot_exists "$(job_get job SOURCE_SNAPSHOT)"; then
       fail_current_job_final "Scheduled send snapshot '$(job_get job SOURCE_SNAPSHOT)' is no longer available."

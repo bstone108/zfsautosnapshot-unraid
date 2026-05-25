@@ -173,6 +173,21 @@ def main() -> int:
     if spiped_guard_index == -1 or local_base_index == -1 or spiped_guard_index > local_base_index:
         raise AssertionError("spiped fail-closed guard must run before latest-common base selection")
 
+    prepare_body = worker.split("prepare_scheduled_job_snapshot() {", 1)[1].split("\n}\n\nprepare_manual_snapshot_job()", 1)[0]
+    assert_contains(
+        prepare_body,
+        "spiped_transport_requires_receiver_inventory",
+        "scheduled spiped jobs must fail closed before creating new source checkpoints while receiver inventory is unavailable",
+    )
+    spiped_prepare_guard_index = prepare_body.find("spiped_transport_requires_receiver_inventory")
+    checkpoint_create_index = prepare_body.find("Creating scheduled send checkpoint")
+    if (
+        spiped_prepare_guard_index == -1
+        or checkpoint_create_index == -1
+        or spiped_prepare_guard_index > checkpoint_create_index
+    ):
+        raise AssertionError("scheduled spiped fail-closed guard must run before source checkpoint creation")
+
     print("PASS: send worker helper static contracts")
     return 0
 
