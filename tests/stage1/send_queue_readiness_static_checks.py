@@ -310,6 +310,11 @@ def main() -> int:
     )
     assert_contains(
         delete_worker,
+        'build_ssh_zfs_command "zfs destroy -- $(shell_quote_word "$snapshot")" command',
+        "SSH destination checkpoint retention must destroy the remote snapshot over SSH instead of trying a local zfs destroy",
+    )
+    assert_contains(
+        delete_worker,
         '"${schedule_job_id}|${delete_scope}|${snapshot}"',
         "delete queue duplicate suppression for destination checkpoint deletes must be per snapshot, not one basename across a recursive tree",
     )

@@ -2840,6 +2840,19 @@ ssh_snapshot_inventory() {
   eval "$command" 2>/dev/null || true
 }
 
+ssh_dataset_tree_inventory() {
+  local dataset="$1"
+  local include_children="${2:-0}"
+  local command recursive_flag=""
+
+  is_valid_dataset_name "$dataset" || return 1
+  if [[ "$include_children" == "1" ]]; then
+    recursive_flag="-r "
+  fi
+  build_ssh_zfs_command "zfs list -H -o name -t filesystem,volume ${recursive_flag}-- $(shell_quote_word "$dataset") 2>/dev/null" command || return 1
+  eval "$command" 2>/dev/null || true
+}
+
 run_pipeline_with_status() {
   local description="$1"
   local base_snapshot="$2"
@@ -4312,6 +4325,8 @@ rebuild_active_delete_queue_index() {
       DELETE_QUEUE_BY_SNAPSHOT["$(job_get job SNAPSHOT)"]=1
       if [[ "$(job_get job DELETE_SCOPE)" == "checkpoint" ]]; then
         DELETE_QUEUE_BY_CHECKPOINT["$(job_get job SEND_SCHEDULE_JOB_ID)|$(job_get job SNAPSHOT_NAME)"]=1
+      elif [[ "$(job_get job DELETE_SCOPE)" == "destination_checkpoint" ]]; then
+        DELETE_QUEUE_BY_CHECKPOINT["$(job_get job SEND_SCHEDULE_JOB_ID)|$(job_get job DELETE_SCOPE)|$(job_get job SNAPSHOT)"]=1
       fi
       [[ -n "$pool" ]] && DELETE_QUEUE_COUNTS_BY_POOL["$pool"]=$(( ${DELETE_QUEUE_COUNTS_BY_POOL[$pool]:-0} + 1 ))
       [[ -n "$dataset" ]] && DELETE_QUEUE_COUNTS_BY_DATASET["$dataset"]=$(( ${DELETE_QUEUE_COUNTS_BY_DATASET[$dataset]:-0} + 1 ))
@@ -4327,6 +4342,8 @@ rebuild_active_delete_queue_index() {
       DELETE_QUEUE_BY_SNAPSHOT["$(job_get job SNAPSHOT)"]=1
       if [[ "$(job_get job DELETE_SCOPE)" == "checkpoint" ]]; then
         DELETE_QUEUE_BY_CHECKPOINT["$(job_get job SEND_SCHEDULE_JOB_ID)|$(job_get job SNAPSHOT_NAME)"]=1
+      elif [[ "$(job_get job DELETE_SCOPE)" == "destination_checkpoint" ]]; then
+        DELETE_QUEUE_BY_CHECKPOINT["$(job_get job SEND_SCHEDULE_JOB_ID)|$(job_get job DELETE_SCOPE)|$(job_get job SNAPSHOT)"]=1
       fi
       [[ -n "$pool" ]] && DELETE_QUEUE_COUNTS_BY_POOL["$pool"]=$(( ${DELETE_QUEUE_COUNTS_BY_POOL[$pool]:-0} + 1 ))
       [[ -n "$dataset" ]] && DELETE_QUEUE_COUNTS_BY_DATASET["$dataset"]=$(( ${DELETE_QUEUE_COUNTS_BY_DATASET[$dataset]:-0} + 1 ))
@@ -4369,7 +4386,7 @@ queue_snapshot_delete_job() {
   local delete_scope="${6:-snapshot}"
   local snapshot_name snapshot_epoch job_id requested_epoch
   local guid="" createtxg=""
-  local estimated_reclaim=0 pool=""
+  local estimated_reclaim=0 pool="" send_transport="local"
   local parsed_schedule_job_id=""
   local -A props=()
   local -A job=()
@@ -4405,20 +4422,32 @@ queue_snapshot_delete_job() {
     return 0
   fi
 
+  if [[ -n "$send_schedule_job_id" ]]; then
+    send_transport="${SCHEDULE_TRANSPORT[$send_schedule_job_id]:-local}"
+    send_transport="${send_transport,,}"
+    [[ -n "$send_transport" ]] || send_transport="local"
+  fi
+
   if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
     snapshot_delete_checkpoint_job_exists "$send_schedule_job_id" "$snapshot_name" && return 0
   else
     snapshot_delete_job_exists_for_snapshot "$snapshot" && return 0
   fi
 
-  zfs_get_snapshot_props_cached "$snapshot" props || return 1
-  snapshot_epoch="${props[creation]:-0}"
-  guid="${props[guid]:-}"
-  createtxg="${props[createtxg]:-}"
+  if [[ "$delete_scope" == "destination_checkpoint" && "$send_transport" == "ssh" ]]; then
+    snapshot_epoch="$queue_sort_epoch"
+    guid=""
+    createtxg=""
+  else
+    zfs_get_snapshot_props_cached "$snapshot" props || return 1
+    snapshot_epoch="${props[creation]:-0}"
+    guid="${props[guid]:-}"
+    createtxg="${props[createtxg]:-}"
+  fi
   [[ "$snapshot_epoch" =~ ^[0-9]+$ ]] || snapshot_epoch=0
   [[ "$queue_sort_epoch" =~ ^[0-9]+$ ]] || queue_sort_epoch="$snapshot_epoch"
 
-  if [[ "$delete_scope" == "checkpoint" && -n "$send_schedule_job_id" ]]; then
+  if [[ ( "$delete_scope" == "checkpoint" || "$delete_scope" == "destination_checkpoint" ) && -n "$send_schedule_job_id" ]]; then
     estimated_reclaim="$(estimate_destination_checkpoint_reclaim_bytes "$send_schedule_job_id" "$snapshot_name")"
   else
     estimated_reclaim="$(send_snapshot_written_bytes_cached "$snapshot")"
@@ -4519,7 +4548,7 @@ latest_checkpoint_basename_for_schedule() {
 
 list_existing_destination_datasets_for_schedule() {
   local schedule_job_id="$1"
-  local dest_root include_children dataset datasets=""
+  local dest_root include_children transport dataset datasets=""
 
   if [[ -n "${SEND_DESTINATION_DATASETS_BY_SCHEDULE[$schedule_job_id]+set}" ]]; then
     printf '%s' "${SEND_DESTINATION_DATASETS_BY_SCHEDULE[$schedule_job_id]}"
@@ -4528,6 +4557,22 @@ list_existing_destination_datasets_for_schedule() {
 
   dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
   include_children="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]:-0}"
+  transport="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  if [[ "$transport" == "ssh" ]]; then
+    while IFS= read -r dataset; do
+      [[ -n "$dataset" ]] || continue
+      datasets+="${dataset}"$'\n'
+    done < <(ssh_dataset_tree_inventory "$dest_root" "$include_children" || true)
+    SEND_DESTINATION_DATASETS_BY_SCHEDULE["$schedule_job_id"]="$datasets"
+    printf '%s' "$datasets"
+    return 0
+  fi
+  if [[ "$transport" == "spiped" ]]; then
+    SEND_DESTINATION_DATASETS_BY_SCHEDULE["$schedule_job_id"]=""
+    return 0
+  fi
   if [[ -z "$dest_root" ]] || ! dataset_exists "$dest_root"; then
     SEND_DESTINATION_DATASETS_BY_SCHEDULE["$schedule_job_id"]=""
     return 0

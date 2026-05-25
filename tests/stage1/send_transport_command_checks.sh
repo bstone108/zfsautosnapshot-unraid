@@ -94,6 +94,10 @@ cat >"${tmp_bin}/ssh" <<'SSH_FAKE'
 #!/bin/bash
 remote_command="${*: -1}"
 case "$remote_command" in
+  *"zfs list -H -o name -t filesystem,volume -- backup/data"*)
+    printf '%s\n' "backup/data"
+    exit 0
+    ;;
   *"zfs list -H -o name -- backup/data"*)
     printf '%s\n' "backup/data"
     exit 0
@@ -142,5 +146,8 @@ declare -A common_checkpoints=()
 collect_latest_common_checkpoint_basenames_for_schedule "feedfacecafe" common_checkpoints || true
 [[ -n "${common_checkpoints[zfs-send-feedfacecafe-old]:-}" ]] || fail "SSH schedules must protect latest common checkpoints discovered from the remote destination inventory"
 [[ -z "${common_checkpoints[zfs-send-feedfacecafe-new]:-}" ]] || fail "SSH latest-common protection must not mark source-only checkpoints common"
+
+remote_destinations="$(list_existing_destination_datasets_for_schedule "feedfacecafe")"
+assert_contains "$remote_destinations" "backup/data" "SSH destination retention must enumerate the remote destination root even when it does not exist locally"
 
 printf '%s\n' "PASS: send transport command checks"
