@@ -57,8 +57,11 @@ SEND_SPIPED_KEY_PATH=""
 #   6h, 12h, 1d, 7d
 # transport values:
 #   local, ssh, spiped
-#   Network transports are stored for receiver setup plumbing and fail closed
-#   until the matching receiver settings/pipeline support are enabled.
+#   SSH transports actively run zfs send through non-interactive ssh using the
+#   receiver settings above; remote inventory/retention checks also use ssh.
+#   spiped transports fail closed until receiver-side snapshot inventory and
+#   receive verification are implemented. Use ssh for active network sends until
+#   spiped receiver coordination is safe.
 #
 # threshold = minimum effective free space that must remain on the destination
 # dataset's active pool/quota constraints before a send run proceeds.

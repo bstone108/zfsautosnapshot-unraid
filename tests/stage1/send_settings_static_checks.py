@@ -166,6 +166,23 @@ def main() -> int:
         "example send config must document sender-side remote spiped endpoint settings",
     )
     assert_contains(
+        example,
+        "SSH transports actively run zfs send through non-interactive ssh",
+        "example send config must document that SSH is an active network send path",
+    )
+    assert_contains(
+        example,
+        "spiped transports fail closed until receiver-side snapshot inventory",
+        "example send config must document spiped's current fail-closed receiver-safety limitation separately from SSH",
+    )
+    assert_contains(
+        example,
+        "receive verification are implemented",
+        "example send config must document that spiped receive verification is still pending",
+    )
+    if "Network transports are stored for receiver setup plumbing and fail closed" in example:
+        raise AssertionError("example send config must not incorrectly describe all network transports as fail-closed after SSH support is active")
+    assert_contains(
         text,
         "function zfsas_send_write_config_atomically",
         "send settings must write zfs_send.conf through an atomic temp-file + rename helper",
