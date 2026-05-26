@@ -103,7 +103,24 @@ case "$remote_command" in
     exit 0
     ;;
   *"zfs list -H -p -s creation -t snapshot -o name,creation -d 1 -- backup/data"*)
-    printf '%s\t%s\n' "backup/data@zfs-send-feedfacecafe-old" "100"
+    printf '%s\t%s\n' \
+      "backup/data@zfs-send-feedfacecafe-ancient" "50" \
+      "backup/data@zfs-send-feedfacecafe-old" "100"
+    exit 0
+    ;;
+  *"zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg backup/data"*)
+    for snap in backup/data@zfs-send-feedfacecafe-ancient backup/data@zfs-send-feedfacecafe-old; do
+      case "$snap" in
+        *@zfs-send-feedfacecafe-ancient) creation=50; written=4096; guid=111; txg=11 ;;
+        *@zfs-send-feedfacecafe-old) creation=100; written=8192; guid=222; txg=22 ;;
+      esac
+      printf '%s\tcreation\t%s\n' "$snap" "$creation"
+      printf '%s\twritten\t%s\n' "$snap" "$written"
+      printf '%s\tuserrefs\t0\n' "$snap"
+      printf '%s\tclones\t-\n' "$snap"
+      printf '%s\tguid\t%s\n' "$snap" "$guid"
+      printf '%s\tcreatetxg\t%s\n' "$snap" "$txg"
+    done
     exit 0
     ;;
 esac
@@ -121,6 +138,7 @@ zfs() {
     fi
     if [[ "$args" == *" -t snapshot "* && "$args" == *" source/data "* ]]; then
       printf '%s\t%s\n' \
+        "source/data@zfs-send-feedfacecafe-ancient" "50" \
         "source/data@zfs-send-feedfacecafe-old" "100" \
         "source/data@zfs-send-feedfacecafe-new" "200"
       return 0
@@ -149,5 +167,30 @@ collect_latest_common_checkpoint_basenames_for_schedule "feedfacecafe" common_ch
 
 remote_destinations="$(list_existing_destination_datasets_for_schedule "feedfacecafe")"
 assert_contains "$remote_destinations" "backup/data" "SSH destination retention must enumerate the remote destination root even when it does not exist locally"
+
+retention_root="$(mktemp -d)"
+cleanup_retention_root() {
+  rm -rf "$retention_root"
+}
+trap 'cleanup_transport_check; cleanup_retention_root' EXIT
+OPS_ROOT="${retention_root}/ops"
+OPS_STATUS_DIR="${OPS_ROOT}/status"
+DELETE_QUEUE_STATE_FILE="${OPS_STATUS_DIR}/delete-queue.state"
+DELETE_QUEUE_INBOX_FILE="${OPS_ROOT}/delete-queue.inbox"
+DELETE_QUEUE_INBOX_LOCK_FILE="${OPS_ROOT}/delete-queue.inbox.lock"
+PERSISTED_QUEUE_DIR="${retention_root}/persisted"
+PERSISTED_DELETE_QUEUE_FILE="${PERSISTED_QUEUE_DIR}/delete-queue.persist"
+mkdir -p "$OPS_ROOT" "$OPS_STATUS_DIR" "$PERSISTED_QUEUE_DIR"
+clear_send_cleanup_caches
+SCHEDULE_SOURCE_ROOT[feedfacecafe]="source/data"
+SCHEDULE_DEST_ROOT[feedfacecafe]="backup/data"
+SCHEDULE_INCLUDE_CHILDREN[feedfacecafe]="0"
+SCHEDULE_TRANSPORT[feedfacecafe]="ssh"
+SCHEDULE_PREFIX[feedfacecafe]="zfs-send-feedfacecafe-"
+queue_schedule_retention_cleanup "feedfacecafe"
+[[ -f "$DELETE_QUEUE_INBOX_FILE" ]] || fail "SSH destination retention must queue eligible remote destination checkpoint deletes"
+queued_retention="$(cat "$DELETE_QUEUE_INBOX_FILE")"
+assert_contains "$queued_retention" "backup/data@zfs-send-feedfacecafe-ancient" "SSH destination retention must queue the oldest unprotected remote checkpoint snapshot"
+assert_not_contains "$queued_retention" "backup/data@zfs-send-feedfacecafe-old" "SSH destination retention must not queue the newest/latest-common remote checkpoint"
 
 printf '%s\n' "PASS: send transport command checks"

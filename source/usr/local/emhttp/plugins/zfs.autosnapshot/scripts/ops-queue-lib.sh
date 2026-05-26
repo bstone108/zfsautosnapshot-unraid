@@ -2247,15 +2247,30 @@ clear_send_cleanup_caches() {
 }
 
 load_send_dataset_snapshot_cache() {
+  load_send_dataset_snapshot_cache_for_transport "$1" "local"
+}
+
+load_send_dataset_snapshot_cache_for_transport() {
   local dataset="$1"
-  local metadata snap property value asc_lines="" desc_lines="" listed_snap
+  local transport="${2:-local}"
+  local metadata snap property value asc_lines="" desc_lines="" listed_snap command
   local -A creation_map=()
 
   if [[ -n "${SEND_DATASET_SNAPSHOT_LINES_ASC[$dataset]+set}" ]]; then
     return 0
   fi
 
-  metadata="$(zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg "$dataset" 2>/dev/null || true)"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  if [[ "$transport" == "ssh" ]]; then
+    if build_ssh_zfs_command "zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg $(shell_quote_word "$dataset") 2>/dev/null" command; then
+      metadata="$(eval "$command" 2>/dev/null || true)"
+    else
+      metadata=""
+    fi
+  else
+    metadata="$(zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg "$dataset" 2>/dev/null || true)"
+  fi
 
   while IFS=$'\t' read -r snap property value; do
     [[ -n "$snap" && -n "$property" ]] || continue
@@ -3587,15 +3602,22 @@ find_oldest_deletable_destination_snapshot_for_schedule() {
   local result_snap_var="$3"
   local result_epoch_var="$4"
   local dest_root snap_name snap_epoch snap_dataset snap_base newest_base="" oldest_snap="" oldest_epoch=0
-  local userrefs
+  local transport userrefs
   local -A protected=()
 
   printf -v "$result_snap_var" ''
   printf -v "$result_epoch_var" '0'
 
   dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
+  transport="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
   [[ -n "$dest_root" ]] || return 1
-  dataset_exists "$dest_root" || return 1
+  if [[ "$transport" == "ssh" ]]; then
+    ssh_dataset_exists "$dest_root" || return 1
+  else
+    dataset_exists "$dest_root" || return 1
+  fi
 
   cached_all_scheduled_job_protected_basenames protected
 
@@ -3607,9 +3629,9 @@ find_oldest_deletable_destination_snapshot_for_schedule() {
     candidate_affects_any_constraint "$snap_dataset" "$constraints_name" || continue
     [[ -z "${protected[$snap_base]:-}" ]] || continue
 
-    userrefs="$(snapshot_userrefs_count "$snap_name")"
+    userrefs="$(send_snapshot_userrefs_count_cached "$snap_name")"
     (( userrefs == 0 )) || continue
-    snapshot_has_clones "$snap_name" && continue
+    send_snapshot_has_clones_cached "$snap_name" && continue
 
     if [[ -z "$oldest_snap" ]] || (( snap_epoch < oldest_epoch )); then
       oldest_snap="$snap_name"
@@ -3618,7 +3640,7 @@ find_oldest_deletable_destination_snapshot_for_schedule() {
   done < <(
     while IFS= read -r snap_dataset; do
       [[ -n "$snap_dataset" ]] || continue
-      load_send_dataset_snapshot_cache "$snap_dataset"
+      load_send_dataset_snapshot_cache_for_transport "$snap_dataset" "$transport"
       printf '%s' "${SEND_DATASET_SNAPSHOT_LINES_ASC[$snap_dataset]}"
     done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
   )
@@ -4358,12 +4380,15 @@ estimate_destination_checkpoint_reclaim_bytes() {
   local basename="$2"
   local cache_key="${schedule_job_id}|${basename}"
   local loaded_key="${schedule_job_id}|__loaded__"
+  local transport="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
   local dataset snap_name snap_epoch snap_base
 
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
   if [[ -z "${SEND_CHECKPOINT_RECLAIM_CACHE[$loaded_key]:-}" ]]; then
     while IFS= read -r dataset; do
       [[ -n "$dataset" ]] || continue
-      load_send_dataset_snapshot_cache "$dataset"
+      load_send_dataset_snapshot_cache_for_transport "$dataset" "$transport"
       while IFS=$'\t' read -r snap_name snap_epoch; do
         [[ -n "$snap_name" ]] || continue
         snap_base="${snap_name##*@}"
@@ -4656,6 +4681,7 @@ queue_destination_retention_for_dataset() {
   local capacity_dataset="${5:-}"
   local delta_map_name="${6:-}"
   local snap_name snap_epoch snap_base snap_age written_bytes userrefs snapshot_schedule_job_id
+  local transport="local"
   local newest_snapshot=""
   local zero_change_anchor=""
   local keep_all_seconds keep_daily_seconds keep_weekly_seconds
@@ -4666,8 +4692,17 @@ queue_destination_retention_for_dataset() {
   local -A kept_week=()
   local -A queued_checkpoint_basenames=()
 
-  dataset_exists "$dataset" || return 0
-  load_send_dataset_snapshot_cache "$dataset"
+  if [[ -n "$schedule_job_id" ]]; then
+    transport="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
+    transport="${transport,,}"
+    [[ -n "$transport" ]] || transport="local"
+  fi
+  if [[ "$transport" == "ssh" ]]; then
+    ssh_dataset_exists "$dataset" || return 0
+  else
+    dataset_exists "$dataset" || return 0
+  fi
+  load_send_dataset_snapshot_cache_for_transport "$dataset" "$transport"
 
   keep_all_seconds="$(send_retention_keep_all_seconds)"
   keep_daily_seconds="$(send_retention_keep_daily_until_seconds)"
@@ -4721,6 +4756,10 @@ queue_destination_retention_for_dataset() {
     snap_age=$(( now_epoch - snap_epoch ))
     if (( snap_age > keep_weekly_seconds )); then
       snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
+      if [[ "$transport" == "ssh" && -z "$snapshot_schedule_job_id" ]]; then
+        log "Skipping remote SSH destination snapshot ${snap_name}; only send-managed checkpoints are eligible for remote retention cleanup."
+        continue
+      fi
       if [[ -n "$snapshot_schedule_job_id" ]]; then
         [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
         queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint" || true
@@ -4743,6 +4782,10 @@ queue_destination_retention_for_dataset() {
         kept_week["$week_key"]=1
       else
         snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
+        if [[ "$transport" == "ssh" && -z "$snapshot_schedule_job_id" ]]; then
+          log "Skipping remote SSH destination snapshot ${snap_name}; only send-managed checkpoints are eligible for remote retention cleanup."
+          continue
+        fi
         if [[ -n "$snapshot_schedule_job_id" ]]; then
           [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
           queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send weekly retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint" || true
@@ -4766,6 +4809,10 @@ queue_destination_retention_for_dataset() {
         kept_day["$day_key"]=1
       else
         snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
+        if [[ "$transport" == "ssh" && -z "$snapshot_schedule_job_id" ]]; then
+          log "Skipping remote SSH destination snapshot ${snap_name}; only send-managed checkpoints are eligible for remote retention cleanup."
+          continue
+        fi
         if [[ -n "$snapshot_schedule_job_id" ]]; then
           [[ -z "${queued_checkpoint_basenames[$snap_base]:-}" ]] || continue
           queue_snapshot_delete_job "$dataset" "$snap_name" "$snap_epoch" "Queued by scheduled-send daily retention cleanup." "$snapshot_schedule_job_id" "destination_checkpoint" || true
