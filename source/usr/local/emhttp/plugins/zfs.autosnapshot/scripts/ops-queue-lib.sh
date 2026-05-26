@@ -2910,10 +2910,8 @@ run_pipeline_with_status() {
     fi
   fi
   if [[ "$send_transport" == "spiped" ]]; then
-    if ! build_spipe_send_command receive_command; then
-      log "Unsupported ZFS send transport '$send_transport' requested for $description; spiped sender target/key settings are incomplete or invalid."
-      return 1
-    fi
+    log "Unsupported ZFS send transport '$send_transport' requested for $description; spiped receiver inventory and receive verification are not implemented yet."
+    return 1
   fi
 
   log "$description (transport=$send_transport)"

@@ -193,4 +193,48 @@ queued_retention="$(cat "$DELETE_QUEUE_INBOX_FILE")"
 assert_contains "$queued_retention" "backup/data@zfs-send-feedfacecafe-ancient" "SSH destination retention must queue the oldest unprotected remote checkpoint snapshot"
 assert_not_contains "$queued_retention" "backup/data@zfs-send-feedfacecafe-old" "SSH destination retention must not queue the newest/latest-common remote checkpoint"
 
+# spiped is intentionally staged/fail-closed until receiver-side inventory and
+# receive verification exist.  Even if a stale/manual job file reaches the worker,
+# the pipeline must refuse before creating a destructive unverified send stream.
+cat >"${tmp_bin}/spipe" <<'SPIPE_FAKE'
+#!/bin/bash
+echo "spipe should not be invoked while spiped transport is fail-closed" >&2
+exit 88
+SPIPE_FAKE
+chmod +x "${tmp_bin}/spipe"
+spiped_send_marker="${retention_root}/spiped-zfs-send-called"
+zfs() {
+  if [[ "$1" == "send" ]]; then
+    : >"$spiped_send_marker"
+    return 0
+  fi
+  if [[ "$1" == "list" ]]; then
+    local args=" $* "
+    if [[ "$args" == *" -o name "* && "$args" == *" source/data "* ]]; then
+      printf '%s\n' "source/data"
+      return 0
+    fi
+    if [[ "$args" == *" -t snapshot "* && "$args" == *" source/data "* ]]; then
+      printf '%s\t%s\n' \
+        "source/data@zfs-send-feedfacecafe-ancient" "50" \
+        "source/data@zfs-send-feedfacecafe-old" "100" \
+        "source/data@zfs-send-feedfacecafe-new" "200"
+      return 0
+    fi
+    if [[ "$args" == *" backup/data "* ]]; then
+      return 1
+    fi
+  fi
+  return 1
+}
+declare -gA job=()
+job[SEND_TRANSPORT]="spiped"
+SEND_SPIPED_REMOTE_HOST="receiver.example.test"
+SEND_SPIPED_REMOTE_PORT="8023"
+SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
+if run_pipeline_with_status "spiped staged pipeline guard" "" "source/data@zfs-send-feedfacecafe-new" "backup/data" 0 0 99; then
+  fail "spiped pipelines must fail closed until receiver inventory/verification is implemented"
+fi
+[[ ! -e "$spiped_send_marker" ]] || fail "spiped fail-closed guard must stop before zfs send is invoked"
+
 printf '%s\n' "PASS: send transport command checks"
