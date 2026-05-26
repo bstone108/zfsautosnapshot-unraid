@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SEND_HELPERS = ROOT / "source/usr/local/emhttp/plugins/zfs.autosnapshot/php/send-helpers.php"
 SEND_SETTINGS = ROOT / "source/usr/local/emhttp/plugins/zfs.autosnapshot/php/send-settings.php"
 SEND_EXAMPLE = ROOT / "source/usr/local/emhttp/plugins/zfs.autosnapshot/config/zfs_send.conf.example"
+README = ROOT / "README.md"
 
 
 def assert_contains(text: str, needle: str, message: str) -> None:
@@ -19,6 +20,7 @@ def main() -> int:
     text = SEND_HELPERS.read_text()
     settings = SEND_SETTINGS.read_text()
     example = SEND_EXAMPLE.read_text()
+    readme = README.read_text()
     assert_contains(
         text,
         "function zfsas_send_normalize_dataset_path",
@@ -182,6 +184,23 @@ def main() -> int:
     )
     if "Network transports are stored for receiver setup plumbing and fail closed" in example:
         raise AssertionError("example send config must not incorrectly describe all network transports as fail-closed after SSH support is active")
+    assert_contains(
+        readme,
+        "SSH transport can send over the network using non-interactive SSH",
+        "README ZFS Send section must document SSH as an active network transport",
+    )
+    assert_contains(
+        readme,
+        "spiped settings are present for staged encrypted transport work, but spiped jobs currently fail closed",
+        "README ZFS Send section must document spiped's current fail-closed staged status",
+    )
+    assert_contains(
+        readme,
+        "remote SSH destination snapshots",
+        "README ZFS Send section must mention remote SSH destination cleanup/protection semantics",
+    )
+    if "network transports are stored for future plumbing" in readme.lower():
+        raise AssertionError("README must not describe all network transports as future-only after SSH support is active")
     assert_contains(
         text,
         "function zfsas_send_write_config_atomically",
