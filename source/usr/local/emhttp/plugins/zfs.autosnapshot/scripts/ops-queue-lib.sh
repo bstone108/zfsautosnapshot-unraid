@@ -95,6 +95,7 @@ DELETE_QUEUE_INDEX_LOADED=0
 
 declare -A SEND_DATASET_SNAPSHOT_LINES_ASC=()
 declare -A SEND_DATASET_SNAPSHOT_LINES_DESC=()
+declare -A SEND_DATASET_SNAPSHOT_CACHE_TRANSPORT=()
 declare -A SEND_SNAPSHOT_CREATION_MAP=()
 declare -A SEND_SNAPSHOT_WRITTEN_MAP=()
 declare -A SEND_SNAPSHOT_USERREFS_MAP=()
@@ -2231,6 +2232,7 @@ estimate_zfs_send_stream_bytes() {
 clear_send_cleanup_caches() {
   SEND_DATASET_SNAPSHOT_LINES_ASC=()
   SEND_DATASET_SNAPSHOT_LINES_DESC=()
+  SEND_DATASET_SNAPSHOT_CACHE_TRANSPORT=()
   SEND_SNAPSHOT_CREATION_MAP=()
   SEND_SNAPSHOT_WRITTEN_MAP=()
   SEND_SNAPSHOT_USERREFS_MAP=()
@@ -2256,12 +2258,11 @@ load_send_dataset_snapshot_cache_for_transport() {
   local metadata snap property value asc_lines="" desc_lines="" listed_snap command
   local -A creation_map=()
 
-  if [[ -n "${SEND_DATASET_SNAPSHOT_LINES_ASC[$dataset]+set}" ]]; then
-    return 0
-  fi
-
   transport="${transport,,}"
   [[ -n "$transport" ]] || transport="local"
+  if [[ -n "${SEND_DATASET_SNAPSHOT_LINES_ASC[$dataset]+set}" && "${SEND_DATASET_SNAPSHOT_CACHE_TRANSPORT[$dataset]:-local}" == "$transport" ]]; then
+    return 0
+  fi
   if [[ "$transport" == "ssh" ]]; then
     if build_ssh_zfs_command "zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg $(shell_quote_word "$dataset") 2>/dev/null" command; then
       metadata="$(eval "$command" 2>/dev/null || true)"
@@ -2316,13 +2317,15 @@ load_send_dataset_snapshot_cache_for_transport() {
 
   SEND_DATASET_SNAPSHOT_LINES_ASC["$dataset"]="$asc_lines"
   SEND_DATASET_SNAPSHOT_LINES_DESC["$dataset"]="$desc_lines"
+  SEND_DATASET_SNAPSHOT_CACHE_TRANSPORT["$dataset"]="$transport"
 }
 
 send_snapshot_written_bytes_cached() {
   local snapshot="$1"
+  local transport="${2:-local}"
   local dataset value
   dataset="${snapshot%@*}"
-  load_send_dataset_snapshot_cache "$dataset"
+  load_send_dataset_snapshot_cache_for_transport "$dataset" "$transport"
   value="${SEND_SNAPSHOT_WRITTEN_MAP[$snapshot]:-}"
   if [[ "$value" =~ ^[0-9]+$ ]]; then
     printf '%s' "$value"
@@ -2333,9 +2336,10 @@ send_snapshot_written_bytes_cached() {
 
 send_snapshot_userrefs_count_cached() {
   local snapshot="$1"
+  local transport="${2:-local}"
   local dataset value
   dataset="${snapshot%@*}"
-  load_send_dataset_snapshot_cache "$dataset"
+  load_send_dataset_snapshot_cache_for_transport "$dataset" "$transport"
   value="${SEND_SNAPSHOT_USERREFS_MAP[$snapshot]:-}"
   if [[ "$value" =~ ^[0-9]+$ ]]; then
     printf '%s' "$value"
@@ -2346,9 +2350,10 @@ send_snapshot_userrefs_count_cached() {
 
 send_snapshot_has_clones_cached() {
   local snapshot="$1"
+  local transport="${2:-local}"
   local dataset value
   dataset="${snapshot%@*}"
-  load_send_dataset_snapshot_cache "$dataset"
+  load_send_dataset_snapshot_cache_for_transport "$dataset" "$transport"
   value="${SEND_SNAPSHOT_HAS_CLONES_MAP[$snapshot]:-}"
   if [[ "$value" == "1" ]]; then
     return 0
@@ -2362,11 +2367,12 @@ send_snapshot_has_clones_cached() {
 zfs_get_snapshot_props_cached() {
   local snapshot="$1"
   local result_name="$2"
+  local transport="${3:-local}"
   local dataset creation guid createtxg
   local -n result_ref="$result_name"
 
   dataset="${snapshot%@*}"
-  load_send_dataset_snapshot_cache "$dataset"
+  load_send_dataset_snapshot_cache_for_transport "$dataset" "$transport"
 
   creation="${SEND_SNAPSHOT_CREATION_MAP[$snapshot]:-}"
   guid="${SEND_SNAPSHOT_GUID_MAP[$snapshot]:-}"
@@ -3626,10 +3632,14 @@ find_oldest_deletable_destination_snapshot_for_schedule() {
 
     candidate_affects_any_constraint "$snap_dataset" "$constraints_name" || continue
     [[ -z "${protected[$snap_base]:-}" ]] || continue
+    if [[ "$transport" == "ssh" && -z "$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)" ]]; then
+      log "Skipping remote SSH destination snapshot ${snap_name}; only send-managed checkpoints are eligible for remote low-space cleanup."
+      continue
+    fi
 
-    userrefs="$(send_snapshot_userrefs_count_cached "$snap_name")"
+    userrefs="$(send_snapshot_userrefs_count_cached "$snap_name" "$transport")"
     (( userrefs == 0 )) || continue
-    send_snapshot_has_clones_cached "$snap_name" && continue
+    send_snapshot_has_clones_cached "$snap_name" "$transport" && continue
 
     if [[ -z "$oldest_snap" ]] || (( snap_epoch < oldest_epoch )); then
       oldest_snap="$snap_name"
@@ -4391,7 +4401,7 @@ estimate_destination_checkpoint_reclaim_bytes() {
         [[ -n "$snap_name" ]] || continue
         snap_base="${snap_name##*@}"
         send_basename_matches_schedule "$snap_base" "$schedule_job_id" || continue
-        SEND_CHECKPOINT_RECLAIM_CACHE["${schedule_job_id}|${snap_base}"]=$(( ${SEND_CHECKPOINT_RECLAIM_CACHE["${schedule_job_id}|${snap_base}"]:-0} + $(send_snapshot_written_bytes_cached "$snap_name") ))
+        SEND_CHECKPOINT_RECLAIM_CACHE["${schedule_job_id}|${snap_base}"]=$(( ${SEND_CHECKPOINT_RECLAIM_CACHE["${schedule_job_id}|${snap_base}"]:-0} + $(send_snapshot_written_bytes_cached "$snap_name" "$transport") ))
       done <<< "${SEND_DATASET_SNAPSHOT_LINES_ASC[$dataset]}"
     done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
     SEND_CHECKPOINT_RECLAIM_CACHE["$loaded_key"]=1
@@ -4716,7 +4726,7 @@ queue_destination_retention_for_dataset() {
     if [[ -z "$newest_snapshot" ]]; then
       newest_snapshot="$snap_name"
       if [[ "$mode" == "zero_change" ]]; then
-        written_bytes="$(send_snapshot_written_bytes_cached "$snap_name")"
+        written_bytes="$(send_snapshot_written_bytes_cached "$snap_name" "$transport")"
         if (( written_bytes == 0 )); then
           zero_change_anchor="$snap_name"
         fi
@@ -4724,13 +4734,13 @@ queue_destination_retention_for_dataset() {
       continue
     fi
 
-    userrefs="$(send_snapshot_userrefs_count_cached "$snap_name")"
+    userrefs="$(send_snapshot_userrefs_count_cached "$snap_name" "$transport")"
     (( userrefs == 0 )) || continue
-    send_snapshot_has_clones_cached "$snap_name" && continue
+    send_snapshot_has_clones_cached "$snap_name" "$transport" && continue
     [[ -z "${protected[$snap_base]:-}" ]] || continue
 
     if [[ "$mode" == "zero_change" ]]; then
-      written_bytes="$(send_snapshot_written_bytes_cached "$snap_name")"
+      written_bytes="$(send_snapshot_written_bytes_cached "$snap_name" "$transport")"
       if (( written_bytes == 0 )); then
         if [[ -n "$zero_change_anchor" ]]; then
           snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
@@ -4898,6 +4908,7 @@ queue_pool_free_space_cleanup_for_target() {
   local target_bytes="$3"
   local delta_map_name="$4"
   local effective candidate_snapshot candidate_epoch candidate_dataset
+  local schedule_id best_id="" best_epoch=0 this_snapshot this_epoch snapshot_basename snapshot_schedule_id delete_scope
   # shellcheck disable=SC2034
   local -a active_constraints=()
 
@@ -4910,12 +4921,32 @@ queue_pool_free_space_cleanup_for_target() {
 
     candidate_snapshot=""
     candidate_epoch=0
-    if ! find_oldest_deletable_destination_snapshot_for_pool "$pool" active_constraints candidate_snapshot candidate_epoch; then
-      return 1
-    fi
+    best_id=""
+    best_epoch=0
+    for schedule_id in "${SCHEDULE_JOB_IDS[@]}"; do
+      [[ -n "$schedule_id" ]] || continue
+      [[ "$(schedule_destination_pool "$schedule_id")" == "$pool" ]] || continue
+      this_snapshot=""
+      this_epoch=0
+      if find_oldest_deletable_destination_snapshot_for_schedule "$schedule_id" active_constraints this_snapshot this_epoch; then
+        if [[ -z "$best_id" ]] || (( this_epoch < best_epoch )); then
+          best_id="$schedule_id"
+          best_epoch="$this_epoch"
+          candidate_snapshot="$this_snapshot"
+          candidate_epoch="$this_epoch"
+        fi
+      fi
+    done
+    [[ -n "$best_id" && -n "$candidate_snapshot" ]] || return 1
 
     candidate_dataset="${candidate_snapshot%@*}"
-    queue_snapshot_delete_job "$candidate_dataset" "$candidate_snapshot" "$candidate_epoch" "Queued by scheduled-send low-space cleanup." || true
+    snapshot_basename="${candidate_snapshot##*@}"
+    snapshot_schedule_id="$(parse_send_checkpoint_schedule_id "$snapshot_basename" 2>/dev/null || true)"
+    delete_scope="snapshot"
+    if [[ -n "$snapshot_schedule_id" ]]; then
+      delete_scope="destination_checkpoint"
+    fi
+    queue_snapshot_delete_job "$candidate_dataset" "$candidate_snapshot" "$candidate_epoch" "Queued by scheduled-send low-space cleanup." "$snapshot_schedule_id" "$delete_scope" || true
     if (( QUEUE_DELETE_LAST_ADDED == 1 )); then
       add_planned_reclaim_for_capacity_dataset "$candidate_dataset" "$QUEUE_DELETE_LAST_ESTIMATED_RECLAIM" "$capacity_dataset" "$delta_map_name"
       continue

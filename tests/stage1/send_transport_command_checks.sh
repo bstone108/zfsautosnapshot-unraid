@@ -104,13 +104,15 @@ case "$remote_command" in
     ;;
   *"zfs list -H -p -s creation -t snapshot -o name,creation -d 1 -- backup/data"*)
     printf '%s\t%s\n' \
+      "backup/data@manual-remote-snapshot" "25" \
       "backup/data@zfs-send-feedfacecafe-ancient" "50" \
       "backup/data@zfs-send-feedfacecafe-old" "100"
     exit 0
     ;;
   *"zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg backup/data"*)
-    for snap in backup/data@zfs-send-feedfacecafe-ancient backup/data@zfs-send-feedfacecafe-old; do
+    for snap in backup/data@manual-remote-snapshot backup/data@zfs-send-feedfacecafe-ancient backup/data@zfs-send-feedfacecafe-old; do
       case "$snap" in
+        *@manual-remote-snapshot) creation=25; written=16384; guid=100; txg=10 ;;
         *@zfs-send-feedfacecafe-ancient) creation=50; written=4096; guid=111; txg=11 ;;
         *@zfs-send-feedfacecafe-old) creation=100; written=8192; guid=222; txg=22 ;;
       esac
@@ -202,6 +204,36 @@ queue_pool_retention_cleanup "backup" "backup/data" planned_reclaim
 queued_pool_retention="$(cat "$DELETE_QUEUE_INBOX_FILE")"
 assert_contains "$queued_pool_retention" "backup/data@zfs-send-feedfacecafe-ancient" "SSH pool cleanup must queue the oldest unprotected remote checkpoint snapshot"
 assert_not_contains "$queued_pool_retention" "backup/data@zfs-send-feedfacecafe-old" "SSH pool cleanup must still protect the newest/latest-common remote checkpoint"
+assert_not_contains "$queued_pool_retention" "backup/data@manual-remote-snapshot" "SSH retention must not queue remote generic snapshots that the sender cannot prove are plugin-owned"
+
+rm -f "$DELETE_QUEUE_INBOX_FILE" "$PERSISTED_DELETE_QUEUE_FILE"
+clear_send_cleanup_caches
+SCHEDULE_JOB_IDS=(feedfacecafe)
+declare -A planned_low_space_reclaim=()
+get_dataset_active_constraints() {
+  local dataset="$1"
+  local delta_map_name="$2"
+  local effective_var_name="$3"
+  local active_constraints_var_name="$4"
+  local -n delta_ref="$delta_map_name"
+  local -n active_ref="$active_constraints_var_name"
+  [[ "$dataset" == "backup/data" ]] || return 1
+  active_ref=("pool:backup")
+  printf -v "$effective_var_name" '%s' "${delta_ref[pool:backup]:-0}"
+  return 0
+}
+emit_dataset_capacity_constraints() {
+  local dataset="$1"
+  [[ "$dataset" == "backup/data" ]] || return 1
+  printf 'pool:backup\t0\n'
+}
+queue_pool_free_space_cleanup_for_target "backup" "backup/data" 1 planned_low_space_reclaim
+[[ -f "$DELETE_QUEUE_INBOX_FILE" ]] || fail "SSH low-space cleanup must queue remote destination checkpoints using the schedule transport context"
+queued_low_space_cleanup="$(cat "$DELETE_QUEUE_INBOX_FILE")"
+assert_contains "$queued_low_space_cleanup" "backup/data@zfs-send-feedfacecafe-ancient" "SSH low-space cleanup must queue the oldest eligible remote checkpoint snapshot"
+assert_contains "$queued_low_space_cleanup" $'\tdestination_checkpoint\tfeedfacecafe' "SSH low-space cleanup must queue remote checkpoint deletes with destination checkpoint scope"
+assert_not_contains "$queued_low_space_cleanup" "backup/data@manual-remote-snapshot" "SSH low-space cleanup must skip remote generic snapshots that are not send-managed checkpoints"
+assert_not_contains "$queued_low_space_cleanup" "backup/data@zfs-send-feedfacecafe-old" "SSH low-space cleanup must still protect the newest/latest-common remote checkpoint"
 
 # spiped is intentionally staged/fail-closed until receiver-side inventory and
 # receive verification exist.  Even if a stale/manual job file reaches the worker,
