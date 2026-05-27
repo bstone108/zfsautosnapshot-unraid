@@ -4880,12 +4880,16 @@ queue_pool_retention_cleanup() {
   local pool="$1"
   local capacity_dataset="$2"
   local delta_map_name="$3"
-  local dataset
+  local schedule_job_id dataset newest_send_basename=""
 
-  while IFS= read -r dataset; do
-    [[ -n "$dataset" ]] || continue
-    queue_destination_retention_for_dataset "$dataset" "" "" "retention" "$capacity_dataset" "$delta_map_name"
-  done < <(list_existing_destination_datasets_for_pool "$pool")
+  while IFS= read -r schedule_job_id; do
+    [[ -n "$schedule_job_id" ]] || continue
+    latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
+    while IFS= read -r dataset; do
+      [[ -n "$dataset" ]] || continue
+      queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" "$capacity_dataset" "$delta_map_name"
+    done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+  done < <(list_schedule_job_ids_for_destination_pool "$pool")
 }
 
 queue_pool_free_space_cleanup_for_target() {

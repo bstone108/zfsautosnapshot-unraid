@@ -193,6 +193,16 @@ queued_retention="$(cat "$DELETE_QUEUE_INBOX_FILE")"
 assert_contains "$queued_retention" "backup/data@zfs-send-feedfacecafe-ancient" "SSH destination retention must queue the oldest unprotected remote checkpoint snapshot"
 assert_not_contains "$queued_retention" "backup/data@zfs-send-feedfacecafe-old" "SSH destination retention must not queue the newest/latest-common remote checkpoint"
 
+rm -f "$DELETE_QUEUE_INBOX_FILE" "$PERSISTED_DELETE_QUEUE_FILE"
+clear_send_cleanup_caches
+SCHEDULE_JOB_IDS=(feedfacecafe)
+declare -A planned_reclaim=()
+queue_pool_retention_cleanup "backup" "backup/data" planned_reclaim
+[[ -f "$DELETE_QUEUE_INBOX_FILE" ]] || fail "SSH pool cleanup must queue remote destination checkpoints using the schedule transport context"
+queued_pool_retention="$(cat "$DELETE_QUEUE_INBOX_FILE")"
+assert_contains "$queued_pool_retention" "backup/data@zfs-send-feedfacecafe-ancient" "SSH pool cleanup must queue the oldest unprotected remote checkpoint snapshot"
+assert_not_contains "$queued_pool_retention" "backup/data@zfs-send-feedfacecafe-old" "SSH pool cleanup must still protect the newest/latest-common remote checkpoint"
+
 # spiped is intentionally staged/fail-closed until receiver-side inventory and
 # receive verification exist.  Even if a stale/manual job file reaches the worker,
 # the pipeline must refuse before creating a destructive unverified send stream.
