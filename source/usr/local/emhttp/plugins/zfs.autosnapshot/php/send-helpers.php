@@ -867,6 +867,29 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
         $submitted['SEND_SPIPED_KEY_PATH'] = zfsas_send_trim($post['send_spiped_key_path'] ?? '');
     }
 
+    $usesSshTransport = false;
+    $usesSpipedTransport = false;
+    foreach ($submittedJobs as $submittedJob) {
+        $transport = strtolower((string) ($submittedJob['transport'] ?? 'local'));
+        if ($transport === 'ssh') {
+            $usesSshTransport = true;
+        } elseif ($transport === 'spiped') {
+            $usesSpipedTransport = true;
+        }
+    }
+
+    if ($usesSshTransport && zfsas_send_trim((string) ($submitted['SEND_SSH_HOST'] ?? '')) === '') {
+        $errors[] = 'SSH host is required when any ZFS send job uses SSH transport.';
+    }
+    if ($usesSpipedTransport) {
+        if (zfsas_send_trim((string) ($submitted['SEND_SPIPED_REMOTE_HOST'] ?? '')) === '') {
+            $errors[] = 'spiped remote host is required when any ZFS send job uses spiped transport.';
+        }
+        if (zfsas_send_trim((string) ($submitted['SEND_SPIPED_KEY_PATH'] ?? '')) === '') {
+            $errors[] = 'spiped key path is required when any ZFS send job uses spiped transport.';
+        }
+    }
+
     if (empty($errors)) {
         $submitted['SEND_JOBS'] = zfsas_send_render_jobs_string($submittedJobs);
         $config = $submitted;
