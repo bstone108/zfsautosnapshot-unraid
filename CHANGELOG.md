@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.05.31.t01 (Testing Branch Only)
+
+- Added network ZFS send transport work for testing/review. SSH sends now use non-interactive remote ZFS inventory, receive, verification, and destination cleanup/protection paths. spiped configuration is present but intentionally staged/fail-closed until receiver-side inventory and verification can make encrypted one-way receive safe.
+
 ### 2026.05.21.t01 (Testing Branch Only)
 
 - Improved Snapshot Manager queue awareness and drawer refresh behavior for testing. Pending snapshot deletes now remain visible with queued/running state, disabled queued rows are kept out of bulk selection, hold/release actions filter ineligible snapshots on both the page and server, and accepted action feedback now stays visible while the drawer refreshes.
