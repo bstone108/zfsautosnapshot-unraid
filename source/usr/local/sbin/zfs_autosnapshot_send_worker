@@ -1027,13 +1027,16 @@ send_member_snapshot() {
       run_pipeline_with_space_reservation "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" "$progress" || return $?
     else
       if (( destination_exists == 1 )) && destination_has_any_snapshots_for_transport "$destination"; then
+        if [[ "$send_transport" == "ssh" ]]; then
+          failure_message="No common send checkpoint remains between '${source_dataset}' and remote '${destination}'. Automatic remote destination purge/reseed is not enabled; re-seed or clean up the remote destination manually."
+          log "$failure_message"
+          zfsas_send_debug_marker "reseed_required mode=scheduled job_id=$(job_get job JOB_ID) schedule_job_id=$(job_get job SCHEDULE_JOB_ID) source=${source_dataset} destination=${destination} requested_snapshot=${basename} destination_had_snapshots=1 action=fail_closed_remote_reseed"
+          fail_current_job_final "$failure_message"
+          return 1
+        fi
         failure_message="No common send checkpoint remains between '${source_dataset}' and '${destination}'. The destination dataset was purged so the next retry can reseed this backup from scratch. Review the preserved send log for diagnostics."
         log "$failure_message"
         zfsas_send_debug_marker "reseed_required mode=scheduled job_id=$(job_get job JOB_ID) schedule_job_id=$(job_get job SCHEDULE_JOB_ID) source=${source_dataset} destination=${destination} requested_snapshot=${basename} destination_had_snapshots=1 action=purge_destination_for_reseed"
-        if [[ "$send_transport" == "ssh" ]]; then
-          fail_current_job_final "No common send checkpoint remains between '${source_dataset}' and remote '${destination}'. Automatic remote destination purge/reseed is not enabled; re-seed or clean up the remote destination manually."
-          return 1
-        fi
         if purge_destination_for_reseed "$destination"; then
           job[LAST_ERROR]="$failure_message"
           job[LAST_MESSAGE]="$failure_message"

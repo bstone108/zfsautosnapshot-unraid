@@ -319,6 +319,41 @@ def main() -> int:
         "delete queue duplicate suppression for destination checkpoint deletes must be per snapshot, not one basename across a recursive tree",
     )
 
+    scheduled_no_common_body = worker.split(
+        'if (( destination_exists == 1 )) && destination_has_any_snapshots_for_transport "$destination"; then',
+        1,
+    )[1].split('      description="Full send ${snapshot} -> ${destination}"', 1)[0]
+    assert_contains(
+        scheduled_no_common_body,
+        'if [[ "$send_transport" == "ssh" ]]; then',
+        "scheduled SSH sends with destination snapshots but no common checkpoint must have an explicit fail-closed branch",
+    )
+    assert_contains(
+        scheduled_no_common_body,
+        "Automatic remote destination purge/reseed is not enabled",
+        "scheduled SSH no-common handling must tell the operator that remote purge/reseed is intentionally disabled",
+    )
+    pre_ssh_no_common_body = scheduled_no_common_body.split('if [[ "$send_transport" == "ssh" ]]; then', 1)[0]
+    if "destination dataset was purged" in pre_ssh_no_common_body:
+        raise AssertionError(
+            "scheduled no-common handling must not log that the destination was purged before transport-specific handling decides whether purge is allowed"
+        )
+    if "action=purge_destination_for_reseed" in pre_ssh_no_common_body:
+        raise AssertionError(
+            "scheduled no-common debug marker must not claim purge_destination_for_reseed before the SSH fail-closed branch"
+        )
+    ssh_no_common_body = scheduled_no_common_body.split('if [[ "$send_transport" == "ssh" ]]; then', 1)[1].split("        fi", 1)[0]
+    if "purge_destination_for_reseed" in ssh_no_common_body or "action=purge_destination_for_reseed" in ssh_no_common_body:
+        raise AssertionError(
+            "scheduled SSH no-common handling must not log/debug an automatic purge action when it actually fails closed"
+        )
+    local_no_common_body = scheduled_no_common_body.split('if [[ "$send_transport" == "ssh" ]]; then', 1)[1]
+    assert_contains(
+        local_no_common_body,
+        'purge_destination_for_reseed "$destination"',
+        "local scheduled no-common handling should still retain its existing automatic reseed purge path",
+    )
+
     print("PASS: send queue readiness static contracts")
     return 0
 
