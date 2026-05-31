@@ -4744,6 +4744,10 @@ queue_destination_retention_for_dataset() {
       if (( written_bytes == 0 )); then
         if [[ -n "$zero_change_anchor" ]]; then
           snapshot_schedule_job_id="$(parse_send_checkpoint_schedule_id "$snap_base" 2>/dev/null || true)"
+          if [[ "$transport" == "ssh" && -z "$snapshot_schedule_job_id" ]]; then
+            log "Skipping remote SSH destination snapshot ${snap_name}; only send-managed checkpoints are eligible for remote zero-change cleanup."
+            continue
+          fi
           if [[ -n "$snapshot_schedule_job_id" ]]; then
             log "Skipping post-send zero-change cleanup for send checkpoint ${snap_name}; checkpoint retention owns send checkpoint deletion."
             continue

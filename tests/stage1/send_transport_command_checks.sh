@@ -106,15 +106,19 @@ case "$remote_command" in
     printf '%s\t%s\n' \
       "backup/data@manual-remote-snapshot" "25" \
       "backup/data@zfs-send-feedfacecafe-ancient" "50" \
-      "backup/data@zfs-send-feedfacecafe-old" "100"
+      "backup/data@zfs-send-feedfacecafe-old" "100" \
+      "backup/data@manual-zero-older" "110" \
+      "backup/data@manual-zero-newer" "120"
     exit 0
     ;;
   *"zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg backup/data"*)
-    for snap in backup/data@manual-remote-snapshot backup/data@zfs-send-feedfacecafe-ancient backup/data@zfs-send-feedfacecafe-old; do
+    for snap in backup/data@manual-remote-snapshot backup/data@zfs-send-feedfacecafe-ancient backup/data@zfs-send-feedfacecafe-old backup/data@manual-zero-older backup/data@manual-zero-newer; do
       case "$snap" in
         *@manual-remote-snapshot) creation=25; written=16384; guid=100; txg=10 ;;
         *@zfs-send-feedfacecafe-ancient) creation=50; written=4096; guid=111; txg=11 ;;
         *@zfs-send-feedfacecafe-old) creation=100; written=8192; guid=222; txg=22 ;;
+        *@manual-zero-older) creation=110; written=0; guid=333; txg=33 ;;
+        *@manual-zero-newer) creation=120; written=0; guid=444; txg=44 ;;
       esac
       printf '%s\tcreation\t%s\n' "$snap" "$creation"
       printf '%s\twritten\t%s\n' "$snap" "$written"
@@ -233,7 +237,17 @@ queued_low_space_cleanup="$(cat "$DELETE_QUEUE_INBOX_FILE")"
 assert_contains "$queued_low_space_cleanup" "backup/data@zfs-send-feedfacecafe-ancient" "SSH low-space cleanup must queue the oldest eligible remote checkpoint snapshot"
 assert_contains "$queued_low_space_cleanup" $'\tdestination_checkpoint\tfeedfacecafe' "SSH low-space cleanup must queue remote checkpoint deletes with destination checkpoint scope"
 assert_not_contains "$queued_low_space_cleanup" "backup/data@manual-remote-snapshot" "SSH low-space cleanup must skip remote generic snapshots that are not send-managed checkpoints"
+assert_not_contains "$queued_low_space_cleanup" "backup/data@manual-zero-older" "SSH low-space cleanup must skip remote generic zero-written snapshots that are not send-managed checkpoints"
 assert_not_contains "$queued_low_space_cleanup" "backup/data@zfs-send-feedfacecafe-old" "SSH low-space cleanup must still protect the newest/latest-common remote checkpoint"
+
+rm -f "$DELETE_QUEUE_INBOX_FILE" "$PERSISTED_DELETE_QUEUE_FILE"
+clear_send_cleanup_caches
+queue_schedule_zero_change_cleanup "feedfacecafe"
+if [[ -f "$DELETE_QUEUE_INBOX_FILE" ]]; then
+  queued_zero_change_cleanup="$(cat "$DELETE_QUEUE_INBOX_FILE")"
+  assert_not_contains "$queued_zero_change_cleanup" "backup/data@manual-zero-older" "SSH zero-change cleanup must not queue remote generic zero-written snapshots that are not send-managed checkpoints"
+  assert_not_contains "$queued_zero_change_cleanup" "backup/data@manual-zero-newer" "SSH zero-change cleanup must not queue remote generic zero-written snapshots that are not send-managed checkpoints"
+fi
 
 # spiped is intentionally staged/fail-closed until receiver-side inventory and
 # receive verification exist.  Even if a stale/manual job file reaches the worker,
