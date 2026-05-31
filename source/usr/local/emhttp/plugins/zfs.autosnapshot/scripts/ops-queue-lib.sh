@@ -2810,6 +2810,36 @@ build_spiped_receive_command() {
   printf -v "$result_var" '%s' "$built_command"
 }
 
+spiped_sender_settings_ready() {
+  local message_var="${1:-}"
+  local remote_host="$SEND_SPIPED_REMOTE_HOST"
+  local remote_port="${SEND_SPIPED_REMOTE_PORT:-$DEFAULT_SEND_SPIPED_REMOTE_PORT}"
+  local key_path="$SEND_SPIPED_KEY_PATH"
+
+  [[ -n "$message_var" ]] && printf -v "$message_var" ''
+  if [[ -z "$remote_host" ]]; then
+    [[ -n "$message_var" ]] && printf -v "$message_var" 'spiped remote host is required'
+    return 1
+  fi
+  if ! is_valid_spiped_remote_host "$remote_host"; then
+    [[ -n "$message_var" ]] && printf -v "$message_var" 'spiped remote host is invalid'
+    return 1
+  fi
+  if ! is_valid_spiped_port "$remote_port"; then
+    [[ -n "$message_var" ]] && printf -v "$message_var" 'spiped remote port is invalid'
+    return 1
+  fi
+  if [[ -z "$key_path" ]]; then
+    [[ -n "$message_var" ]] && printf -v "$message_var" 'spiped key path is required'
+    return 1
+  fi
+  if ! is_valid_spiped_key_path "$key_path"; then
+    [[ -n "$message_var" ]] && printf -v "$message_var" 'spiped key path is invalid'
+    return 1
+  fi
+  return 0
+}
+
 build_spipe_send_command() {
   local result_var="$1"
   local remote_host="$SEND_SPIPED_REMOTE_HOST"
@@ -2818,10 +2848,7 @@ build_spipe_send_command() {
   local remote_addr built_command
 
   printf -v "$result_var" ''
-  [[ -n "$remote_host" ]] || return 1
-  is_valid_spiped_remote_host "$remote_host" || return 1
-  is_valid_spiped_port "$remote_port" || return 1
-  is_valid_spiped_key_path "$key_path" || return 1
+  spiped_sender_settings_ready || return 1
 
   remote_addr="${remote_host}:${remote_port}"
   built_command="spipe -t $(shell_quote_word "$remote_addr") -k $(shell_quote_word "$key_path")"
@@ -2889,6 +2916,7 @@ run_pipeline_with_status() {
   local progress_supported=0
   local send_transport
   local receive_command=""
+  local spiped_message=""
 
   is_valid_snapshot_name "$snapshot" || {
     log "Refusing pipeline for invalid snapshot name: $snapshot"
@@ -2916,6 +2944,10 @@ run_pipeline_with_status() {
     fi
   fi
   if [[ "$send_transport" == "spiped" ]]; then
+    if ! spiped_sender_settings_ready spiped_message; then
+      log "Unsupported ZFS send transport '$send_transport' requested for $description; ${spiped_message}."
+      return 1
+    fi
     log "Unsupported ZFS send transport '$send_transport' requested for $description; spiped receiver inventory and receive verification are not implemented yet."
     return 1
   fi
@@ -3182,6 +3214,9 @@ send_destination_actionable_for_schedule_transport() {
       return 0
       ;;
     spiped)
+      if ! spiped_sender_settings_ready "$message_var"; then
+        return 1
+      fi
       [[ -n "$message_var" ]] && printf -v "$message_var" "spiped receiver readiness is not implemented yet"
       return 1
       ;;

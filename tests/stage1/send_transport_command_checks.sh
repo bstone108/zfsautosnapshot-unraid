@@ -79,6 +79,37 @@ fi
 assert_contains "$command" "spiped -d" "spiped receiver command must populate a caller variable named command"
 assert_contains "$command" "zfs receive" "spiped receiver command must pipe to zfs receive"
 
+message=""
+SEND_SPIPED_REMOTE_HOST=""
+SEND_SPIPED_REMOTE_PORT="8023"
+SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
+if send_destination_actionable_for_schedule_transport "backup/root" "spiped" message; then
+  fail "spiped readiness must fail when the remote receiver host is missing"
+fi
+assert_contains "$message" "spiped remote host is required" "spiped readiness should report missing sender remote host before the staged receiver guard"
+
+message=""
+SEND_SPIPED_REMOTE_HOST="receiver.example.test"
+SEND_SPIPED_REMOTE_PORT="not-a-port"
+SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
+if send_destination_actionable_for_schedule_transport "backup/root" "spiped" message; then
+  fail "spiped readiness must fail when the remote receiver port is invalid"
+fi
+assert_contains "$message" "spiped remote port is invalid" "spiped readiness should report invalid sender remote port before the staged receiver guard"
+
+message=""
+SEND_SPIPED_REMOTE_HOST="receiver.example.test"
+SEND_SPIPED_REMOTE_PORT="8023"
+SEND_SPIPED_KEY_PATH=""
+if send_destination_actionable_for_schedule_transport "backup/root" "spiped" message; then
+  fail "spiped readiness must fail when the key path is missing"
+fi
+assert_contains "$message" "spiped key path is required" "spiped readiness should report missing symmetric-key path before the staged receiver guard"
+
+SEND_SPIPED_REMOTE_HOST="receiver.example.test"
+SEND_SPIPED_REMOTE_PORT="8023"
+SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
+
 # Transport-aware latest-common protection: SSH schedules must discover the
 # destination inventory over SSH.  The remote destination often will not exist
 # locally on the sender, so falling back to local destination probes can make
@@ -285,6 +316,15 @@ zfs() {
 }
 declare -gA job=()
 job[SEND_TRANSPORT]="spiped"
+SEND_SPIPED_REMOTE_HOST=""
+SEND_SPIPED_REMOTE_PORT="8023"
+SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
+if pipeline_message="$(run_pipeline_with_status "spiped missing sender settings" "" "source/data@zfs-send-feedfacecafe-new" "backup/data" 0 0 99 2>&1)"; then
+  fail "spiped pipelines must fail when sender endpoint settings are incomplete"
+fi
+assert_contains "$pipeline_message" "spiped remote host is required" "spiped pipeline dispatch should report missing sender settings before the staged receiver guard"
+[[ ! -e "$spiped_send_marker" ]] || fail "spiped sender-settings guard must stop before zfs send is invoked"
+
 SEND_SPIPED_REMOTE_HOST="receiver.example.test"
 SEND_SPIPED_REMOTE_PORT="8023"
 SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
