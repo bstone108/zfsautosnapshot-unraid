@@ -7,6 +7,9 @@ It answers one question: "What changed for me?"
 
 ### 2026.06.01.01 (2026-06-01)
 
+- Added a non-destructive Dataset Migrator recovery simulation that exercises delayed boot recovery with fake ZFS, Docker, and rsync commands.
+- Hardened Dataset Migrator recovery so test harnesses can safely isolate plugin state/log paths and persisted container batches survive either spaces or newlines in recovery state.
+
 - Added the first Dataset Migrator crash/reboot recovery path for interrupted folder moves: the worker now records durable recovery state, starts delayed recovery after disks mount, exact-syncs the preserved folder into the child dataset, and restores the affected containers.
 
 - Improved Dataset Migrator safety for low-space migrations so each next folder waits for enough destination space before stopping containers or touching the original folder.
