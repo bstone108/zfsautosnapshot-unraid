@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.01.01 (2026-06-01)
+
+- Fixed a ZFS Send queue finalizer stall where a completed child send could be pushed back into a pool-prep wait after its pool-prep coordination job was pruned too early. Pool-prep jobs are now kept while dependent send jobs still exist, so finalizers and retry coordination can observe the completed child state.
+
 ### 2026.05.17.03 (2026-05-17)
 
 - Tightened public diagnostics redaction for hostnames, syslog summary details, hashes/checksums, and safe aggregate byte totals.
