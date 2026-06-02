@@ -5,7 +5,7 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
-### 2026.06.01.01 (2026-06-01)
+### 2026.06.02.01 (2026-06-02)
 
 - Improved Dataset Migrator live table accuracy while an active or interrupted worker has not reported folder/container rows yet. The page now keeps showing that it is using live worker state instead of falling back to selected-dataset preview/preflight rows.
 
