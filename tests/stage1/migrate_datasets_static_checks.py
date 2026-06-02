@@ -74,4 +74,48 @@ require_worker(
     "Worker main loop must run the pre-stop space gate before stopping any containers for the batch.",
 )
 
-print("PASS: Dataset Migrator static UI and worker contracts")
+# Crash/reboot recovery must be durable before the destructive rename/create/copy
+# boundary. A reboot can wipe /var/run, so the migrator needs a boot-persisted
+# recovery record under /boot/config and an event hook that starts delayed
+# recovery after disks mount. The recovery must wait for containers to settle,
+# then stop only the batch related to the interrupted folder, exact-sync with
+# rsync --delete, and restore container policies/starts.
+require_worker(
+    r'RECOVERY_STATE_FILE="\$\{PLUGIN_ROOT\}/recovery.env"',
+    "Worker must define a boot-persisted recovery state file under the migrator plugin root.",
+)
+require_worker(
+    r'write_recovery_state\s*\(\)\s*{.*?RECOVERY_PHASE=.*?RECOVERY_FOLDER_INDEX=.*?RECOVERY_SOURCE_PATH=.*?RECOVERY_TEMP_PATH=.*?RECOVERY_TARGET_DATASET=.*?RECOVERY_BATCH_CONTAINERS=',
+    "Worker must persist the active folder/temp path/target dataset/container batch for crash recovery.",
+)
+require_worker(
+    r'clear_recovery_state\s*\(\)\s*{.*?rm\s+-f\s+--\s+"\$RECOVERY_STATE_FILE"',
+    "Worker must clear the durable recovery record only after a folder is fully verified and cleaned up.",
+)
+require_worker(
+    r'mv\s+--\s+"\$entry_path"\s+"\$temp_path".*?RECOVERY_PHASE="renamed_source".*?write_recovery_state',
+    "Worker must persist recovery state immediately after the source folder is renamed.",
+)
+require_worker(
+    r'zfs\s+create\s+"\$child_ds".*?RECOVERY_PHASE="dataset_created".*?write_recovery_state',
+    "Worker must update recovery state immediately after the child dataset is created.",
+)
+require_worker(
+    r'rsync_recover_exact\s*\(\)\s*{.*?rsync\s+-aHAXx\s+--delete\s+--numeric-ids',
+    "Recovery must use an exact rsync --delete pass from the preserved source temp folder to the child dataset.",
+)
+require_worker(
+    r'run_delayed_recovery\s*\(\)\s*{.*?sleep\s+"\$RECOVERY_BOOT_DELAY_SECONDS".*?stop_container_batch\s+"\$RECOVERY_BATCH_CONTAINERS".*?rsync_recover_exact.*?start_selected_containers\s+"\$RECOVERY_BATCH_CONTAINERS"',
+    "Boot recovery must wait for containers to settle, stop only the affected batch, exact-sync, and restore services.",
+)
+require_worker(
+    r'--recover-pending\).*?RUN_RECOVERY=1',
+    "Worker must expose a --recover-pending mode for the boot hook.",
+)
+
+EVENT = ROOT / "source/usr/local/emhttp/plugins/zfs.autosnapshot/event/disks_mounted"
+event_text = EVENT.read_text(encoding="utf-8")
+if not re.search(r'(?:zfs_autosnapshot_migrate_datasets|\$MIGRATOR_WORKER)"?\s+--recover-pending', event_text, re.S):
+    raise AssertionError("disks_mounted must launch delayed Dataset Migrator recovery after boot when recovery.env exists.")
+
+print("PASS: Dataset Migrator static UI, worker, and recovery contracts")

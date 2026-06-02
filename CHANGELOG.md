@@ -7,6 +7,8 @@ It answers one question: "What changed for me?"
 
 ### 2026.06.01.01 (2026-06-01)
 
+- Added the first Dataset Migrator crash/reboot recovery path for interrupted folder moves: the worker now records durable recovery state, starts delayed recovery after disks mount, exact-syncs the preserved folder into the child dataset, and restores the affected containers.
+
 - Improved Dataset Migrator safety for low-space migrations so each next folder waits for enough destination space before stopping containers or touching the original folder.
 - Clarified Dataset Migrator instructions for the Preview Migration review step, Start Migration handoff, and safe free-space waits.
 
