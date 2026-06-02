@@ -679,7 +679,9 @@ $csrfToken = zfsas_get_csrf_token();
     }
 
     var waitingEl = byId('migrate_waiting_notice');
-    if (status && String(status.WAITING_FOR_SPACE || '0') === '1') {
+    if (status && status.isStale) {
+      waitingEl.innerHTML = '<div class="zfsas-alert zfsas-alert-error">Dataset migrator worker stopped before it finished. Review the live log, then restart the migration or recovery if needed.</div>';
+    } else if (status && String(status.WAITING_FOR_SPACE || '0') === '1') {
       waitingEl.innerHTML = '<div class="zfsas-alert zfsas-alert-warn">Free space is too low for <strong>'
         + escapeHtml(status.WAITING_LABEL || 'the current folder')
         + '</strong>. Free up space on the destination pool and the migration will continue automatically. Required: '
@@ -835,7 +837,9 @@ $csrfToken = zfsas_get_csrf_token();
           renderFeedback('', '');
         }
 
-        if (status && status.isActive) {
+        if (status && status.isStale) {
+          renderPageStatus('Dataset migrator worker stopped before it finished.', true);
+        } else if (status && status.isActive) {
           renderPageStatus('Dataset migration is running in the background.', false);
         } else {
           renderPageStatus('Dataset migrator is ready.', false);
