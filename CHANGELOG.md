@@ -7,6 +7,8 @@ It answers one question: "What changed for me?"
 
 ### 2026.06.01.01 (2026-06-01)
 
+- Improved Dataset Migrator live table accuracy while an active or interrupted worker has not reported folder/container rows yet. The page now keeps showing that it is using live worker state instead of falling back to selected-dataset preview/preflight rows.
+
 - Improved Dataset Migrator live controls and status clarity: Start is disabled while a migration is running or interrupted, Preview is disabled until a dataset is selected, and the page-level status now calls out live free-space waits before the next folder is touched.
 
 - Improved Dataset Migrator refresh accuracy after a migration finishes. Once the worker is no longer live, the page rebuilds the selected dataset preview and Docker preflight rows instead of continuing to treat old completed worker rows as current live state.

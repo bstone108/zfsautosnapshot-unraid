@@ -91,12 +91,26 @@ require_status_endpoint(
     re.S,
 )
 require(
-    r'var\s+useStatusRows\s*=\s*statusMatchesSelectedDataset\(status\)\s*&&\s*\(status\.isActive\s*\|\|\s*status\.isStale\)\s*&&\s*Array\.isArray\(status\.folders\)',
-    "Folder rows must use worker rows only while the active/stale worker state is live; terminal complete states should fall back to refreshed preview rows.",
+    r'var\s+useStatusRows\s*=\s*statusMatchesSelectedDataset\(status\)\s*&&\s*\(status\.isActive\s*\|\|\s*status\.isStale\)\s*&&\s*Array\.isArray\(status\.folders\);',
+    "Folder rows must use worker rows whenever the selected dataset has a live/stale worker, even before the worker has emitted rows; terminal complete states should fall back to refreshed preview rows.",
+)
+if re.search(r'Array\.isArray\(status\.folders\)\s*&&\s*status\.folders\.length\s*>\s*0', text):
+    raise AssertionError("Active/stale folder rendering must not fall back to preview/empty text just because the worker has not emitted folder rows yet.")
+require(
+    r'var\s+useStatusRows\s*=\s*statusMatchesSelectedDataset\(status\)\s*&&\s*\(status\.isActive\s*\|\|\s*status\.isStale\)\s*&&\s*Array\.isArray\(status\.containers\);',
+    "Container rows must use worker rows whenever the selected dataset has a live/stale worker, even before the worker has emitted rows; terminal complete states should fall back to selected-dataset Docker preflight rows.",
+)
+if re.search(r'Array\.isArray\(status\.containers\)\s*&&\s*status\.containers\.length\s*>\s*0', text):
+    raise AssertionError("Active/stale container rendering must not fall back to Docker preflight just because the worker has not emitted container rows yet.")
+require(
+    r'if\s*\(useStatusRows\s*&&\s*!rows\.length\)\s*{.*?Live worker has not reported folder rows yet',
+    "Active folder table must show a live-worker-pending message instead of saying there are no top-level folders.",
+    re.S,
 )
 require(
-    r'var\s+useStatusRows\s*=\s*statusMatchesSelectedDataset\(status\)\s*&&\s*\(status\.isActive\s*\|\|\s*status\.isStale\)\s*&&\s*Array\.isArray\(status\.containers\)',
-    "Container rows must use worker rows only while the active/stale worker state is live; terminal complete states should fall back to selected-dataset Docker preflight rows.",
+    r'if\s*\(useStatusRows\s*&&\s*!rows\.length\)\s*{.*?Live worker has not reported container rows yet',
+    "Active container table must show a live-worker-pending message instead of falling back to no running containers.",
+    re.S,
 )
 require(
     r'function\s+updateMigrationControls\s*\(\s*status\s*,\s*hasSelectedDataset\s*\).*?startButton\.disabled\s*=\s*startBusy\s*\|\|\s*!hasSelectedDataset\s*\|\|\s*isRunning\s*\|\|\s*isInterrupted.*?previewButton\.disabled\s*=\s*!hasSelectedDataset',
