@@ -233,19 +233,25 @@ $csrfToken = zfsas_get_csrf_token();
     <div class="zfsas-dm-card">
       <h3 style="margin-top:0;">Before You Start</h3>
       <div class="zfsas-dm-help">
-        This tool only works on top-level folders directly under the selected dataset mountpoint. It stops running Docker containers for the duration, temporarily disables their Docker restart policy while the migration is active, then restores those restart policies and starts the containers back up when the migration ends. Because this uses multiple verification passes, including checksum verification and file manifest comparison, it is intentionally slow.
+        This tool only works on top-level folders directly under the selected dataset mountpoint. It converts each eligible folder into a child ZFS dataset by copying to a temporary dataset, verifying the copy with manifests and checksums, then replacing the original folder path with the new dataset. Because this uses multiple verification passes, it is intentionally slow.
+      </div>
+      <div class="zfsas-alert zfsas-alert-info">
+        <div><strong>1. Preview first:</strong> Preview Migration scans the selected parent dataset, finds top-level folders, and builds this review list without stopping containers or moving data.</div>
+        <div style="margin-top:6px;"><strong>2. Start only after review:</strong> Start Migration only begins work after you review the preview. The worker then checks space for each next folder before touching containers or the original folder.</div>
+        <div style="margin-top:6px;"><strong>3. Space waits are safe:</strong> If space is too low before the next folder, containers stay running and the original folder stays in place until enough free space is available. The warning clears and the migration resumes automatically after you free space manually or automatic snapshot cleanup frees enough space.</div>
       </div>
       <div class="zfsas-alert zfsas-alert-warn">
         <div>Stop all watchdog scripts or plugins before starting. Anything that relaunches containers during the migration can corrupt the copy and cause the tool to abort.</div>
         <div style="margin-top:6px;">Any containers that are set to restart automatically may still be restarted by outside tooling. The migrator will temporarily disable Docker restart policies for containers it stops, but you still need to disable outside watchdog behavior first.</div>
       </div>
       <div class="zfsas-alert zfsas-alert-info">
-        <div>Do not start containers again until the tool finishes. If free space runs low, the migration will pause itself, show a warning here, and continue automatically after you free up enough space.</div>
+        <div>Do not start containers again until the tool finishes. During active folder work, containers that use the folder being migrated may be stopped until verification and restoration complete.</div>
         <div style="margin-top:6px;">Folder names must already be valid ZFS child dataset names. Anything with an unsafe name, nested mount, or existing child dataset will be skipped and called out below.</div>
       </div>
       <div id="migrate_feedback"></div>
       <div class="zfsas-dm-toolbar">
         <select id="migrate_dataset" class="zfsas-dm-select"></select>
+        <button type="button" class="btn" id="migrate_preview">Preview Migration</button>
         <button type="button" class="btn btn-primary" id="migrate_start">Start Migration</button>
         <button type="button" class="btn" id="migrate_refresh">Refresh</button>
         <div id="migrate_page_status" class="zfsas-dm-status">Loading dataset migrator status...</div>
@@ -860,6 +866,14 @@ $csrfToken = zfsas_get_csrf_token();
   var refreshButton = byId('migrate_refresh');
   if (refreshButton) {
     refreshButton.addEventListener('click', function () {
+      refreshStatus();
+    });
+  }
+
+  var previewButton = byId('migrate_preview');
+  if (previewButton) {
+    previewButton.addEventListener('click', function () {
+      renderPageStatus('Previewing top-level folders...', false);
       refreshStatus();
     });
   }

@@ -7,6 +7,9 @@ It answers one question: "What changed for me?"
 
 ### 2026.06.01.01 (2026-06-01)
 
+- Improved Dataset Migrator safety for low-space migrations so each next folder waits for enough destination space before stopping containers or touching the original folder.
+- Clarified Dataset Migrator instructions for the Preview Migration review step, Start Migration handoff, and safe free-space waits.
+
 - Fixed a ZFS Send queue finalizer stall where a completed child send could be pushed back into a pool-prep wait after its pool-prep coordination job was pruned too early. Pool-prep jobs are now kept while dependent send jobs still exist, so finalizers and retry coordination can observe the completed child state.
 
 ### 2026.05.17.03 (2026-05-17)
