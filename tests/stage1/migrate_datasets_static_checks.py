@@ -98,6 +98,16 @@ require(
     r'var\s+useStatusRows\s*=\s*statusMatchesSelectedDataset\(status\)\s*&&\s*\(status\.isActive\s*\|\|\s*status\.isStale\)\s*&&\s*Array\.isArray\(status\.containers\)',
     "Container rows must use worker rows only while the active/stale worker state is live; terminal complete states should fall back to selected-dataset Docker preflight rows.",
 )
+require(
+    r'function\s+updateMigrationControls\s*\(\s*status\s*,\s*hasSelectedDataset\s*\).*?startButton\.disabled\s*=\s*startBusy\s*\|\|\s*!hasSelectedDataset\s*\|\|\s*isRunning\s*\|\|\s*isInterrupted.*?previewButton\.disabled\s*=\s*!hasSelectedDataset',
+    "Dataset Migrator controls must reflect live state: disable Start while active/stale and disable Preview until a dataset is selected.",
+    re.S,
+)
+require(
+    r'status\s*&&\s*status\.isActive\s*&&\s*String\(status\.WAITING_FOR_SPACE\s*\|\|\s*\'0\'\)\s*===\s*\'1\'.*?renderPageStatus\(\'Dataset migration is waiting for free space before touching the next folder\.\'\s*,\s*false\)',
+    "The page-level status must explicitly say when the live worker is waiting for free space, not only that it is running.",
+    re.S,
+)
 # Start remains a distinct POST-only action and must not be the only way to
 # populate the preview table.
 require(

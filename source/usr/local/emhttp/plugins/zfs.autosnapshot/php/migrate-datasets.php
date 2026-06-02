@@ -637,6 +637,31 @@ $csrfToken = zfsas_get_csrf_token();
     return el ? String(el.value || '') : '';
   }
 
+  function updateMigrationControls(status, hasSelectedDataset) {
+    var startButton = byId('migrate_start');
+    var previewButton = byId('migrate_preview');
+    var isRunning = !!(status && status.isActive);
+    var isInterrupted = !!(status && status.isStale);
+
+    if (startButton) {
+      startButton.disabled = startBusy || !hasSelectedDataset || isRunning || isInterrupted;
+      if (isRunning) {
+        startButton.title = 'A dataset migration is already running.';
+      } else if (isInterrupted) {
+        startButton.title = 'The previous migration is interrupted. Review the live log/recovery state before starting again.';
+      } else if (!hasSelectedDataset) {
+        startButton.title = 'Choose a dataset before starting.';
+      } else {
+        startButton.title = '';
+      }
+    }
+
+    if (previewButton) {
+      previewButton.disabled = !hasSelectedDataset;
+      previewButton.title = hasSelectedDataset ? '' : 'Choose a dataset before previewing.';
+    }
+  }
+
   function statusMatchesSelectedDataset(status) {
     var statusDataset = status && status.DATASET ? String(status.DATASET) : '';
     var selected = selectedDatasetValue();
@@ -889,11 +914,14 @@ $csrfToken = zfsas_get_csrf_token();
       statusUrl + '?dataset=' + encodeURIComponent(dataset) + '&_=' + Date.now(),
       function (payload) {
         var status = payload.status || {};
+        var hasSelectedDataset = (currentDataset || payload.selectedDataset || selectedDatasetValue()) !== '';
         populateDatasetSelect(payload.datasets || [], currentDataset || payload.selectedDataset || status.DATASET || '');
+        hasSelectedDataset = selectedDatasetValue() !== '';
         renderSummary(status);
         renderFolderRows(payload.preview, status);
         renderContainerRows(payload.docker, status);
         renderLog(payload.logTail || []);
+        updateMigrationControls(status, hasSelectedDataset);
 
         if (payload.datasetError) {
           renderFeedback(payload.datasetError, 'error');
@@ -907,6 +935,8 @@ $csrfToken = zfsas_get_csrf_token();
 
         if (status && status.isStale) {
           renderPageStatus('Dataset migrator worker stopped before it finished.', true);
+        } else if (status && status.isActive && String(status.WAITING_FOR_SPACE || '0') === '1') {
+          renderPageStatus('Dataset migration is waiting for free space before touching the next folder.', false);
         } else if (status && status.isActive) {
           renderPageStatus('Dataset migration is running in the background.', false);
         } else {
@@ -971,13 +1001,13 @@ $csrfToken = zfsas_get_csrf_token();
         {action: 'start', dataset: dataset},
         function (payload) {
           startBusy = false;
-          startButton.disabled = false;
+          updateMigrationControls({}, selectedDatasetValue() !== '');
           renderFeedback(payload && payload.message ? payload.message : 'Dataset migration started.', 'info');
           refreshStatus();
         },
         function (error, payload) {
           startBusy = false;
-          startButton.disabled = false;
+          updateMigrationControls({}, selectedDatasetValue() !== '');
           renderFeedback((payload && payload.error) ? payload.error : error.message, 'error');
           renderPageStatus('Dataset migration did not start.', true);
         }
