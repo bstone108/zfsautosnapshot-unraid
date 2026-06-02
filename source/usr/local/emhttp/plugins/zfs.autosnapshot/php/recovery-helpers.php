@@ -65,6 +65,16 @@ function zfsas_recovery_scan_status_path($dataset)
     return zfsas_recovery_scans_dir() . '/' . zfsas_recovery_dataset_key($dataset) . '.json';
 }
 
+function zfsas_recovery_scan_results_path($dataset)
+{
+    return zfsas_recovery_scans_dir() . '/' . zfsas_recovery_dataset_key($dataset) . '-results.txt';
+}
+
+function zfsas_recovery_scan_stop_path($dataset)
+{
+    return zfsas_recovery_scans_dir() . '/' . zfsas_recovery_dataset_key($dataset) . '.stop';
+}
+
 function zfsas_recovery_log_path($dataset)
 {
     return zfsas_recovery_logs_dir() . '/' . zfsas_recovery_dataset_key($dataset) . '.log';
@@ -701,6 +711,54 @@ function zfsas_recovery_start_scan($dataset, &$error = null)
     @exec($command, $output, $exitCode);
     if ($exitCode !== 0) {
         $error = 'Unable to start the recovery diagnostic scan.';
+        return false;
+    }
+
+    return true;
+}
+
+function zfsas_recovery_clear_scan($dataset, &$error = null)
+{
+    $error = null;
+
+    if (!zfsas_recovery_ensure_storage()) {
+        $error = 'Recovery scan storage is unavailable.';
+        return false;
+    }
+
+    $dataset = zfsas_recovery_trim($dataset);
+    if ($dataset === '' || !zfsas_recovery_is_valid_dataset_name($dataset)) {
+        $error = 'Dataset is invalid.';
+        return false;
+    }
+
+    $statusPath = zfsas_recovery_scan_status_path($dataset);
+    $payload = zfsas_recovery_read_json_file($statusPath);
+    if (!is_array($payload)) {
+        $error = 'No manual diagnostic scan is recorded for that dataset.';
+        return false;
+    }
+
+    if (in_array((string) ($payload['state'] ?? ''), ['queued', 'running'], true)) {
+        $error = 'A diagnostic scan is still queued or running for that dataset.';
+        return false;
+    }
+
+    $resultsFile = (string) ($payload['resultsFile'] ?? '');
+    if ($resultsFile === '' || dirname($resultsFile) !== zfsas_recovery_scans_dir()) {
+        $resultsFile = zfsas_recovery_scan_results_path($dataset);
+    }
+    $stopFile = zfsas_recovery_scan_stop_path($dataset);
+
+    if (is_file($resultsFile) && !@unlink($resultsFile)) {
+        $error = 'Unable to remove the manual diagnostic scan result file.';
+        return false;
+    }
+    if (is_file($stopFile)) {
+        @unlink($stopFile);
+    }
+    if (is_file($statusPath) && !@unlink($statusPath)) {
+        $error = 'Unable to remove the manual diagnostic scan status file.';
         return false;
     }
 

@@ -247,11 +247,12 @@ $csrfToken = zfsas_get_csrf_token();
             <th>Progress</th>
             <th>Unreadable Files</th>
             <th>Last Path</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody id="recovery_scan_rows">
           <tr>
-            <td colspan="6" class="zfsas-rt-help">No scan data yet.</td>
+            <td colspan="7" class="zfsas-rt-help">No scan data yet.</td>
           </tr>
         </tbody>
       </table>
@@ -497,6 +498,26 @@ $csrfToken = zfsas_get_csrf_token();
     );
   }
 
+  function clearRecoveryScan(dataset) {
+    if (!dataset) {
+      setScanStatus('No manual diagnostic scan was selected to clear.', true);
+      return;
+    }
+
+    setScanStatus('Clearing manual diagnostic scan...', false);
+    requestJsonPost(
+      actionUrl,
+      {action: 'clear_scan', dataset: dataset},
+      function (payload) {
+        setScanStatus(payload.message || 'Manual diagnostic scan cleared.', false);
+        loadStatus();
+      },
+      function (error, payload) {
+        setScanStatus((payload && payload.error) ? payload.error : error.message, true);
+      }
+    );
+  }
+
   function renderPools(pools, poolError) {
     var tbody = byId('recovery_pool_rows');
     if (!tbody) {
@@ -629,7 +650,7 @@ $csrfToken = zfsas_get_csrf_token();
       return;
     }
     if (!Array.isArray(scans) || scans.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" class="zfsas-rt-help">No recovery scan data yet.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="zfsas-rt-help">No recovery scan data yet.</td></tr>';
       return;
     }
 
@@ -644,6 +665,10 @@ $csrfToken = zfsas_get_csrf_token();
       html += '<td>' + progressHtml(scan) + '</td>';
       html += '<td>' + escapeHtml(String(scan.unreadableCount || 0)) + '</td>';
       html += '<td>' + escapeHtml(scan.lastPath || '') + '</td>';
+      var clearDisabled = (state === 'queued' || state === 'running');
+      html += '<td><button type="button" class="btn zfsas-clear-scan" '
+        + (clearDisabled ? 'disabled title="Wait for the scan to finish before clearing it." ' : '')
+        + 'data-dataset="' + escapeHtml(scan.dataset || '') + '">Clear</button></td>';
       html += '</tr>';
     });
     tbody.innerHTML = html;
@@ -684,6 +709,14 @@ $csrfToken = zfsas_get_csrf_token();
       button.getAttribute('data-path') || '',
       button.getAttribute('data-candidate-sha256') || ''
     );
+  });
+  document.addEventListener('click', function (event) {
+    var button = event.target && event.target.closest ? event.target.closest('.zfsas-clear-scan') : null;
+    if (!button || button.disabled) {
+      return;
+    }
+    event.preventDefault();
+    clearRecoveryScan(button.getAttribute('data-dataset') || '');
   });
   byId('recovery_start_scan').addEventListener('click', function () {
     var dataset = (byId('recovery_dataset').value || '').trim();

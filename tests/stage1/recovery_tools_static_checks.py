@@ -106,6 +106,41 @@ def main() -> int:
         r"'recoveryOptions'\s*=>\s*zfsas_recovery_option_candidates\(",
         "Recovery status endpoint must include recoveryOptions so the UI can update option rows during polling.",
     )
+    require(
+        page,
+        r'function\s+clearRecoveryScan\s*\(.*?action:\s*[\'\"]clear_scan[\'\"].*?loadStatus\s*\(',
+        "Manual diagnostic scan rows must have a UI action that clears stale scan entries and refreshes the list.",
+        re.S,
+    )
+    require(
+        page,
+        r'zfsas-clear-scan.*?data-dataset.*?scan\.dataset',
+        "Manual diagnostic scan rows must render a per-scan Clear button tied to the scan dataset.",
+        re.S,
+    )
+    require(
+        page,
+        r"state\s*===\s*'queued'.*?state\s*===\s*'running'.*?zfsas-clear-scan",
+        "Clear buttons must be disabled while a diagnostic scan is queued or running.",
+        re.S,
+    )
+    require(
+        page,
+        r'<th>Actions</th>',
+        "Manual diagnostic scan table must include an Actions column for clearing stale scans.",
+    )
+    require(
+        helpers,
+        r'function\s+zfsas_recovery_clear_scan\s*\(.*?\[\'queued\'\s*,\s*\'running\'\].*?unlink\(\$resultsFile\).*?unlink\(\$statusPath\)',
+        "Recovery helpers must clear terminal manual diagnostic scan status/results but reject queued/running scans.",
+        re.S,
+    )
+    require(
+        PAGE.with_name("recovery-action.php").read_text(encoding="utf-8"),
+        r"\$action\s*===\s*'clear_scan'.*?zfsas_recovery_clear_scan",
+        "Recovery action endpoint must expose the clear_scan action through the guarded POST endpoint.",
+        re.S,
+    )
 
     print("PASS: Recovery Tools repair-option static contracts")
     return 0

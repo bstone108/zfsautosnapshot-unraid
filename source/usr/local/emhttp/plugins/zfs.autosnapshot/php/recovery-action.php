@@ -41,6 +41,22 @@ if ($action === 'start_scan') {
     ]);
 }
 
+if ($action === 'clear_scan') {
+    $dataset = zfsas_recovery_trim($_POST['dataset'] ?? '');
+    $error = null;
+    if (!zfsas_recovery_clear_scan($dataset, $error)) {
+        zfsas_emit_marked_json([
+            'ok' => false,
+            'error' => $error ?: 'Unable to clear the diagnostic scan.',
+        ], 400);
+    }
+
+    zfsas_emit_marked_json([
+        'ok' => true,
+        'message' => 'Manual diagnostic scan cleared for ' . $dataset . '.',
+    ]);
+}
+
 if ($action === 'perform_recovery_action') {
     $datasetError = null;
     $datasetRows = zfsas_recovery_list_datasets($datasetError);
