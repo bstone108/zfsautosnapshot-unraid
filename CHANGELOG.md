@@ -7,6 +7,8 @@ It answers one question: "What changed for me?"
 
 ### 2026.06.01.01 (2026-06-01)
 
+- Improved Dataset Migrator refresh accuracy after a migration finishes. Once the worker is no longer live, the page rebuilds the selected dataset preview and Docker preflight rows instead of continuing to treat old completed worker rows as current live state.
+
 - Improved Dataset Migrator page accuracy when a selected dataset differs from an active migration dataset. Folder and container tables now label whether they are showing live worker state or refreshed selected-dataset preflight/preview data.
 - Kept live container worker rows scoped to the active dataset so selected-dataset preflight information is not mixed with another run's container status.
 

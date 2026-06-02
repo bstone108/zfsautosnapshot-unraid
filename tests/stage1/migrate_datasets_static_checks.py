@@ -5,11 +5,18 @@ import re
 
 ROOT = Path(__file__).resolve().parents[2]
 PAGE = ROOT / "source/usr/local/emhttp/plugins/zfs.autosnapshot/php/migrate-datasets.php"
+STATUS_ENDPOINT = ROOT / "source/usr/local/emhttp/plugins/zfs.autosnapshot/php/migrate-datasets-status.php"
 text = PAGE.read_text(encoding="utf-8")
+status_endpoint_text = STATUS_ENDPOINT.read_text(encoding="utf-8")
 
 
 def require(pattern: str, message: str, flags: int = 0) -> None:
     if not re.search(pattern, text, flags):
+        raise AssertionError(message)
+
+
+def require_status_endpoint(pattern: str, message: str, flags: int = 0) -> None:
+    if not re.search(pattern, status_endpoint_text, flags):
         raise AssertionError(message)
 
 
@@ -77,6 +84,19 @@ require(
     r'function\s+renderContainerSourceNotice\s*\(\s*docker\s*,\s*status\s*,\s*usingLiveRows\s*\)(?=.*?Showing live worker container state for active dataset)(?=.*?Showing Docker preflight for the selected dataset)(?=.*?Active migration dataset.*?differs from the selected dataset)',
     "Container table must label live worker rows vs selected-dataset Docker preflight rows, including mismatch cases.",
     re.S,
+)
+require_status_endpoint(
+    r'\$statusIsLive\s*=\s*\(bool\)\s*\(\(\$status\[\'isActive\'\].*?\|\|.*?\$status\[\'isStale\'\].*?\)\);.*?\$selectedDataset\s*!==\s*\'\'\s*&&\s*\(\s*!\$statusIsLive.*?zfsas_migrate_preview_dataset\(\$selectedDataset',
+    "Status refresh must rebuild selected-dataset preview after terminal completion instead of treating old complete rows as live state.",
+    re.S,
+)
+require(
+    r'var\s+useStatusRows\s*=\s*statusMatchesSelectedDataset\(status\)\s*&&\s*\(status\.isActive\s*\|\|\s*status\.isStale\)\s*&&\s*Array\.isArray\(status\.folders\)',
+    "Folder rows must use worker rows only while the active/stale worker state is live; terminal complete states should fall back to refreshed preview rows.",
+)
+require(
+    r'var\s+useStatusRows\s*=\s*statusMatchesSelectedDataset\(status\)\s*&&\s*\(status\.isActive\s*\|\|\s*status\.isStale\)\s*&&\s*Array\.isArray\(status\.containers\)',
+    "Container rows must use worker rows only while the active/stale worker state is live; terminal complete states should fall back to selected-dataset Docker preflight rows.",
 )
 # Start remains a distinct POST-only action and must not be the only way to
 # populate the preview table.
