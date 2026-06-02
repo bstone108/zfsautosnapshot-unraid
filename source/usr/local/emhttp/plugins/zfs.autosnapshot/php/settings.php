@@ -2008,12 +2008,8 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
 
     <div class="zfsas-section-panel" id="zfsas_panel_snapshot_manager" data-section-panel="snapshot-manager" role="tabpanel" aria-labelledby="zfsas_tab_snapshot_manager" hidden>
       <div class="zfsas-card zfsas-embedded-shell">
-        <h3 class="zfsas-placeholder-title">Snapshot Manager</h3>
         <div class="zfsas-help">
-          Snapshot Manager is available directly in this tab. It still stays lightweight by waiting to load the full dataset summary and drawer UI until you switch here.
-        </div>
-        <div class="zfsas-alert zfsas-alert-warn">
-          <code>Snapshot Manager</code> is still unfinished and may not work correctly yet. Please treat its actions as preview-only for now and verify results manually.
+          Snapshot Manager is loaded below. Use the pool filter to reduce long dataset lists, then click <strong>Manage Snapshots</strong> to inspect a dataset.
         </div>
         <div class="zfsas-embedded-frame-wrap">
           <iframe

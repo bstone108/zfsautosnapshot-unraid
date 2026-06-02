@@ -75,6 +75,14 @@ def extract_reload_current_dataset_function(page: str) -> str:
 
 def main() -> int:
     page = PAGE.read_text()
+    settings_page = (ROOT / "source/usr/local/emhttp/plugins/zfs.autosnapshot/php/settings.php").read_text()
+    snapshot_panel = extract_block(
+        settings_page,
+        '<div class="zfsas-section-panel" id="zfsas_panel_snapshot_manager"',
+        '    </div>\n\n    <div class="zfsas-section-panel" id="zfsas_panel_help"',
+        "Settings page must define the Snapshot Manager tab panel",
+        "Snapshot Manager tab panel must be closed before the Help tab panel",
+    )
     handler = extract_select_all_handler(page)
     refresh_function = extract_refresh_state_function(page)
     actionable_function = extract_actionable_selected_function(page)
@@ -86,6 +94,50 @@ def main() -> int:
         'disabled title="Snapshot deletion is already queued."',
         "pending-delete rows must render disabled selection checkboxes",
     )
+    assert_contains(
+        page,
+        'id="snapshot_manager_pool_filter"',
+        "Snapshot Manager must expose a pool-level filter to reduce long dataset lists",
+    )
+    assert_contains(
+        page,
+        "function populatePoolFilter(datasets) {",
+        "Snapshot Manager must rebuild pool filter options from loaded dataset summary rows",
+    )
+    assert_contains(
+        page,
+        "function applySnapshotManagerPoolFilter() {",
+        "Snapshot Manager must hide/show dataset rows by selected pool",
+    )
+    assert_contains(
+        page,
+        "data-pool=\"' + escapeHtml(row.pool || datasetPool(row.dataset)) + '\"",
+        "Snapshot Manager dataset rows must carry a pool data attribute for filtering",
+    )
+    assert_contains(
+        page,
+        "snapshot_manager_dataset_count",
+        "Snapshot Manager must show visible/total dataset counts while filtering",
+    )
+    assert_contains(
+        page,
+        "align-items: center;",
+        "Snapshot Manager drawer overlay must vertically center the manage-dataset panel instead of pinning it to the top",
+    )
+    assert_contains(
+        page,
+        "justify-content: center;",
+        "Snapshot Manager drawer overlay must horizontally center the manage-dataset panel instead of aligning it to the right edge",
+    )
+    assert_contains(
+        page,
+        "max-height: min(92vh, 1120px);",
+        "Snapshot Manager drawer panel must fit inside the viewport and let its body scroll",
+    )
+    if 'zfsas-placeholder-title">Snapshot Manager<' in snapshot_panel:
+        raise AssertionError("Embedded Snapshot Manager tab must not duplicate the iframe page header")
+    if '<code>Snapshot Manager</code> is still unfinished' in snapshot_panel:
+        raise AssertionError("Embedded Snapshot Manager tab must not duplicate the iframe warning label")
     assert_contains(
         handler,
         "if (checkbox.disabled) {",
