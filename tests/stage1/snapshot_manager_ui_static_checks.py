@@ -88,6 +88,20 @@ def main() -> int:
     actionable_function = extract_actionable_selected_function(page)
     request_action_function = extract_request_action_function(page)
     reload_current_dataset_function = extract_reload_current_dataset_function(page)
+    drawer_css = extract_block(
+        page,
+        "    .zfsas-sm-drawer {",
+        "    }\n\n    .zfsas-sm-drawer[hidden]",
+        "Snapshot Manager must define drawer overlay CSS",
+        "Snapshot Manager drawer overlay CSS must be closed before hidden-state CSS",
+    )
+    drawer_panel_css = extract_block(
+        page,
+        "    .zfsas-sm-drawer-panel {",
+        "    }\n\n    .zfsas-sm-drawer-header",
+        "Snapshot Manager must define drawer panel CSS",
+        "Snapshot Manager drawer panel CSS must be closed before header CSS",
+    )
 
     assert_contains(
         page,
@@ -120,19 +134,23 @@ def main() -> int:
         "Snapshot Manager must show visible/total dataset counts while filtering",
     )
     assert_contains(
-        page,
-        "align-items: center;",
-        "Snapshot Manager drawer overlay must vertically center the manage-dataset panel instead of pinning it to the top",
+        drawer_css,
+        "align-items: flex-start;",
+        "Snapshot Manager drawer overlay must align the manage-dataset panel to the top of the viewable window",
     )
+    if "align-items: center;" in drawer_css:
+        raise AssertionError(
+            "Snapshot Manager drawer overlay must not vertically center the manage-dataset panel in the page/list area"
+        )
     assert_contains(
-        page,
+        drawer_css,
         "justify-content: center;",
         "Snapshot Manager drawer overlay must horizontally center the manage-dataset panel instead of aligning it to the right edge",
     )
     assert_contains(
-        page,
-        "max-height: min(92vh, 1120px);",
-        "Snapshot Manager drawer panel must fit inside the viewport and let its body scroll",
+        drawer_panel_css,
+        "max-height: calc(100vh - 48px);",
+        "Snapshot Manager drawer panel must stay within the visible viewport and let its body scroll",
     )
     if 'zfsas-placeholder-title">Snapshot Manager<' in snapshot_panel:
         raise AssertionError("Embedded Snapshot Manager tab must not duplicate the iframe page header")

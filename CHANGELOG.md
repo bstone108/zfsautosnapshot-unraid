@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.03.t01 (Testing Branch Only)
+
+- Adjusted Snapshot Manager's Manage Snapshots panel so it opens at the top of the visible browser window and stays within the viewport with internal scrolling.
+
 ### 2026.06.02.t02 (Testing Branch Only)
 
 - Improved Snapshot Manager visibility for testing: added a pool-level dataset filter, removed duplicate embedded-tab header/warning copy, and centered the Manage Snapshots panel in the viewport with internal scrolling.

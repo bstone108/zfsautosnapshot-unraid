@@ -223,7 +223,7 @@ $csrfToken = zfsas_get_csrf_token();
       position: fixed;
       inset: 0;
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: center;
       z-index: 1060;
       pointer-events: none;
@@ -237,7 +237,7 @@ $csrfToken = zfsas_get_csrf_token();
 
     .zfsas-sm-drawer-panel {
       width: min(1120px, 96vw);
-      max-height: min(92vh, 1120px);
+      max-height: calc(100vh - 48px);
       background: var(--background-color, #fff);
       border-radius: 12px;
       box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
