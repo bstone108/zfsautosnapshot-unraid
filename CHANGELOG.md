@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.11.t01 (Testing Branch Only)
+
+- Fixed scheduled SSH ZFS send pool-prep checks so destination pool readiness is verified on the remote receiver instead of the local sender.
+
 ### 2026.06.03.t01 (Testing Branch Only)
 
 - Adjusted Snapshot Manager's Manage Snapshots panel so it opens at the top of the visible browser window and stays within the viewport with internal scrolling.
