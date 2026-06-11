@@ -24,11 +24,14 @@ start_queue_handler() {
 # shellcheck disable=SC2034
 enqueue_all_scheduled_jobs_now() {
   local now_epoch="$1"
-  local requested_at job_id dest_pool run_group_id prep_job_id pool readiness_message
+  local requested_at job_id dest_pool run_group_id prep_job_id pool readiness_message send_transport pool_key
   local -a run_jobs=()
-  local -a run_pools=()
+  local -a run_pool_keys=()
   local -A run_pool=()
+  local -A run_transport=()
   local -A pool_schedule_ids=()
+  local -A pool_key_pool=()
+  local -A pool_key_transport=()
   local -A seen_pool=()
 
   requested_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ' -r "$now_epoch" 2>/dev/null || date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -42,22 +45,30 @@ enqueue_all_scheduled_jobs_now() {
     }
     dest_pool="$(schedule_destination_pool "$job_id" || true)"
     [[ -n "$dest_pool" ]] || continue
+    send_transport="${SCHEDULE_TRANSPORT[$job_id]:-local}"
+    send_transport="${send_transport,,}"
+    [[ -n "$send_transport" ]] || send_transport="local"
+    pool_key="${send_transport}|${dest_pool}"
     run_jobs+=("$job_id")
     run_pool["$job_id"]="$dest_pool"
-    pool_schedule_ids["$dest_pool"]="${pool_schedule_ids[$dest_pool]:-}${job_id} "
-    if [[ -z "${seen_pool[$dest_pool]:-}" ]]; then
-      seen_pool["$dest_pool"]=1
-      run_pools+=("$dest_pool")
+    run_transport["$job_id"]="$send_transport"
+    pool_schedule_ids["$pool_key"]="${pool_schedule_ids[$pool_key]:-}${job_id} "
+    pool_key_pool["$pool_key"]="$dest_pool"
+    pool_key_transport["$pool_key"]="$send_transport"
+    if [[ -z "${seen_pool[$pool_key]:-}" ]]; then
+      seen_pool["$pool_key"]=1
+      run_pool_keys+=("$pool_key")
     fi
   done
 
-  for pool in "${run_pools[@]}"; do
-    enqueue_pool_prep_job "$pool" "$run_group_id" "$now_epoch" "$requested_at" "${pool_schedule_ids[$pool]}" || true
+  for pool_key in "${run_pool_keys[@]}"; do
+    enqueue_pool_prep_job "${pool_key_pool[$pool_key]}" "$run_group_id" "$now_epoch" "$requested_at" "${pool_schedule_ids[$pool_key]}" "${pool_key_transport[$pool_key]}" || true
   done
 
   for job_id in "${run_jobs[@]}"; do
     pool="${run_pool[$job_id]}"
-    prep_job_id="$(pool_prep_job_id_for_group "$pool" "$run_group_id")"
+    send_transport="${run_transport[$job_id]:-local}"
+    prep_job_id="$(pool_prep_job_id_for_group "$pool" "$run_group_id" "$send_transport")"
     enqueue_scheduled_prepare_job "$job_id" "manual-${now_epoch}" "$now_epoch" "$requested_at" \
       "$prep_job_id" "$pool" "$run_group_id" "0" "Queued by manual run request." || true
   done

@@ -1333,11 +1333,14 @@ enqueue_pool_prep_job() {
   local requested_epoch="$3"
   local requested_at="$4"
   local schedule_ids="$5"
+  local send_transport="${6:-local}"
   local job_id job_file
   local -A job=()
 
+  send_transport="${send_transport,,}"
+  [[ -n "$send_transport" ]] || send_transport="local"
   [[ -n "$dest_pool" && -n "$run_group_id" && -n "$schedule_ids" ]] || return 1
-  job_id="$(pool_prep_job_id_for_group "$dest_pool" "$run_group_id")"
+  job_id="$(pool_prep_job_id_for_group "$dest_pool" "$run_group_id" "$send_transport")"
   job_file="${OPS_JOBS_DIR}/$(printf '%010d-%s.job' "$requested_epoch" "$job_id")"
   [[ -f "$job_file" ]] && return 0
 
@@ -1353,6 +1356,7 @@ enqueue_pool_prep_job() {
   job[RUN_GROUP_ID]="$run_group_id"
   job[DESTINATION_POOL]="$dest_pool"
   job[DESTINATION_ROOT]="$dest_pool"
+  job[SEND_TRANSPORT]="$send_transport"
   job[SCHEDULE_JOB_IDS]="$schedule_ids"
   job[ATTEMPT_COUNT]="0"
   job[RETRY_AT]="0"
@@ -3153,6 +3157,53 @@ function zfs_pool_actionable() {
   return 0
 }
 
+send_destination_pool_actionable_for_schedule_transport() {
+  local pool="$1"
+  local transport="${2:-local}"
+  local message_var="${3:-}"
+  local command
+
+  [[ -n "$message_var" ]] && printf -v "$message_var" ''
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+
+  case "$transport" in
+    local)
+      zfs_pool_actionable "$pool" "$message_var"
+      ;;
+    ssh)
+      [[ -n "$pool" ]] || {
+        [[ -n "$message_var" ]] && printf -v "$message_var" 'destination pool is not configured'
+        return 1
+      }
+      if ! is_valid_dataset_name "$pool" || [[ "$pool" == */* ]]; then
+        [[ -n "$message_var" ]] && printf -v "$message_var" "destination pool '${pool}' is invalid"
+        return 1
+      fi
+      build_ssh_zfs_command "zfs list -H -o name -- $(shell_quote_word "$pool") >/dev/null" command || {
+        [[ -n "$message_var" ]] && printf -v "$message_var" "SSH receiver settings are incomplete or invalid"
+        return 1
+      }
+      eval "$command" >/dev/null 2>&1 || {
+        [[ -n "$message_var" ]] && printf -v "$message_var" "remote destination pool '${pool}' is not ready over SSH"
+        return 1
+      }
+      return 0
+      ;;
+    spiped)
+      if ! spiped_sender_settings_ready "$message_var"; then
+        return 1
+      fi
+      [[ -n "$message_var" ]] && printf -v "$message_var" "spiped receiver readiness is not implemented yet"
+      return 1
+      ;;
+    *)
+      [[ -n "$message_var" ]] && printf -v "$message_var" "unknown send transport '${transport}'"
+      return 1
+      ;;
+  esac
+}
+
 send_destination_actionable() {
   local destination="$1"
   local message_var="${2:-}"
@@ -3457,7 +3508,14 @@ queue_safe_token() {
 pool_prep_job_id_for_group() {
   local pool="$1"
   local run_group="$2"
-  printf 'send-pool-prep-%s-%s' "$(queue_safe_token "$pool")" "$(queue_safe_token "$run_group")"
+  local transport="${3:-local}"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  if [[ "$transport" == "local" ]]; then
+    printf 'send-pool-prep-%s-%s' "$(queue_safe_token "$pool")" "$(queue_safe_token "$run_group")"
+  else
+    printf 'send-pool-prep-%s-%s-%s' "$(queue_safe_token "$transport")" "$(queue_safe_token "$pool")" "$(queue_safe_token "$run_group")"
+  fi
 }
 
 scheduled_job_protected_basenames() {
@@ -3916,15 +3974,18 @@ schedule_window_exists() {
 enqueue_scheduled_send_jobs_due() {
   local now_epoch="$1"
   local job_id frequency current_window last_completed_window requested_at requested_epoch
-  local resume_basename previous_basename dest_pool run_group_id prep_job_id pool readiness_message
+  local resume_basename previous_basename dest_pool run_group_id prep_job_id pool readiness_message send_transport pool_key
   local -a due_jobs=()
-  local -a due_pools=()
+  local -a due_pool_keys=()
   local -A due_window=()
   local -A due_resume_basename=()
   local -A due_previous_basename=()
   local -A due_is_resume=()
   local -A due_pool=()
+  local -A due_transport=()
   local -A pool_schedule_ids=()
+  local -A pool_key_pool=()
+  local -A pool_key_transport=()
   local -A seen_pool=()
 
   load_schedule_state
@@ -3964,23 +4025,31 @@ enqueue_scheduled_send_jobs_due() {
 
     dest_pool="$(schedule_destination_pool "$job_id" || true)"
     [[ -n "$dest_pool" ]] || continue
+    send_transport="${SCHEDULE_TRANSPORT[$job_id]:-local}"
+    send_transport="${send_transport,,}"
+    [[ -n "$send_transport" ]] || send_transport="local"
+    pool_key="${send_transport}|${dest_pool}"
     due_jobs+=("$job_id")
     due_window["$job_id"]="$current_window"
     due_pool["$job_id"]="$dest_pool"
-    pool_schedule_ids["$dest_pool"]="${pool_schedule_ids[$dest_pool]:-}${job_id} "
-    if [[ -z "${seen_pool[$dest_pool]:-}" ]]; then
-      seen_pool["$dest_pool"]=1
-      due_pools+=("$dest_pool")
+    due_transport["$job_id"]="$send_transport"
+    pool_schedule_ids["$pool_key"]="${pool_schedule_ids[$pool_key]:-}${job_id} "
+    pool_key_pool["$pool_key"]="$dest_pool"
+    pool_key_transport["$pool_key"]="$send_transport"
+    if [[ -z "${seen_pool[$pool_key]:-}" ]]; then
+      seen_pool["$pool_key"]=1
+      due_pool_keys+=("$pool_key")
     fi
   done
 
-  for pool in "${due_pools[@]}"; do
-    enqueue_pool_prep_job "$pool" "$run_group_id" "$requested_epoch" "$requested_at" "${pool_schedule_ids[$pool]}" || true
+  for pool_key in "${due_pool_keys[@]}"; do
+    enqueue_pool_prep_job "${pool_key_pool[$pool_key]}" "$run_group_id" "$requested_epoch" "$requested_at" "${pool_schedule_ids[$pool_key]}" "${pool_key_transport[$pool_key]}" || true
   done
 
   for job_id in "${due_jobs[@]}"; do
     pool="${due_pool[$job_id]}"
-    prep_job_id="$(pool_prep_job_id_for_group "$pool" "$run_group_id")"
+    send_transport="${due_transport[$job_id]:-local}"
+    prep_job_id="$(pool_prep_job_id_for_group "$pool" "$run_group_id" "$send_transport")"
     if [[ "${due_is_resume[$job_id]:-0}" == "1" ]]; then
       enqueue_resume_prepare_job "$job_id" "${due_window[$job_id]}" "$requested_epoch" "$requested_at" \
         "${due_resume_basename[$job_id]}" "${due_previous_basename[$job_id]:-}" "$prep_job_id" "$pool" "$run_group_id" || true

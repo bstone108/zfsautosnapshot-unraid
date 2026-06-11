@@ -1273,21 +1273,22 @@ process_finalize_job() {
 }
 
 process_pool_prep_job() {
-  local dest_pool schedule_ids schedule_job_id dest_root capacity_dataset readiness_message
+  local dest_pool schedule_ids schedule_job_id dest_root capacity_dataset readiness_message send_transport
   local retention_started retention_elapsed space_started space_elapsed
   # shellcheck disable=SC2034
   local -A planned_reclaim=()
 
   dest_pool="$(job_get job DESTINATION_POOL)"
   schedule_ids="$(job_get job SCHEDULE_JOB_IDS)"
+  send_transport="$(job_get job SEND_TRANSPORT local)"
   [[ -n "$dest_pool" && -n "$schedule_ids" ]] || {
     fail_current_job_final "Pool prep is missing settings."
     return 1
   }
 
-  zfs_pool_actionable "$dest_pool" readiness_message || {
-    log "Destination pool is not ready for pool prep ${dest_pool}: ${readiness_message}"
-    defer_current_job "Destination pool is not ready; waiting for ZFS import/mount." 15
+  send_destination_pool_actionable_for_schedule_transport "$dest_pool" "$send_transport" readiness_message || {
+    log "Destination pool is not ready for pool prep ${dest_pool} (${send_transport}): ${readiness_message}"
+    defer_current_job "Destination pool is not ready; waiting for ZFS import/mount or remote receiver readiness." 15
     return 2
   }
 

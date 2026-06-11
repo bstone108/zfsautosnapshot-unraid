@@ -127,10 +127,23 @@ def main() -> int:
         "source readiness must be verified before latest-common scans or destructive reseed decisions",
     )
     assert_contains(
-        worker,
-        "zfs_pool_actionable \"$dest_pool\" readiness_message || {",
-        "pool prep must defer until the destination pool is ZFS-actionable",
+        lib,
+        "send_destination_pool_actionable_for_schedule_transport()",
+        "pool prep needs a transport-aware destination-pool readiness helper so SSH prep checks the receiver, not the sender",
     )
+    assert_contains(
+        lib,
+        "job[SEND_TRANSPORT]=\"$send_transport\"",
+        "pool prep jobs must persist their transport so SSH prep does not fall back to local pool checks",
+    )
+    process_pool_prep_body = worker.split("process_pool_prep_job() {", 1)[1].split("\n}\n", 1)[0]
+    assert_contains(
+        process_pool_prep_body,
+        "send_destination_pool_actionable_for_schedule_transport \"$dest_pool\" \"$send_transport\" readiness_message || {",
+        "pool prep must verify the destination pool through the schedule transport instead of always using local zfs_pool_actionable",
+    )
+    if "zfs_pool_actionable \"$dest_pool\" readiness_message" in process_pool_prep_body:
+        raise AssertionError("pool prep must not check SSH destination pools with local zfs_pool_actionable")
 
     assert_contains(
         lib,
