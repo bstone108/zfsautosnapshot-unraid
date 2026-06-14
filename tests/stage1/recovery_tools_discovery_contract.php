@@ -15,6 +15,7 @@ $sourceMount = $tmp . '/mnt/tank/appdata';
 $destMount = $tmp . '/mnt/backup/appdata';
 @mkdir($sourceMount . '/config', 0775, true);
 @mkdir($sourceMount . '/.zfs/snapshot/good/config', 0775, true);
+@mkdir($sourceMount . '/.zfs/snapshot/bad-evidence/config', 0775, true);
 @mkdir($sourceMount . '/.zfs/snapshot/unreadable/config', 0775, true);
 @mkdir($destMount . '/.zfs/snapshot/zfs-send-good/config', 0775, true);
 file_put_contents($sourceMount . '/.zfs/snapshot/good/config/db.sqlite', 'snapshot-clean');
@@ -37,7 +38,7 @@ $sendJobs = [
 $discovered = zfsas_recovery_discover_clean_copies_for_option($option, $datasetRows, $sendJobs);
 
 assert_true(($discovered['state'] ?? '') === 'ready', 'discovery must mark the option ready when readable candidates are found');
-assert_true(($discovered['actionsEnabled'] ?? true) === false, 'discovery must not enable restore/delete actions without the later guarded confirmation flow');
+assert_true(($discovered['actionsEnabled'] ?? false) === true, 'discovery must enable guarded restore/delete/read actions after candidate discovery reaches a terminal state');
 assert_true(($discovered['relativePath'] ?? '') === 'config/db.sqlite', 'discovery must derive a dataset-relative path for the affected file');
 $candidates = $discovered['cleanCandidates'] ?? [];
 assert_true(count($candidates) === 2, 'discovery must find both local snapshot and ZFS send-destination candidates');
@@ -48,6 +49,29 @@ foreach ($candidates as $candidate) {
     assert_true(($candidate['readable'] ?? false) === true, 'candidate must be proven readable before being offered');
     assert_true(($candidate['path'] ?? '') !== $option['path'], 'candidate must not point back at the affected current file');
 }
+
+file_put_contents($sourceMount . '/.zfs/snapshot/bad-evidence/config/db.sqlite', 'snapshot-evidence-should-map-to-current');
+$snapshotEvidence = zfsas_recovery_discover_clean_copies_for_option([
+    'dataset' => 'tank/appdata',
+    'path' => $sourceMount . '/.zfs/snapshot/bad-evidence/config/db.sqlite',
+    'source' => 'zpool status',
+], $datasetRows, $sendJobs);
+assert_true(($snapshotEvidence['state'] ?? '') === 'ready', 'snapshot evidence must be mapped to the original file when building repair options');
+assert_true(($snapshotEvidence['path'] ?? '') === $sourceMount . '/config/db.sqlite', 'repair option path must show the original file, not the .zfs snapshot evidence path');
+assert_true(($snapshotEvidence['relativePath'] ?? '') === 'config/db.sqlite', 'snapshot evidence must preserve the original dataset-relative path');
+foreach (($snapshotEvidence['cleanCandidates'] ?? []) as $candidate) {
+    assert_true(strpos((string) ($candidate['path'] ?? ''), '/.zfs/snapshot/bad-evidence/') === false, 'the corrupt snapshot evidence path must not be offered as a repair target or clean candidate');
+}
+
+$poolDerived = zfsas_recovery_option_candidates([
+    'pools' => [
+        ['identifiedFiles' => [$sourceMount . '/.zfs/snapshot/bad-evidence/config/db.sqlite']],
+    ],
+], [], $datasetRows, $sendJobs);
+assert_true(count($poolDerived) === 1, 'zpool snapshot evidence must map to one repairable original-file row');
+assert_true(($poolDerived[0]['dataset'] ?? '') === 'tank/appdata', 'repairable row must infer the mounted source dataset from the evidence path');
+assert_true(($poolDerived[0]['path'] ?? '') === $sourceMount . '/config/db.sqlite', 'repairable row must show the original file path instead of the snapshot path');
+assert_true(($poolDerived[0]['actionsEnabled'] ?? false) === true, 'repairable rows derived from zpool evidence must expose guarded actions after discovery');
 
 $unknown = zfsas_recovery_discover_clean_copies_for_option([
     'dataset' => 'tank/appdata',

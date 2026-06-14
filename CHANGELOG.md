@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.14.t01 (Testing Branch Only)
+
+- Improved Repair Tools recovery rows so corrupt snapshot evidence is mapped back to the original file path, snapshot-only bad-file entries are not shown as repair targets, and guarded repair actions become available once discovery completes.
+
 ### 2026.06.11.t01 (Testing Branch Only)
 
 - Fixed scheduled SSH ZFS send pool-prep checks so destination pool readiness is verified on the remote receiver instead of the local sender.

@@ -365,6 +365,33 @@ function zfsas_recovery_relative_path_for_dataset($filePath, $mountpoint)
     return $relative === '' ? null : $relative;
 }
 
+function zfsas_recovery_original_path_from_snapshot_evidence($filePath, $mountpoint)
+{
+    $filePath = zfsas_recovery_normalize_path($filePath);
+    $mountpoint = zfsas_recovery_normalize_path($mountpoint);
+    if ($filePath === '' || $mountpoint === '' || $mountpoint === 'legacy' || $mountpoint === 'none') {
+        return null;
+    }
+
+    $snapshotPrefix = $mountpoint . '/.zfs/snapshot/';
+    if (strpos($filePath, $snapshotPrefix) !== 0) {
+        return null;
+    }
+
+    $afterPrefix = substr($filePath, strlen($snapshotPrefix));
+    $slash = strpos($afterPrefix, '/');
+    if ($slash === false) {
+        return null;
+    }
+
+    $relative = ltrim(substr($afterPrefix, $slash + 1), '/');
+    if ($relative === '') {
+        return null;
+    }
+
+    return $mountpoint . '/' . $relative;
+}
+
 function zfsas_recovery_dataset_mountpoint_map($datasetRows)
 {
     $map = [];
@@ -376,6 +403,24 @@ function zfsas_recovery_dataset_mountpoint_map($datasetRows)
         }
     }
     return $map;
+}
+
+function zfsas_recovery_dataset_for_path($filePath, $datasetRows)
+{
+    $filePath = zfsas_recovery_normalize_path($filePath);
+    $bestDataset = '';
+    $bestLength = -1;
+    foreach (zfsas_recovery_dataset_mountpoint_map($datasetRows) as $dataset => $mountpoint) {
+        if (strpos($filePath . '/', $mountpoint . '/') !== 0) {
+            continue;
+        }
+        $length = strlen($mountpoint);
+        if ($length > $bestLength) {
+            $bestDataset = $dataset;
+            $bestLength = $length;
+        }
+    }
+    return $bestDataset;
 }
 
 function zfsas_recovery_send_destination_for_source($sourceDataset, $sendJobs)
@@ -445,13 +490,21 @@ function zfsas_recovery_discover_clean_copies_for_option($option, $datasetRows, 
     $option['cleanCandidates'] = [];
 
     $dataset = zfsas_recovery_trim($option['dataset'] ?? '');
-    $path = zfsas_recovery_normalize_path($option['path'] ?? '');
+    $evidencePath = zfsas_recovery_normalize_path($option['path'] ?? '');
+    $path = $evidencePath;
     $mountpoints = zfsas_recovery_dataset_mountpoint_map($datasetRows);
     if ($dataset === '' || !isset($mountpoints[$dataset])) {
         $option['state'] = 'blocked';
         $option['message'] = 'Select a mounted dataset for this affected file before recovery candidates can be discovered.';
         return $option;
     }
+
+    $originalPath = zfsas_recovery_original_path_from_snapshot_evidence($path, $mountpoints[$dataset]);
+    if ($originalPath !== null) {
+        $path = $originalPath;
+        $option['snapshotEvidencePath'] = $evidencePath;
+    }
+    $option['path'] = $path;
 
     $relativePath = zfsas_recovery_relative_path_for_dataset($path, $mountpoints[$dataset]);
     if ($relativePath === null) {
@@ -469,13 +522,17 @@ function zfsas_recovery_discover_clean_copies_for_option($option, $datasetRows, 
         $candidates = array_merge($candidates, $sendCandidates);
     }
 
-    $option['cleanCandidates'] = array_values($candidates);
-    if (!empty($candidates)) {
+    $option['cleanCandidates'] = array_values(array_filter($candidates, function ($candidate) use ($evidencePath) {
+        return zfsas_recovery_normalize_path($candidate['path'] ?? '') !== $evidencePath;
+    }));
+    if (!empty($option['cleanCandidates'])) {
         $option['state'] = 'ready';
-        $option['message'] = count($candidates) . ' readable recovery candidate(s) found. Restore/delete actions remain disabled until the guarded confirmation flow is implemented.';
+        $option['actionsEnabled'] = true;
+        $option['message'] = count($option['cleanCandidates']) . ' readable recovery candidate(s) found. Select a guarded recovery action and enter the exact confirmation token before data changes.';
     } else {
         $option['state'] = 'no_candidates';
-        $option['message'] = 'No readable local snapshot or ZFS send-destination copies were found yet for this affected file.';
+        $option['actionsEnabled'] = true;
+        $option['message'] = 'No readable local snapshot or ZFS send-destination copies were found yet for this affected file. Aggressive read and delete remain available only through explicit confirmation.';
     }
     return $option;
 }
@@ -599,7 +656,7 @@ function zfsas_recovery_perform_guarded_action($request, $datasetRows, $sendJobs
     return false;
 }
 
-function zfsas_recovery_option_candidates($poolStatus = null, $scans = null)
+function zfsas_recovery_option_candidates($poolStatus = null, $scans = null, $datasetRows = null, $sendJobs = null)
 {
     if (!is_array($poolStatus)) {
         $poolStatus = zfsas_recovery_pool_status();
@@ -607,16 +664,21 @@ function zfsas_recovery_option_candidates($poolStatus = null, $scans = null)
     if (!is_array($scans)) {
         $scans = zfsas_recovery_list_scans();
     }
+    $datasetRows = is_array($datasetRows) ? $datasetRows : zfsas_recovery_list_datasets($ignoredError);
+    $sendJobs = is_array($sendJobs) ? $sendJobs : zfsas_recovery_read_send_jobs();
 
     $rows = [];
     $seen = [];
     $actionTypes = ["aggressive_read", "snapshot_restore", "send_destination_restore", "delete_file"];
-    $addCandidate = function ($dataset, $path, $source, $state = 'searching') use (&$rows, &$seen, $actionTypes) {
+    $addCandidate = function ($dataset, $path, $source, $state = 'searching') use (&$rows, &$seen, $actionTypes, $datasetRows) {
         $path = zfsas_recovery_trim($path);
         if ($path === '') {
             return;
         }
         $dataset = zfsas_recovery_trim($dataset);
+        if ($dataset === '') {
+            $dataset = zfsas_recovery_dataset_for_path($path, $datasetRows);
+        }
         $key = strtolower($dataset . "\n" . $path . "\n" . $source);
         if (isset($seen[$key])) {
             return;
@@ -657,8 +719,6 @@ function zfsas_recovery_option_candidates($poolStatus = null, $scans = null)
     }
 
     if (!empty($rows)) {
-        $datasetRows = zfsas_recovery_list_datasets($ignoredError);
-        $sendJobs = zfsas_recovery_read_send_jobs();
         foreach ($rows as $index => $row) {
             $rows[$index] = zfsas_recovery_discover_clean_copies_for_option($row, $datasetRows, $sendJobs);
         }
