@@ -20,5 +20,5 @@ zfsas_emit_marked_json([
     'pools' => $poolStatus['pools'] ?? [],
     'poolError' => $poolStatus['error'] ?? null,
     'scans' => $scans,
-    'recoveryOptions' => zfsas_recovery_option_candidates($poolStatus, $scans),
+    'recoveryOptions' => zfsas_recovery_option_candidates($poolStatus, $scans, $datasets),
 ]);

@@ -73,6 +73,20 @@ assert_true(($poolDerived[0]['dataset'] ?? '') === 'tank/appdata', 'repairable r
 assert_true(($poolDerived[0]['path'] ?? '') === $sourceMount . '/config/db.sqlite', 'repairable row must show the original file path instead of the snapshot path');
 assert_true(($poolDerived[0]['actionsEnabled'] ?? false) === true, 'repairable rows derived from zpool evidence must expose guarded actions after discovery');
 
+$poolWithOriginalAndSnapshotEvidence = zfsas_recovery_option_candidates([
+    'pools' => [
+        ['identifiedFiles' => [
+            $sourceMount . '/config/db.sqlite',
+            $sourceMount . '/.zfs/snapshot/bad-evidence/config/db.sqlite',
+        ]],
+    ],
+], [], $datasetRows, $sendJobs);
+assert_true(count($poolWithOriginalAndSnapshotEvidence) === 1, 'zpool original-file evidence and matching snapshot evidence must collapse to one original repair row');
+assert_true(($poolWithOriginalAndSnapshotEvidence[0]['path'] ?? '') === $sourceMount . '/config/db.sqlite', 'deduped repair row must preserve the original corrupt file path');
+foreach (($poolWithOriginalAndSnapshotEvidence[0]['cleanCandidates'] ?? []) as $candidate) {
+    assert_true(strpos((string) ($candidate['path'] ?? ''), '/.zfs/snapshot/bad-evidence/') === false, 'matching corrupt snapshot evidence must not be offered as a clean candidate when original evidence is also present');
+}
+
 $unknown = zfsas_recovery_discover_clean_copies_for_option([
     'dataset' => 'tank/appdata',
     'path' => $tmp . '/outside/file.txt',

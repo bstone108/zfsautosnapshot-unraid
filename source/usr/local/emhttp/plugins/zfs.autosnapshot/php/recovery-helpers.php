@@ -423,6 +423,27 @@ function zfsas_recovery_dataset_for_path($filePath, $datasetRows)
     return $bestDataset;
 }
 
+function zfsas_recovery_original_path_for_any_snapshot_evidence($filePath, $datasetRows, &$dataset = null)
+{
+    $filePath = zfsas_recovery_normalize_path($filePath);
+    $dataset = zfsas_recovery_trim($dataset ?? '');
+    $best = null;
+    $bestLength = -1;
+    foreach (zfsas_recovery_dataset_mountpoint_map($datasetRows) as $candidateDataset => $mountpoint) {
+        $originalPath = zfsas_recovery_original_path_from_snapshot_evidence($filePath, $mountpoint);
+        if ($originalPath === null) {
+            continue;
+        }
+        $length = strlen($mountpoint);
+        if ($length > $bestLength) {
+            $best = $originalPath;
+            $bestLength = $length;
+            $dataset = $candidateDataset;
+        }
+    }
+    return $best;
+}
+
 function zfsas_recovery_send_destination_for_source($sourceDataset, $sendJobs)
 {
     $sourceDataset = zfsas_recovery_trim($sourceDataset);
@@ -522,8 +543,16 @@ function zfsas_recovery_discover_clean_copies_for_option($option, $datasetRows, 
         $candidates = array_merge($candidates, $sendCandidates);
     }
 
-    $option['cleanCandidates'] = array_values(array_filter($candidates, function ($candidate) use ($evidencePath) {
-        return zfsas_recovery_normalize_path($candidate['path'] ?? '') !== $evidencePath;
+    $evidencePaths = [$evidencePath];
+    foreach (($option['evidencePaths'] ?? []) as $extraEvidencePath) {
+        $normalizedExtra = zfsas_recovery_normalize_path($extraEvidencePath);
+        if ($normalizedExtra !== '') {
+            $evidencePaths[] = $normalizedExtra;
+        }
+    }
+    $evidencePaths = array_values(array_unique($evidencePaths));
+    $option['cleanCandidates'] = array_values(array_filter($candidates, function ($candidate) use ($evidencePaths) {
+        return !in_array(zfsas_recovery_normalize_path($candidate['path'] ?? ''), $evidencePaths, true);
     }));
     if (!empty($option['cleanCandidates'])) {
         $option['state'] = 'ready';
@@ -671,22 +700,31 @@ function zfsas_recovery_option_candidates($poolStatus = null, $scans = null, $da
     $seen = [];
     $actionTypes = ["aggressive_read", "snapshot_restore", "send_destination_restore", "delete_file"];
     $addCandidate = function ($dataset, $path, $source, $state = 'searching') use (&$rows, &$seen, $actionTypes, $datasetRows) {
-        $path = zfsas_recovery_trim($path);
+        $evidencePath = zfsas_recovery_trim($path);
+        $path = $evidencePath;
         if ($path === '') {
             return;
         }
         $dataset = zfsas_recovery_trim($dataset);
+        $mappedOriginalPath = zfsas_recovery_original_path_for_any_snapshot_evidence($path, $datasetRows, $dataset);
+        if ($mappedOriginalPath !== null) {
+            $path = $mappedOriginalPath;
+        }
         if ($dataset === '') {
             $dataset = zfsas_recovery_dataset_for_path($path, $datasetRows);
         }
         $key = strtolower($dataset . "\n" . $path . "\n" . $source);
         if (isset($seen[$key])) {
+            if ($evidencePath !== $path) {
+                $rows[$seen[$key]]['evidencePaths'][] = $evidencePath;
+            }
             return;
         }
-        $seen[$key] = true;
+        $seen[$key] = count($rows);
         $rows[] = [
             'dataset' => $dataset,
             'path' => $path,
+            'evidencePaths' => $evidencePath === $path ? [] : [$evidencePath],
             'source' => $source,
             'state' => $state,
             'message' => 'Searching snapshots and ZFS send destinations for clean recovery candidates.',

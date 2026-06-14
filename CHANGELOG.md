@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.14.t02 (Testing Branch Only)
+
+- Repaired the Repair Tools regression from 2026.06.14.t01 so original corrupt-file rows remain visible when matching `.zfs/snapshot` evidence is present, corrupt snapshot evidence is not offered as a clean restore candidate, manual scan dataset selection is not reset during status polling, and Recovery Tools polling is less aggressive while still refreshing status.
+
 ### 2026.06.14.t01 (Testing Branch Only)
 
 - Improved Repair Tools recovery rows so corrupt snapshot evidence is mapped back to the original file path, snapshot-only bad-file entries are not shown as repair targets, and guarded repair actions become available once discovery completes.

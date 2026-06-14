@@ -566,6 +566,9 @@ $csrfToken = zfsas_get_csrf_token();
     if (!select) {
       return;
     }
+    if (document.activeElement === select) {
+      return;
+    }
     var currentValue = select.value || '';
     var html = '<option value="">Choose a mounted dataset</option>';
     (datasets || []).forEach(function (row) {
@@ -739,7 +742,7 @@ $csrfToken = zfsas_get_csrf_token();
   });
 
   loadStatus();
-  pollTimer = window.setInterval(loadStatus, 5000);
+  pollTimer = window.setInterval(loadStatus, 30000);
 })();
 </script>
 </body>

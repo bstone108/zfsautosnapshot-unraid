@@ -103,8 +103,19 @@ def main() -> int:
     )
     require(
         status_endpoint,
-        r"'recoveryOptions'\s*=>\s*zfsas_recovery_option_candidates\(",
-        "Recovery status endpoint must include recoveryOptions so the UI can update option rows during polling.",
+        r"'recoveryOptions'\s*=>\s*zfsas_recovery_option_candidates\(\$poolStatus\s*,\s*\$scans\s*,\s*\$datasets",
+        "Recovery status endpoint must reuse the already-loaded dataset list when building recoveryOptions so every poll does not run an extra zfs list.",
+    )
+    require(
+        page,
+        r'function\s+renderDatasetOptions\s*\(.*?document\.activeElement\s*===\s*select.*?return;',
+        "Polling refresh must not rebuild the manual diagnostic dataset selector while the user is actively selecting a dataset.",
+        re.S,
+    )
+    require(
+        page,
+        r'setInterval\(loadStatus,\s*(?:[3-9]\d{4}|\d{6,})\)',
+        "Recovery Tools status polling must not rerun expensive snapshot discovery every 5 seconds.",
     )
     require(
         page,
