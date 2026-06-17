@@ -14,7 +14,6 @@ $sendSettingsUrl = "/plugins/{$pluginName}/php/send-settings.php";
 $migrateDatasetsUrl = "/plugins/{$pluginName}/php/migrate-datasets.php";
 $snapshotManagerPageUrl = "/plugins/{$pluginName}/php/snapshot-manager-page.php";
 $snapshotManagerEmbeddedUrl = $snapshotManagerPageUrl . '?embedded=1';
-$recoveryToolsUrl = "/plugins/{$pluginName}/php/recovery-tools.php";
 $snapshotManagerListUrl = "/plugins/{$pluginName}/php/snapshot-manager-list.php";
 $snapshotManagerDatasetUrl = "/plugins/{$pluginName}/php/snapshot-manager-dataset.php";
 $snapshotManagerActionUrl = "/plugins/{$pluginName}/php/snapshot-manager-action.php";
@@ -759,7 +758,7 @@ $sendJobs = zfsas_send_parse_jobs($sendConfig['SEND_JOBS'] ?? '', $sendParseErro
 $sendDestinationCandidates = array_values(array_unique(array_merge($availableDatasets, array_keys($configuredDatasetMap))));
 $sendDestinationDatasets = zfsas_send_destination_datasets_from_jobs($sendJobs, $sendDestinationCandidates);
 $initialSection = trim((string) ($_GET['section'] ?? 'main'));
-if (!in_array($initialSection, ['main', 'special-features', 'repair-tools', 'snapshot-manager', 'help'], true)) {
+if (!in_array($initialSection, ['main', 'special-features', 'snapshot-manager', 'help'], true)) {
     $initialSection = 'main';
 }
 
@@ -1702,7 +1701,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     <div class="zfsas-section-nav" role="tablist" aria-label="Plugin sections">
       <button type="button" class="zfsas-section-tab is-active" id="zfsas_tab_main" data-section-target="main" role="tab" aria-selected="true" aria-controls="zfsas_panel_main">Main Page</button>
       <button type="button" class="zfsas-section-tab" id="zfsas_tab_features" data-section-target="special-features" role="tab" aria-selected="false" aria-controls="zfsas_panel_special_features">Special Features</button>
-      <button type="button" class="zfsas-section-tab" id="zfsas_tab_repairs" data-section-target="repair-tools" role="tab" aria-selected="false" aria-controls="zfsas_panel_repair_tools">Repair Tools</button>
       <button type="button" class="zfsas-section-tab" id="zfsas_tab_snapshot_manager" data-section-target="snapshot-manager" role="tab" aria-selected="false" aria-controls="zfsas_panel_snapshot_manager">Snapshot Manager</button>
       <button type="button" class="zfsas-section-tab" id="zfsas_tab_help" data-section-target="help" role="tab" aria-selected="false" aria-controls="zfsas_panel_help">Help</button>
     </div>
@@ -1955,7 +1953,7 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
           Optional power-user features live here. ZFS Send keeps its own config and queue page, and the dataset migrator has its own guided workflow because it needs container handling, verification progress, and rollback safety.
         </div>
         <div class="zfsas-alert zfsas-alert-warn">
-          <code>ZFS Send</code> and <code>Dataset Migrator</code> are the finished features in this release. <code>Recovery Tools</code> and <code>Snapshot Manager</code> are still unfinished preview tools and may not work correctly yet.
+          <code>ZFS Send</code> and <code>Dataset Migrator</code> are the finished features in this release. <code>Snapshot Manager</code> is still an unfinished preview tool and may not work correctly yet.
         </div>
         <div class="zfsas-tool-list">
           <div class="zfsas-tool-row">
@@ -1977,28 +1975,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
               <div class="zfsas-tool-title">Dataset Migrator</div>
               <div class="zfsas-help zfsas-tool-description">
                 Convert top-level folders inside a dataset into child datasets with guided Docker handling, paranoid verification, rollback safety, and live progress reporting.
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="zfsas-section-panel" id="zfsas_panel_repair_tools" data-section-panel="repair-tools" role="tabpanel" aria-labelledby="zfsas_tab_repairs" hidden>
-      <div class="zfsas-card zfsas-placeholder-copy">
-        <h3 class="zfsas-placeholder-title">Repair Tools</h3>
-        <div class="zfsas-help">
-          Guided repair and recovery utilities live on their own page so they can surface scrub state, corruption diagnostics, and recovery actions without cluttering the main settings page.
-        </div>
-        <div class="zfsas-tool-list">
-          <div class="zfsas-tool-row">
-            <div class="zfsas-tool-button-wrap">
-              <button type="button" class="btn btn-primary" id="open_recovery_tools">Open Recovery Tools</button>
-            </div>
-            <div class="zfsas-tool-copy">
-              <div class="zfsas-tool-title">Recovery Tools</div>
-              <div class="zfsas-help zfsas-tool-description">
-                Open the guided recovery page for corruption diagnostics, scrub-aware repair workflows, and manual scan tools when you need to investigate damaged data. This tool is still unfinished and may not work correctly yet.
               </div>
             </div>
           </div>
@@ -2073,7 +2049,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var sendSettingsUrl = <?php echo json_encode($sendSettingsUrl); ?>;
   var migrateDatasetsUrl = <?php echo json_encode($migrateDatasetsUrl); ?>;
   var snapshotManagerEmbeddedUrl = <?php echo json_encode($snapshotManagerEmbeddedUrl); ?>;
-  var recoveryToolsUrl = <?php echo json_encode($recoveryToolsUrl); ?>;
   var snapshotManagerListUrl = <?php echo json_encode($snapshotManagerListUrl); ?>;
   var snapshotManagerDatasetUrl = <?php echo json_encode($snapshotManagerDatasetUrl); ?>;
   var snapshotManagerActionUrl = <?php echo json_encode($snapshotManagerActionUrl); ?>;
@@ -3334,7 +3309,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
   var manualRunBtn = byId('manual_run');
   var openSendSettingsBtn = byId('open_send_settings');
   var openDatasetMigratorBtn = byId('open_dataset_migrator');
-  var openRecoveryToolsBtn = byId('open_recovery_tools');
   var manualRunBusy = false;
   if (openSendSettingsBtn) {
     openSendSettingsBtn.addEventListener('click', function () {
@@ -3348,11 +3322,6 @@ $renderStandalonePage = !empty($GLOBALS['zfsas_render_standalone_page']);
     });
   }
 
-  if (openRecoveryToolsBtn) {
-    openRecoveryToolsBtn.addEventListener('click', function () {
-      window.location.href = recoveryToolsUrl;
-    });
-  }
 
   if (snapshotManagerFrame) {
     snapshotManagerFrame.addEventListener('load', function () {

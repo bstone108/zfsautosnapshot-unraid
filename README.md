@@ -2,7 +2,7 @@
 
 ZFS Auto Snapshot is an Unraid plugin for managing ZFS snapshots from the WebGUI. You choose the datasets, set the retention rules, and decide whether it runs on a schedule or only when you press Run Now.
 
-The plugin also includes ZFS Send replication, a Dataset Migrator, preview tools for snapshots and recovery, and a diagnostics download for support.
+The plugin also includes ZFS Send replication, a Dataset Migrator, Snapshot Manager preview tools, and a diagnostics download for support.
 
 ## What it does
 
@@ -139,15 +139,13 @@ Because it verifies the copy, it can be slow. That is expected.
 
 Stop any watchdogs or outside tools that might restart containers before you use it. If something relaunches containers during the migration, the tool may abort to avoid an unsafe copy. If free space runs low, the migration can pause and wait for you to free enough space before continuing.
 
-## Snapshot Manager and Recovery Tools
+## Snapshot Manager
 
-Snapshot Manager and Recovery Tools are still preview features.
+Snapshot Manager is still a preview feature. It shows dataset-level snapshot summaries and can load a dataset's snapshots when you choose to manage it. It has manual actions such as take snapshot, delete selected snapshots, hold, and release.
 
-Snapshot Manager shows dataset-level snapshot summaries and can load a dataset's snapshots when you choose to manage it. It has manual actions such as take snapshot, delete selected snapshots, hold, and release.
+Recovery/Repair Tools have been removed from the plugin. They were unfinished and should not be used from this testing build.
 
-Recovery Tools shows ZFS scrub and corruption clues. It can also run a manual readability scan when ZFS reports trouble but does not name the bad file.
-
-Treat both pages as diagnostic or preview tools for now. Verify results manually before relying on them.
+Treat Snapshot Manager as a diagnostic or preview tool for now. Verify results manually before relying on it.
 
 ## Logs and diagnostics
 

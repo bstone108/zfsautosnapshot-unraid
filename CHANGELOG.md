@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.17.t01 (Testing Branch Only)
+
+- Emergency testing build: removed the broken Recovery/Repair Tools UI, endpoints, helper code, and manual scan command from the plugin package. Older direct-install files are deleted during post-install so the removed tools cannot still be opened from a stale install.
+
 ### 2026.06.14.t03 (Testing Branch Only)
 
 - Repaired the Repair Tools regression from 2026.06.14.t01 so original corrupt-file rows remain visible when matching `.zfs/snapshot` evidence is present, corrupt snapshot evidence is not offered as a clean restore candidate, manual scan dataset selection is not reset during status polling, and Recovery Tools polling is less aggressive while still refreshing status.
