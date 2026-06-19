@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.19.01 (2026-06-19)
+
+- Removed the broken Recovery/Repair Tools feature from the plugin package, settings UI, endpoints, helper code, manual scan command, and permission-repair state. Older direct-install files are deleted during post-install so the removed tools cannot still be opened from a stale install.
+
 ### 2026.06.02.01 (2026-06-02)
 
 - Improved Dataset Migrator live table accuracy while an active or interrupted worker has not reported folder/container rows yet. The page now keeps showing that it is using live worker state instead of falling back to selected-dataset preview/preflight rows.

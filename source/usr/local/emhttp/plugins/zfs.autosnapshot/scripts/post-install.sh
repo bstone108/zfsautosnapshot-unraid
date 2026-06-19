@@ -312,6 +312,14 @@ ALLOW_ORPHAN_DESTROY_MATCHES=0
 RUN_MATCH="$RECOVERY_SCAN_RUN_MATCH"
 stop_running_jobs
 
+# Emergency disable: Recovery/Repair Tools were removed from the package.
+# Delete stale files left by older testing installs so the broken tools cannot be opened directly.
+rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-tools.php
+rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-status.php
+rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-action.php
+rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-helpers.php
+rm -f /usr/local/sbin/zfs_autosnapshot_recovery_scan
+
 RUNTIME_DIR="$MIGRATOR_RUNTIME_DIR"
 LOCK_FILE="$MIGRATOR_LOCK_FILE"
 LOCK_DIR="$MIGRATOR_LOCK_DIR"

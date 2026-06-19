@@ -792,6 +792,7 @@ main() {
   python3 "${ROOT_DIR}/tests/stage1/migrate_datasets_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/migrate_datasets_recovery_simulation.py"
   python3 "${ROOT_DIR}/tests/stage1/diagnostics_static_checks.py"
+  python3 "${ROOT_DIR}/tests/stage1/repair_tools_removed_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/log_helpers_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/send_worker_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/send_queue_preflight_status_static_checks.py"
