@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.21.t03 (Testing Branch Only)
+
+- Fixed remote ZFS send finalizers so zero-byte coordinator work skips destination space reservation instead of waiting forever on remote capacity checks. This lets completed child sends finish their coordinator and leave the queue normally.
+
 ### 2026.06.21.t02 (Testing Branch Only)
 
 - Kept routine ZFS send coordinator jobs out of the visible queue list so a manual remote send shows the actual send row instead of an extra waiting finalizer/pool-prep row. Failed coordinators still remain visible for clearing or troubleshooting.

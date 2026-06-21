@@ -274,6 +274,21 @@ def main() -> int:
         "release_job_claim \"$job_id\"",
         "queue handler must release a pre-claimed job if worker launch fails instead of leaving it blocked until stale cleanup",
     )
+    approve_body = lib.split("approve_send_job_space_for_launch() {", 1)[1].rsplit("\n}", 1)[0]
+    assert_contains(
+        approve_body,
+        "if (( required_bytes == 0 )); then",
+        "zero-byte coordinator/finalizer jobs must bypass destination space reservation instead of waiting forever on remote capacity checks",
+    )
+    assert_contains(
+        approve_body,
+        "space_reservation_skipped job_id=${job_id}",
+        "zero-byte space bypass should emit a debug marker for troubleshooting stuck finalizers",
+    )
+    if approve_body.find("if (( required_bytes == 0 )); then") > approve_body.find("acquire_send_space_reservation_for_transport"):
+        raise AssertionError(
+            "zero-byte space bypass must happen before acquire_send_space_reservation_for_transport so remote finalizers do not stall"
+        )
     assert_contains(
         worker,
         'defer_current_job "Waiting for children." 1',

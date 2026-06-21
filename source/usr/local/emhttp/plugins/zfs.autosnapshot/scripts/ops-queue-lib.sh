@@ -5293,6 +5293,14 @@ approve_send_job_space_for_launch() {
     return 0
   fi
 
+  if (( required_bytes == 0 )); then
+    launch_job[LAST_MESSAGE]="Destination space approval not required."
+    launch_job[SPACE_APPROVED_AT]="$(date +%s)"
+    job_write "$job_path" launch_job || true
+    zfsas_send_debug_marker "space_reservation_skipped job_id=${job_id} destination=${destination} required=0 reason=no_transfer_space_required"
+    return 0
+  fi
+
   capacity_dataset="$(nearest_existing_dataset_ancestor_for_transport "$destination" "$send_transport" || true)"
   [[ -n "$capacity_dataset" ]] || capacity_dataset="${destination%%/*}"
   dest_pool="${capacity_dataset%%/*}"
