@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.21.t01 (Testing Branch Only)
+
+- Fixed SSH send queue space approval so the sender checks remote destination capacity over SSH instead of reading the sender's local ZFS pool state. This prevents SSH send jobs from looping with `available=0` when the receiver actually has enough space.
+- Fixed a queue-manager helper error that could log `ensure_delete_worker_for_backlog: command not found` while planning destination cleanup.
+
 ### 2026.06.17.t01 (Testing Branch Only)
 
 - Emergency testing build: removed the broken Recovery/Repair Tools UI, endpoints, helper code, and manual scan command from the plugin package. Older direct-install files are deleted during post-install so the removed tools cannot still be opened from a stale install.

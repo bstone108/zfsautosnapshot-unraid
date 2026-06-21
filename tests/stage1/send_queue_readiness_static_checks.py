@@ -157,7 +157,7 @@ def main() -> int:
     )
     assert_contains(
         lib,
-        "acquire_send_space_reservation \"$job_id\" \"$reservation_pid\"",
+        "acquire_send_space_reservation_for_transport \"$job_id\" \"$reservation_pid\"",
         "queue manager approval must reserve destination space before launching a transfer worker",
     )
     assert_contains(
@@ -207,7 +207,7 @@ def main() -> int:
     )
     assert_contains(
         lib,
-        "freeing_bytes=\"$(get_pool_freeing \"$dest_pool\")\"",
+        "freeing_bytes=\"$(get_pool_freeing_for_transport \"$dest_pool\" \"$send_transport\")\"",
         "queue manager must account for ZFS freeing before rerunning cleanup",
     )
     assert_contains(

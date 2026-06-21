@@ -586,6 +586,12 @@ start_delete_queue_daemon() {
   return 1
 }
 
+ensure_delete_worker_for_backlog() {
+  if delete_queue_has_backlog; then
+    start_delete_queue_daemon >/dev/null 2>&1 || true
+  fi
+}
+
 delete_queue_has_backlog() {
   local pending_count="0"
   local running_count="0"
@@ -1594,11 +1600,18 @@ send_space_reserved_bytes_for_constraint_locked() {
 }
 
 send_space_effective_avail_after_reservations_locked() {
+  send_space_effective_avail_after_reservations_locked_for_transport "$1" "$2" "$3" "local"
+}
+
+send_space_effective_avail_after_reservations_locked_for_transport() {
   local capacity_dataset="$1"
   local exclude_job_id="$2"
   local result_var="$3"
+  local transport="${4:-local}"
   local token base reserved adjusted best_value=""
 
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
   while IFS=$'\t' read -r token base; do
     [[ -n "$token" && "$base" =~ ^[0-9]+$ ]] || continue
     reserved="$(send_space_reserved_bytes_for_constraint_locked "$token" "$exclude_job_id")"
@@ -1608,13 +1621,17 @@ send_space_effective_avail_after_reservations_locked() {
     if [[ -z "$best_value" ]] || (( adjusted < best_value )); then
       best_value="$adjusted"
     fi
-  done < <(emit_dataset_capacity_constraints "$capacity_dataset")
+  done < <(emit_dataset_capacity_constraints_for_transport "$capacity_dataset" "$transport")
 
   printf -v "$result_var" '%s' "$best_value"
   [[ -n "$best_value" ]]
 }
 
 acquire_send_space_reservation() {
+  acquire_send_space_reservation_for_transport "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "local"
+}
+
+acquire_send_space_reservation_for_transport() {
   local job_id="$1"
   local pid="$2"
   local destination="$3"
@@ -1623,10 +1640,13 @@ acquire_send_space_reservation() {
   local buffer_bytes="$6"
   local available_var="$7"
   local needed_var="$8"
-  local available="" needed reservation_file fd
+  local available="" needed reservation_file fd transport
   # shellcheck disable=SC2034
   local -A reservation=()
 
+  transport="${9:-local}"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
   [[ -n "$job_id" && -n "$pid" && -n "$destination" && -n "$capacity_dataset" ]] || return 1
   [[ "$required_bytes" =~ ^[0-9]+$ ]] || required_bytes=0
   [[ "$buffer_bytes" =~ ^[0-9]+$ ]] || buffer_bytes=0
@@ -1642,7 +1662,7 @@ acquire_send_space_reservation() {
 
   cleanup_stale_send_space_reservations_locked
   zfsas_send_debug_marker "space_reservation_check job_id=${job_id} destination=${destination} capacity_dataset=${capacity_dataset} required=${required_bytes} buffer=${buffer_bytes} needed=${needed}"
-  if send_space_effective_avail_after_reservations_locked "$capacity_dataset" "$job_id" available && (( available >= needed )); then
+  if send_space_effective_avail_after_reservations_locked_for_transport "$capacity_dataset" "$job_id" available "$transport" && (( available >= needed )); then
     reservation_file="$(send_space_reservation_file_for_job "$job_id")"
     reservation[JOB_ID]="$job_id"
     reservation[PID]="$pid"
@@ -2430,53 +2450,119 @@ send_retention_keep_weekly_until_seconds() {
 }
 
 get_pool_freeing() {
-  local value
-  value="$(zpool get -H -o value freeing "$1" 2>/dev/null || true)"
+  get_pool_freeing_for_transport "$1" "local"
+}
+
+get_pool_freeing_for_transport() {
+  local pool="$1"
+  local transport="${2:-local}"
+  local value command
+
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  case "$transport" in
+    local)
+      value="$(zpool get -H -o value freeing "$pool" 2>/dev/null || true)"
+      ;;
+    ssh)
+      build_ssh_zfs_command "zpool get -H -o value freeing $(shell_quote_word "$pool") 2>/dev/null" command || value=""
+      [[ -n "${command:-}" ]] && value="$(eval "$command" 2>/dev/null || true)"
+      ;;
+    *)
+      value=""
+      ;;
+  esac
   [[ "$value" =~ ^[0-9]+$ ]] || value=0
   printf '%s' "$value"
 }
 
 get_pool_effective_avail() {
-  local pool="$1"
-  local avail freeing
+  get_pool_effective_avail_for_transport "$1" "local"
+}
 
-  avail="$(zfs list -H -p -o avail "$pool" 2>/dev/null || true)"
+get_pool_effective_avail_for_transport() {
+  local pool="$1"
+  local transport="${2:-local}"
+  local avail freeing command
+
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  case "$transport" in
+    local)
+      avail="$(zfs list -H -p -o avail "$pool" 2>/dev/null || true)"
+      ;;
+    ssh)
+      build_ssh_zfs_command "zfs list -H -p -o avail $(shell_quote_word "$pool") 2>/dev/null" command || avail=""
+      [[ -n "${command:-}" ]] && avail="$(eval "$command" 2>/dev/null || true)"
+      ;;
+    *)
+      avail=""
+      ;;
+  esac
   [[ "$avail" =~ ^[0-9]+$ ]] || {
     echo ""
     return 1
   }
 
-  freeing="$(get_pool_freeing "$pool")"
+  freeing="$(get_pool_freeing_for_transport "$pool" "$transport")"
   echo $(( avail + freeing ))
 }
 
 emit_dataset_capacity_constraints() {
+  emit_dataset_capacity_constraints_for_transport "$1" "local"
+}
+
+emit_dataset_capacity_constraints_for_transport() {
   local dataset="$1"
+  local transport="${2:-local}"
   local pool="${dataset%%/*}"
   local pool_effective current quota_headroom refquota_headroom
 
-  pool_effective="$(get_pool_effective_avail "$pool")"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  pool_effective="$(get_pool_effective_avail_for_transport "$pool" "$transport")"
   [[ "$pool_effective" =~ ^[0-9]+$ ]] && printf 'pool:%s\t%s\n' "$pool" "$pool_effective"
 
   current="$dataset"
   while :; do
-    quota_headroom="$(get_dataset_quota_headroom "$current" || true)"
+    quota_headroom="$(get_dataset_quota_headroom_for_transport "$current" "$transport" || true)"
     [[ "$quota_headroom" =~ ^[0-9]+$ ]] && printf 'quota:%s\t%s\n' "$current" "$quota_headroom"
 
     [[ "$current" == "$pool" ]] && break
     current="${current%/*}"
   done
 
-  refquota_headroom="$(get_dataset_refquota_headroom "$dataset" || true)"
+  refquota_headroom="$(get_dataset_refquota_headroom_for_transport "$dataset" "$transport" || true)"
   [[ "$refquota_headroom" =~ ^[0-9]+$ ]] && printf 'refquota:%s\t%s\n' "$dataset" "$refquota_headroom"
 }
 
 get_dataset_quota_headroom() {
-  local dataset="$1"
-  local quota_limit quota_used
+  get_dataset_quota_headroom_for_transport "$1" "local"
+}
 
-  quota_limit="$(zfs get -H -p -o value quota "$dataset" 2>/dev/null || true)"
-  quota_used="$(zfs get -H -p -o value usedbydataset "$dataset" 2>/dev/null || true)"
+get_dataset_quota_headroom_for_transport() {
+  local dataset="$1"
+  local transport="${2:-local}"
+  local quota_limit quota_used command
+
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  case "$transport" in
+    local)
+      quota_limit="$(zfs get -H -p -o value quota "$dataset" 2>/dev/null || true)"
+      quota_used="$(zfs get -H -p -o value usedbydataset "$dataset" 2>/dev/null || true)"
+      ;;
+    ssh)
+      build_ssh_zfs_command "zfs get -H -p -o value quota $(shell_quote_word "$dataset") 2>/dev/null" command || quota_limit=""
+      [[ -n "${command:-}" ]] && quota_limit="$(eval "$command" 2>/dev/null || true)"
+      build_ssh_zfs_command "zfs get -H -p -o value usedbydataset $(shell_quote_word "$dataset") 2>/dev/null" command || quota_used=""
+      [[ -n "${command:-}" ]] && quota_used="$(eval "$command" 2>/dev/null || true)"
+      ;;
+    *)
+      quota_limit=""
+      quota_used=""
+      ;;
+  esac
   [[ "$quota_limit" =~ ^[1-9][0-9]*$ && "$quota_used" =~ ^[0-9]+$ ]] || return 1
 
   if (( quota_limit <= quota_used )); then
@@ -2487,11 +2573,32 @@ get_dataset_quota_headroom() {
 }
 
 get_dataset_refquota_headroom() {
-  local dataset="$1"
-  local refquota_limit refquota_used
+  get_dataset_refquota_headroom_for_transport "$1" "local"
+}
 
-  refquota_limit="$(zfs get -H -p -o value refquota "$dataset" 2>/dev/null || true)"
-  refquota_used="$(zfs get -H -p -o value referenced "$dataset" 2>/dev/null || true)"
+get_dataset_refquota_headroom_for_transport() {
+  local dataset="$1"
+  local transport="${2:-local}"
+  local refquota_limit refquota_used command
+
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  case "$transport" in
+    local)
+      refquota_limit="$(zfs get -H -p -o value refquota "$dataset" 2>/dev/null || true)"
+      refquota_used="$(zfs get -H -p -o value referenced "$dataset" 2>/dev/null || true)"
+      ;;
+    ssh)
+      build_ssh_zfs_command "zfs get -H -p -o value refquota $(shell_quote_word "$dataset") 2>/dev/null" command || refquota_limit=""
+      [[ -n "${command:-}" ]] && refquota_limit="$(eval "$command" 2>/dev/null || true)"
+      build_ssh_zfs_command "zfs get -H -p -o value referenced $(shell_quote_word "$dataset") 2>/dev/null" command || refquota_used=""
+      [[ -n "${command:-}" ]] && refquota_used="$(eval "$command" 2>/dev/null || true)"
+      ;;
+    *)
+      refquota_limit=""
+      refquota_used=""
+      ;;
+  esac
   [[ "$refquota_limit" =~ ^[1-9][0-9]*$ && "$refquota_used" =~ ^[0-9]+$ ]] || return 1
 
   if (( refquota_limit <= refquota_used )); then
@@ -2535,20 +2642,39 @@ get_dataset_active_constraints() {
 }
 
 nearest_existing_dataset_ancestor() {
+  nearest_existing_dataset_ancestor_for_transport "$1" "local"
+}
+
+nearest_existing_dataset_ancestor_for_transport() {
   local dataset="$1"
+  local transport="${2:-local}"
   local current="$dataset"
 
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
   while [[ -n "$current" ]]; do
-    if zfs list -H -o name "$current" >/dev/null 2>&1; then
-      echo "$current"
-      return 0
-    fi
+    case "$transport" in
+      local)
+        zfs list -H -o name "$current" >/dev/null 2>&1 && {
+          echo "$current"
+          return 0
+        }
+        ;;
+      ssh)
+        ssh_dataset_exists "$current" && {
+          echo "$current"
+          return 0
+        }
+        ;;
+      *)
+        return 1
+        ;;
+    esac
 
     [[ "$current" == */* ]] || break
     current="${current%/*}"
   done
 
-  echo ""
   return 1
 }
 
@@ -5130,7 +5256,7 @@ defer_send_launch_approval() {
 approve_send_job_space_for_launch() {
   local job_path="$1"
   local reservation_pid="$2"
-  local job_id destination capacity_dataset dest_pool required_bytes buffer_bytes needed_bytes available_bytes freeing_bytes shortfall threshold_bytes cleanup_target now_epoch last_cleanup_at prep_job_id prep_path prep_state
+  local job_id destination capacity_dataset dest_pool required_bytes buffer_bytes needed_bytes available_bytes freeing_bytes shortfall threshold_bytes cleanup_target now_epoch last_cleanup_at prep_job_id prep_path prep_state send_transport
   local -A launch_job=()
   local -A prep_job=()
   local -A planned_reclaim=()
@@ -5141,6 +5267,9 @@ approve_send_job_space_for_launch() {
   destination="$(job_get launch_job SEND_PLAN_DESTINATION)"
   [[ -n "$destination" ]] || destination="$(job_get launch_job DESTINATION_ROOT)"
   required_bytes="$(job_get launch_job SPACE_REQUIRED_BYTES 0)"
+  send_transport="$(job_get launch_job SEND_TRANSPORT local)"
+  send_transport="${send_transport,,}"
+  [[ -n "$send_transport" ]] || send_transport="local"
   [[ -n "$job_id" && -n "$destination" && "$required_bytes" =~ ^[0-9]+$ ]] || return 1
 
   prep_job_id="$(job_get launch_job PREP_JOB_ID)"
@@ -5164,13 +5293,13 @@ approve_send_job_space_for_launch() {
     return 0
   fi
 
-  capacity_dataset="$(nearest_existing_dataset_ancestor "$destination")"
+  capacity_dataset="$(nearest_existing_dataset_ancestor_for_transport "$destination" "$send_transport" || true)"
   [[ -n "$capacity_dataset" ]] || capacity_dataset="${destination%%/*}"
   dest_pool="${capacity_dataset%%/*}"
   [[ -n "$dest_pool" ]] || return 1
 
   buffer_bytes="$(send_space_buffer_bytes "$required_bytes")"
-  if acquire_send_space_reservation "$job_id" "$reservation_pid" "$destination" "$capacity_dataset" "$required_bytes" "$buffer_bytes" available_bytes needed_bytes; then
+  if acquire_send_space_reservation_for_transport "$job_id" "$reservation_pid" "$destination" "$capacity_dataset" "$required_bytes" "$buffer_bytes" available_bytes needed_bytes "$send_transport"; then
     launch_job[LAST_MESSAGE]="Destination space approved."
     launch_job[SPACE_APPROVED_AT]="$(date +%s)"
     job_write "$job_path" launch_job || true
@@ -5180,7 +5309,7 @@ approve_send_job_space_for_launch() {
   [[ "$needed_bytes" =~ ^[0-9]+$ ]] || needed_bytes=$(( required_bytes + buffer_bytes ))
   [[ "$available_bytes" =~ ^[0-9]+$ ]] || available_bytes=0
   shortfall=$(( needed_bytes > available_bytes ? needed_bytes - available_bytes : 0 ))
-  freeing_bytes="$(get_pool_freeing "$dest_pool")"
+  freeing_bytes="$(get_pool_freeing_for_transport "$dest_pool" "$send_transport")"
   [[ "$freeing_bytes" =~ ^[0-9]+$ ]] || freeing_bytes=0
 
   if (( shortfall <= 0 || freeing_bytes >= shortfall )); then

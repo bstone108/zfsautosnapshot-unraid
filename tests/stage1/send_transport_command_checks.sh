@@ -133,6 +133,26 @@ case "$remote_command" in
     printf '%s\n' "backup/data"
     exit 0
     ;;
+  *"zfs list -H -p -o avail backup/data"*)
+    printf '%s\n' "900000"
+    exit 0
+    ;;
+  *"zfs list -H -p -o avail backup"*)
+    printf '%s\n' "900000"
+    exit 0
+    ;;
+  *"zpool get -H -o value freeing backup"*)
+    printf '%s\n' "0"
+    exit 0
+    ;;
+  *"zfs get -H -p -o value quota backup/data"*|*"zfs get -H -p -o value quota backup"*|*"zfs get -H -p -o value refquota backup/data"*)
+    printf '%s\n' "-"
+    exit 0
+    ;;
+  *"zfs get -H -p -o value usedbydataset backup/data"*|*"zfs get -H -p -o value usedbydataset backup"*|*"zfs get -H -p -o value referenced backup/data"*)
+    printf '%s\n' "0"
+    exit 0
+    ;;
   *"zfs list -H -p -s creation -t snapshot -o name,creation -d 1 -- backup/data"*)
     printf '%s\t%s\n' \
       "backup/data@manual-remote-snapshot" "25" \
@@ -240,6 +260,29 @@ queued_pool_retention="$(cat "$DELETE_QUEUE_INBOX_FILE")"
 assert_contains "$queued_pool_retention" "backup/data@zfs-send-feedfacecafe-ancient" "SSH pool cleanup must queue the oldest unprotected remote checkpoint snapshot"
 assert_not_contains "$queued_pool_retention" "backup/data@zfs-send-feedfacecafe-old" "SSH pool cleanup must still protect the newest/latest-common remote checkpoint"
 assert_not_contains "$queued_pool_retention" "backup/data@manual-remote-snapshot" "SSH retention must not queue remote generic snapshots that the sender cannot prove are plugin-owned"
+
+rm -f "$DELETE_QUEUE_INBOX_FILE" "$PERSISTED_DELETE_QUEUE_FILE"
+clear_send_cleanup_caches
+SEND_SPACE_RESERVATION_DIR="${retention_root}/reservations"
+SEND_SPACE_RESERVATION_LOCK_FILE="${retention_root}/reservations.lock"
+JOBS_DIR="${retention_root}/jobs"
+mkdir -p "$SEND_SPACE_RESERVATION_DIR" "$JOBS_DIR"
+declare -A ssh_space_job=()
+ssh_space_job[JOB_ID]="ssh-space-check"
+ssh_space_job[JOB_TYPE]="send"
+ssh_space_job[JOB_ACTION]="send_member"
+ssh_space_job[STATE]="queued"
+ssh_space_job[SEND_TRANSPORT]="ssh"
+ssh_space_job[SEND_PLAN_DESTINATION]="backup/data"
+ssh_space_job[SPACE_REQUIRED_BYTES]="100000"
+ssh_space_path="${JOBS_DIR}/ssh-space-check.job"
+job_write "$ssh_space_path" ssh_space_job
+if ! approve_send_job_space_for_launch "$ssh_space_path" "$$"; then
+  fail "SSH send space approval must use remote destination capacity instead of local sender ZFS state"
+fi
+ssh_space_result="$(cat "$ssh_space_path")"
+assert_contains "$ssh_space_result" "Destination space approved" "SSH send space approval should approve when remote destination has enough space"
+[[ -e "$(send_space_reservation_file_for_job ssh-space-check)" ]] || fail "SSH send space approval must create the normal reservation file after remote capacity succeeds"
 
 rm -f "$DELETE_QUEUE_INBOX_FILE" "$PERSISTED_DELETE_QUEUE_FILE"
 clear_send_cleanup_caches

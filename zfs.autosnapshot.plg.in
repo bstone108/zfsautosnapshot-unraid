@@ -2,7 +2,8 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Emergency testing build: removed the broken Recovery/Repair Tools UI, endpoints, helper code, and manual scan command from the plugin package.
+- Fixed SSH send queue space approval so the sender checks remote destination capacity over SSH instead of reading the sender's local ZFS pool state.
+- Fixed a queue-manager helper error that could log `ensure_delete_worker_for_backlog: command not found` while planning destination cleanup.
 
   </CHANGES>
 
