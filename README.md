@@ -110,7 +110,13 @@ ZFS Send uses its own send checkpoint snapshots instead of the normal autosnapsh
 
 The send page also has a queue view. Scheduled sends and one-off sends go through the same queue, so you can see what is waiting, running, failed, or ready to retry. Active jobs show step and progress updates when the browser supports it.
 
-Destination cleanup uses the same keep-all, daily, and weekly style retention policy. The newest confirmed send checkpoint is protected so the next incremental send still has a base snapshot.
+Transport choices are per send job:
+
+- Local sends replicate to a destination dataset visible on the same Unraid host.
+- SSH transport can send over the network using non-interactive SSH. Configure the remote host, port, user, and optional local private-key path; the plugin stores connection metadata and paths, not raw passwords or private-key contents.
+- spiped code and config plumbing are retained for future encrypted transport work, but the feature is incomplete and intentionally hidden from the WebGUI. Use SSH for active network sends until spiped receiver-side inventory and receive verification are implemented.
+
+Destination cleanup uses the same keep-all, daily, and weekly style retention policy. The newest confirmed send checkpoint is protected so the next incremental send still has a base snapshot. For SSH sends, cleanup/protection uses remote SSH destination snapshots instead of assuming the destination dataset exists locally.
 
 ## Dataset Migrator
 
@@ -137,7 +143,7 @@ Stop any watchdogs or outside tools that might restart containers before you use
 
 Snapshot Manager is still a preview feature. It shows dataset-level snapshot summaries and can load a dataset's snapshots when you choose to manage it. It has manual actions such as take snapshot, delete selected snapshots, hold, and release.
 
-Recovery/Repair Tools have been removed from the plugin. They were unfinished and should not be used from this release.
+Recovery/Repair Tools have been removed from the plugin. They were unfinished and should not be used from this testing build.
 
 Treat Snapshot Manager as a diagnostic or preview tool for now. Verify results manually before relying on it.
 

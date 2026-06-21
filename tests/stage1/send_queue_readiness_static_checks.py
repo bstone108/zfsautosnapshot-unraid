@@ -78,14 +78,14 @@ def main() -> int:
     )
     assert_contains(
         prepare_snapshot_body,
-        "send_destination_actionable \"$destination_root\" readiness_message || {",
-        "scheduled prepare must recheck destination readiness before creating source checkpoints",
+        "send_destination_actionable_for_transport \"$destination_root\" readiness_message || {",
+        "scheduled prepare must recheck transport-aware destination readiness before creating source checkpoints",
     )
     scheduled_actionable_body = lib.split("function scheduled_send_job_zfs_actionable() {", 1)[1].split("\n}\n", 1)[0]
     assert_contains(
         scheduled_actionable_body,
-        "send_destination_actionable \"$dest_root\" dest_message",
-        "scheduled enqueue readiness must require the destination parent/root to be actionable, not just the pool",
+        "send_destination_actionable_for_schedule_transport \"$dest_root\" \"$send_transport\" dest_message",
+        "scheduled enqueue readiness must require the transport-specific destination parent/root to be actionable, not just the pool",
     )
 
     destination_actionable_body = lib.split("send_destination_actionable() {", 1)[1].split("\n}\n", 1)[0]
@@ -101,14 +101,14 @@ def main() -> int:
     )
     assert_in_order(
         prepare_snapshot_body,
-        "send_destination_actionable \"$destination_root\" readiness_message || {",
+        "send_destination_actionable_for_transport \"$destination_root\" readiness_message || {",
         "log \"Creating scheduled send checkpoint ${source_root}@${basename}\"",
-        "scheduled prepare must defer on destination readiness before snapshot creation to avoid phantom/churny checkpoints",
+        "scheduled prepare must defer on transport-aware destination readiness before snapshot creation to avoid phantom/churny checkpoints",
     )
     assert_contains(
         worker,
-        "send_destination_actionable \"$destination\" readiness_message || {",
-        "send members must defer when destination pool/parent is not actionable instead of final-failing",
+        "send_destination_actionable_for_transport \"$destination\" readiness_message || {",
+        "send members must defer when the transport-specific destination is not actionable instead of final-failing",
     )
     assert_contains(
         worker,
@@ -127,10 +127,23 @@ def main() -> int:
         "source readiness must be verified before latest-common scans or destructive reseed decisions",
     )
     assert_contains(
-        worker,
-        "zfs_pool_actionable \"$dest_pool\" readiness_message || {",
-        "pool prep must defer until the destination pool is ZFS-actionable",
+        lib,
+        "send_destination_pool_actionable_for_schedule_transport()",
+        "pool prep needs a transport-aware destination-pool readiness helper so SSH prep checks the receiver, not the sender",
     )
+    assert_contains(
+        lib,
+        "job[SEND_TRANSPORT]=\"$send_transport\"",
+        "pool prep jobs must persist their transport so SSH prep does not fall back to local pool checks",
+    )
+    process_pool_prep_body = worker.split("process_pool_prep_job() {", 1)[1].split("\n}\n", 1)[0]
+    assert_contains(
+        process_pool_prep_body,
+        "send_destination_pool_actionable_for_schedule_transport \"$dest_pool\" \"$send_transport\" readiness_message || {",
+        "pool prep must verify the destination pool through the schedule transport instead of always using local zfs_pool_actionable",
+    )
+    if "zfs_pool_actionable \"$dest_pool\" readiness_message" in process_pool_prep_body:
+        raise AssertionError("pool prep must not check SSH destination pools with local zfs_pool_actionable")
 
     assert_contains(
         lib,
@@ -144,7 +157,7 @@ def main() -> int:
     )
     assert_contains(
         lib,
-        "acquire_send_space_reservation \"$job_id\" \"$reservation_pid\"",
+        "acquire_send_space_reservation_for_transport \"$job_id\" \"$reservation_pid\"",
         "queue manager approval must reserve destination space before launching a transfer worker",
     )
     assert_contains(
@@ -194,7 +207,7 @@ def main() -> int:
     )
     assert_contains(
         lib,
-        "freeing_bytes=\"$(get_pool_freeing \"$dest_pool\")\"",
+        "freeing_bytes=\"$(get_pool_freeing_for_transport \"$dest_pool\" \"$send_transport\")\"",
         "queue manager must account for ZFS freeing before rerunning cleanup",
     )
     assert_contains(
@@ -261,6 +274,21 @@ def main() -> int:
         "release_job_claim \"$job_id\"",
         "queue handler must release a pre-claimed job if worker launch fails instead of leaving it blocked until stale cleanup",
     )
+    approve_body = lib.split("approve_send_job_space_for_launch() {", 1)[1].rsplit("\n}", 1)[0]
+    assert_contains(
+        approve_body,
+        "if (( required_bytes == 0 )); then",
+        "zero-byte coordinator/finalizer jobs must bypass destination space reservation instead of waiting forever on remote capacity checks",
+    )
+    assert_contains(
+        approve_body,
+        "space_reservation_skipped job_id=${job_id}",
+        "zero-byte space bypass should emit a debug marker for troubleshooting stuck finalizers",
+    )
+    if approve_body.find("if (( required_bytes == 0 )); then") > approve_body.find("acquire_send_space_reservation_for_transport"):
+        raise AssertionError(
+            "zero-byte space bypass must happen before acquire_send_space_reservation_for_transport so remote finalizers do not stall"
+        )
     assert_contains(
         worker,
         'defer_current_job "Waiting for children." 1',
@@ -310,8 +338,48 @@ def main() -> int:
     )
     assert_contains(
         delete_worker,
+        'build_ssh_zfs_command "zfs destroy -- $(shell_quote_word "$snapshot")" command',
+        "SSH destination checkpoint retention must destroy the remote snapshot over SSH instead of trying a local zfs destroy",
+    )
+    assert_contains(
+        delete_worker,
         '"${schedule_job_id}|${delete_scope}|${snapshot}"',
         "delete queue duplicate suppression for destination checkpoint deletes must be per snapshot, not one basename across a recursive tree",
+    )
+
+    scheduled_no_common_body = worker.split(
+        'if (( destination_exists == 1 )) && destination_has_any_snapshots_for_transport "$destination"; then',
+        1,
+    )[1].split('      description="Full send ${snapshot} -> ${destination}"', 1)[0]
+    assert_contains(
+        scheduled_no_common_body,
+        'if [[ "$send_transport" == "ssh" ]]; then',
+        "scheduled SSH sends with destination snapshots but no common checkpoint must have an explicit fail-closed branch",
+    )
+    assert_contains(
+        scheduled_no_common_body,
+        "Automatic remote destination purge/reseed is not enabled",
+        "scheduled SSH no-common handling must tell the operator that remote purge/reseed is intentionally disabled",
+    )
+    pre_ssh_no_common_body = scheduled_no_common_body.split('if [[ "$send_transport" == "ssh" ]]; then', 1)[0]
+    if "destination dataset was purged" in pre_ssh_no_common_body:
+        raise AssertionError(
+            "scheduled no-common handling must not log that the destination was purged before transport-specific handling decides whether purge is allowed"
+        )
+    if "action=purge_destination_for_reseed" in pre_ssh_no_common_body:
+        raise AssertionError(
+            "scheduled no-common debug marker must not claim purge_destination_for_reseed before the SSH fail-closed branch"
+        )
+    ssh_no_common_body = scheduled_no_common_body.split('if [[ "$send_transport" == "ssh" ]]; then', 1)[1].split("        fi", 1)[0]
+    if "purge_destination_for_reseed" in ssh_no_common_body or "action=purge_destination_for_reseed" in ssh_no_common_body:
+        raise AssertionError(
+            "scheduled SSH no-common handling must not log/debug an automatic purge action when it actually fails closed"
+        )
+    local_no_common_body = scheduled_no_common_body.split('if [[ "$send_transport" == "ssh" ]]; then', 1)[1]
+    assert_contains(
+        local_no_common_body,
+        'purge_destination_for_reseed "$destination"',
+        "local scheduled no-common handling should still retain its existing automatic reseed purge path",
     )
 
     print("PASS: send queue readiness static contracts")

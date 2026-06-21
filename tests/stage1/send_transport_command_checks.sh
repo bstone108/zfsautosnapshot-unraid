@@ -1,0 +1,379 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+OPS_LIB="${ROOT_DIR}/source/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh"
+
+# shellcheck source=/dev/null
+source "$OPS_LIB"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+  [[ "$haystack" == *"$needle"* ]] || fail "$message (missing: $needle; command: $haystack)"
+}
+
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+  [[ "$haystack" != *"$needle"* ]] || fail "$message (unexpected: $needle; command: $haystack)"
+}
+
+SEND_SSH_HOST="backup.example.test"
+SEND_SSH_PORT="2222"
+SEND_SSH_USER="replicator"
+SEND_SSH_KEY_PATH=""
+command=""
+
+if ! build_ssh_receive_command "backup/root" command; then
+  fail "SSH receive command should support preconfigured/agent auth when no key path is stored"
+fi
+
+assert_contains "$command" "ssh" "SSH receive command must use ssh"
+assert_contains "$command" "BatchMode=yes" "SSH receive command must remain non-interactive"
+assert_contains "$command" "PasswordAuthentication=no" "SSH receive command must not fall back to password prompts"
+assert_contains "$command" "-p 2222" "SSH receive command must include configured port"
+assert_contains "$command" "replicator@backup.example.test" "SSH receive command must target configured user and host"
+assert_contains "$command" "zfs\\ receive" "SSH receive command must carry remote zfs receive command"
+assert_contains "$command" "backup/root" "SSH receive command must include destination dataset"
+assert_not_contains "$command" " -i " "SSH receive command must not include an empty identity-file argument"
+
+SEND_SSH_KEY_PATH="relative/key"
+if build_ssh_receive_command "backup/root" command; then
+  fail "SSH receive command must reject an invalid relative key path when one is provided"
+fi
+
+SEND_SSH_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/ssh/id_ed25519"
+if ! build_ssh_receive_command "backup/root" command; then
+  fail "SSH receive command should accept an absolute key path"
+fi
+assert_contains "$command" "-i /boot/config/plugins/zfs.autosnapshot/ssh/id_ed25519" "SSH receive command must include valid configured identity file"
+
+SEND_SPIPED_REMOTE_HOST="receiver.example.test"
+SEND_SPIPED_REMOTE_PORT="8023"
+SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
+spipe_command=""
+if ! build_spipe_send_command spipe_command; then
+  fail "spiped sender command should accept an absolute key path"
+fi
+assert_contains "$spipe_command" "spipe -t receiver.example.test:8023" "spiped sender command must target configured receiver"
+assert_contains "$spipe_command" "-k /boot/config/plugins/zfs.autosnapshot/spiped/key.bin" "spiped sender command must include valid configured key file"
+
+command=""
+if ! build_spipe_send_command command; then
+  fail "spiped sender command should support a caller result variable named command"
+fi
+assert_contains "$command" "spipe -t receiver.example.test:8023" "spiped sender command must populate a caller variable named command"
+
+command=""
+if ! build_spiped_receive_command "backup/root" command; then
+  fail "spiped receiver command should support a caller result variable named command"
+fi
+assert_contains "$command" "spiped -d" "spiped receiver command must populate a caller variable named command"
+assert_contains "$command" "zfs receive" "spiped receiver command must pipe to zfs receive"
+
+message=""
+SEND_SPIPED_REMOTE_HOST=""
+SEND_SPIPED_REMOTE_PORT="8023"
+SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
+if send_destination_actionable_for_schedule_transport "backup/root" "spiped" message; then
+  fail "spiped readiness must fail when the remote receiver host is missing"
+fi
+assert_contains "$message" "spiped remote host is required" "spiped readiness should report missing sender remote host before the staged receiver guard"
+
+message=""
+SEND_SPIPED_REMOTE_HOST="receiver.example.test"
+SEND_SPIPED_REMOTE_PORT="not-a-port"
+SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
+if send_destination_actionable_for_schedule_transport "backup/root" "spiped" message; then
+  fail "spiped readiness must fail when the remote receiver port is invalid"
+fi
+assert_contains "$message" "spiped remote port is invalid" "spiped readiness should report invalid sender remote port before the staged receiver guard"
+
+message=""
+SEND_SPIPED_REMOTE_HOST="receiver.example.test"
+SEND_SPIPED_REMOTE_PORT="8023"
+SEND_SPIPED_KEY_PATH=""
+if send_destination_actionable_for_schedule_transport "backup/root" "spiped" message; then
+  fail "spiped readiness must fail when the key path is missing"
+fi
+assert_contains "$message" "spiped key path is required" "spiped readiness should report missing symmetric-key path before the staged receiver guard"
+
+SEND_SPIPED_REMOTE_HOST="receiver.example.test"
+SEND_SPIPED_REMOTE_PORT="8023"
+SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
+
+# Transport-aware latest-common protection: SSH schedules must discover the
+# destination inventory over SSH.  The remote destination often will not exist
+# locally on the sender, so falling back to local destination probes can make
+# source cleanup forget the newest common checkpoint and delete the only
+# incremental base for an SSH schedule.
+tmp_bin="$(mktemp -d)"
+cleanup_transport_check() {
+  rm -rf "$tmp_bin"
+}
+trap cleanup_transport_check EXIT
+
+cat >"${tmp_bin}/ssh" <<'SSH_FAKE'
+#!/bin/bash
+remote_command="${*: -1}"
+case "$remote_command" in
+  *"zfs list -H -o name -t filesystem,volume -- backup/data"*)
+    printf '%s\n' "backup/data"
+    exit 0
+    ;;
+  *"zfs list -H -o name -- backup/data"*)
+    printf '%s\n' "backup/data"
+    exit 0
+    ;;
+  *"zfs list -H -p -o avail backup/data"*)
+    printf '%s\n' "900000"
+    exit 0
+    ;;
+  *"zfs list -H -p -o avail backup"*)
+    printf '%s\n' "900000"
+    exit 0
+    ;;
+  *"zpool get -H -o value freeing backup"*)
+    printf '%s\n' "0"
+    exit 0
+    ;;
+  *"zfs get -H -p -o value quota backup/data"*|*"zfs get -H -p -o value quota backup"*|*"zfs get -H -p -o value refquota backup/data"*)
+    printf '%s\n' "-"
+    exit 0
+    ;;
+  *"zfs get -H -p -o value usedbydataset backup/data"*|*"zfs get -H -p -o value usedbydataset backup"*|*"zfs get -H -p -o value referenced backup/data"*)
+    printf '%s\n' "0"
+    exit 0
+    ;;
+  *"zfs list -H -p -s creation -t snapshot -o name,creation -d 1 -- backup/data"*)
+    printf '%s\t%s\n' \
+      "backup/data@manual-remote-snapshot" "25" \
+      "backup/data@zfs-send-feedfacecafe-ancient" "50" \
+      "backup/data@zfs-send-feedfacecafe-old" "100" \
+      "backup/data@manual-zero-older" "110" \
+      "backup/data@manual-zero-newer" "120"
+    exit 0
+    ;;
+  *"zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg backup/data"*)
+    for snap in backup/data@manual-remote-snapshot backup/data@zfs-send-feedfacecafe-ancient backup/data@zfs-send-feedfacecafe-old backup/data@manual-zero-older backup/data@manual-zero-newer; do
+      case "$snap" in
+        *@manual-remote-snapshot) creation=25; written=16384; guid=100; txg=10 ;;
+        *@zfs-send-feedfacecafe-ancient) creation=50; written=4096; guid=111; txg=11 ;;
+        *@zfs-send-feedfacecafe-old) creation=100; written=8192; guid=222; txg=22 ;;
+        *@manual-zero-older) creation=110; written=0; guid=333; txg=33 ;;
+        *@manual-zero-newer) creation=120; written=0; guid=444; txg=44 ;;
+      esac
+      printf '%s\tcreation\t%s\n' "$snap" "$creation"
+      printf '%s\twritten\t%s\n' "$snap" "$written"
+      printf '%s\tuserrefs\t0\n' "$snap"
+      printf '%s\tclones\t-\n' "$snap"
+      printf '%s\tguid\t%s\n' "$snap" "$guid"
+      printf '%s\tcreatetxg\t%s\n' "$snap" "$txg"
+    done
+    exit 0
+    ;;
+esac
+exit 1
+SSH_FAKE
+chmod +x "${tmp_bin}/ssh"
+PATH="${tmp_bin}:$PATH"
+
+zfs() {
+  if [[ "$1" == "list" ]]; then
+    local args=" $* "
+    if [[ "$args" == *" -o name "* && "$args" == *" source/data "* ]]; then
+      printf '%s\n' "source/data"
+      return 0
+    fi
+    if [[ "$args" == *" -t snapshot "* && "$args" == *" source/data "* ]]; then
+      printf '%s\t%s\n' \
+        "source/data@zfs-send-feedfacecafe-ancient" "50" \
+        "source/data@zfs-send-feedfacecafe-old" "100" \
+        "source/data@zfs-send-feedfacecafe-new" "200"
+      return 0
+    fi
+    if [[ "$args" == *" backup/data "* ]]; then
+      return 1
+    fi
+  fi
+  return 1
+}
+
+SCHEDULE_SOURCE_ROOT[feedfacecafe]="source/data"
+SCHEDULE_DEST_ROOT[feedfacecafe]="backup/data"
+SCHEDULE_INCLUDE_CHILDREN[feedfacecafe]="0"
+SCHEDULE_TRANSPORT[feedfacecafe]="ssh"
+SCHEDULE_PREFIX[feedfacecafe]="zfs-send-feedfacecafe-"
+SEND_SSH_HOST="backup.example.test"
+SEND_SSH_PORT="2222"
+SEND_SSH_USER="replicator"
+SEND_SSH_KEY_PATH=""
+
+declare -A common_checkpoints=()
+collect_latest_common_checkpoint_basenames_for_schedule "feedfacecafe" common_checkpoints || true
+[[ -n "${common_checkpoints[zfs-send-feedfacecafe-old]:-}" ]] || fail "SSH schedules must protect latest common checkpoints discovered from the remote destination inventory"
+[[ -z "${common_checkpoints[zfs-send-feedfacecafe-new]:-}" ]] || fail "SSH latest-common protection must not mark source-only checkpoints common"
+
+remote_destinations="$(list_existing_destination_datasets_for_schedule "feedfacecafe")"
+assert_contains "$remote_destinations" "backup/data" "SSH destination retention must enumerate the remote destination root even when it does not exist locally"
+
+retention_root="$(mktemp -d)"
+cleanup_retention_root() {
+  rm -rf "$retention_root"
+}
+trap 'cleanup_transport_check; cleanup_retention_root' EXIT
+OPS_ROOT="${retention_root}/ops"
+OPS_STATUS_DIR="${OPS_ROOT}/status"
+DELETE_QUEUE_STATE_FILE="${OPS_STATUS_DIR}/delete-queue.state"
+DELETE_QUEUE_INBOX_FILE="${OPS_ROOT}/delete-queue.inbox"
+DELETE_QUEUE_INBOX_LOCK_FILE="${OPS_ROOT}/delete-queue.inbox.lock"
+PERSISTED_QUEUE_DIR="${retention_root}/persisted"
+PERSISTED_DELETE_QUEUE_FILE="${PERSISTED_QUEUE_DIR}/delete-queue.persist"
+mkdir -p "$OPS_ROOT" "$OPS_STATUS_DIR" "$PERSISTED_QUEUE_DIR"
+clear_send_cleanup_caches
+SCHEDULE_SOURCE_ROOT[feedfacecafe]="source/data"
+SCHEDULE_DEST_ROOT[feedfacecafe]="backup/data"
+SCHEDULE_INCLUDE_CHILDREN[feedfacecafe]="0"
+SCHEDULE_TRANSPORT[feedfacecafe]="ssh"
+SCHEDULE_PREFIX[feedfacecafe]="zfs-send-feedfacecafe-"
+queue_schedule_retention_cleanup "feedfacecafe"
+[[ -f "$DELETE_QUEUE_INBOX_FILE" ]] || fail "SSH destination retention must queue eligible remote destination checkpoint deletes"
+queued_retention="$(cat "$DELETE_QUEUE_INBOX_FILE")"
+assert_contains "$queued_retention" "backup/data@zfs-send-feedfacecafe-ancient" "SSH destination retention must queue the oldest unprotected remote checkpoint snapshot"
+assert_not_contains "$queued_retention" "backup/data@zfs-send-feedfacecafe-old" "SSH destination retention must not queue the newest/latest-common remote checkpoint"
+
+rm -f "$DELETE_QUEUE_INBOX_FILE" "$PERSISTED_DELETE_QUEUE_FILE"
+clear_send_cleanup_caches
+SCHEDULE_JOB_IDS=(feedfacecafe)
+declare -A planned_reclaim=()
+queue_pool_retention_cleanup "backup" "backup/data" planned_reclaim
+[[ -f "$DELETE_QUEUE_INBOX_FILE" ]] || fail "SSH pool cleanup must queue remote destination checkpoints using the schedule transport context"
+queued_pool_retention="$(cat "$DELETE_QUEUE_INBOX_FILE")"
+assert_contains "$queued_pool_retention" "backup/data@zfs-send-feedfacecafe-ancient" "SSH pool cleanup must queue the oldest unprotected remote checkpoint snapshot"
+assert_not_contains "$queued_pool_retention" "backup/data@zfs-send-feedfacecafe-old" "SSH pool cleanup must still protect the newest/latest-common remote checkpoint"
+assert_not_contains "$queued_pool_retention" "backup/data@manual-remote-snapshot" "SSH retention must not queue remote generic snapshots that the sender cannot prove are plugin-owned"
+
+rm -f "$DELETE_QUEUE_INBOX_FILE" "$PERSISTED_DELETE_QUEUE_FILE"
+clear_send_cleanup_caches
+SEND_SPACE_RESERVATION_DIR="${retention_root}/reservations"
+SEND_SPACE_RESERVATION_LOCK_FILE="${retention_root}/reservations.lock"
+JOBS_DIR="${retention_root}/jobs"
+mkdir -p "$SEND_SPACE_RESERVATION_DIR" "$JOBS_DIR"
+declare -A ssh_space_job=()
+ssh_space_job[JOB_ID]="ssh-space-check"
+ssh_space_job[JOB_TYPE]="send"
+ssh_space_job[JOB_ACTION]="send_member"
+ssh_space_job[STATE]="queued"
+ssh_space_job[SEND_TRANSPORT]="ssh"
+ssh_space_job[SEND_PLAN_DESTINATION]="backup/data"
+ssh_space_job[SPACE_REQUIRED_BYTES]="100000"
+ssh_space_path="${JOBS_DIR}/ssh-space-check.job"
+job_write "$ssh_space_path" ssh_space_job
+if ! approve_send_job_space_for_launch "$ssh_space_path" "$$"; then
+  fail "SSH send space approval must use remote destination capacity instead of local sender ZFS state"
+fi
+ssh_space_result="$(cat "$ssh_space_path")"
+assert_contains "$ssh_space_result" "Destination space approved" "SSH send space approval should approve when remote destination has enough space"
+[[ -e "$(send_space_reservation_file_for_job ssh-space-check)" ]] || fail "SSH send space approval must create the normal reservation file after remote capacity succeeds"
+
+rm -f "$DELETE_QUEUE_INBOX_FILE" "$PERSISTED_DELETE_QUEUE_FILE"
+clear_send_cleanup_caches
+SCHEDULE_JOB_IDS=(feedfacecafe)
+declare -A planned_low_space_reclaim=()
+get_dataset_active_constraints() {
+  local dataset="$1"
+  local delta_map_name="$2"
+  local effective_var_name="$3"
+  local active_constraints_var_name="$4"
+  local -n delta_ref="$delta_map_name"
+  local -n active_ref="$active_constraints_var_name"
+  [[ "$dataset" == "backup/data" ]] || return 1
+  active_ref=("pool:backup")
+  printf -v "$effective_var_name" '%s' "${delta_ref[pool:backup]:-0}"
+  return 0
+}
+emit_dataset_capacity_constraints() {
+  local dataset="$1"
+  [[ "$dataset" == "backup/data" ]] || return 1
+  printf 'pool:backup\t0\n'
+}
+queue_pool_free_space_cleanup_for_target "backup" "backup/data" 1 planned_low_space_reclaim
+[[ -f "$DELETE_QUEUE_INBOX_FILE" ]] || fail "SSH low-space cleanup must queue remote destination checkpoints using the schedule transport context"
+queued_low_space_cleanup="$(cat "$DELETE_QUEUE_INBOX_FILE")"
+assert_contains "$queued_low_space_cleanup" "backup/data@zfs-send-feedfacecafe-ancient" "SSH low-space cleanup must queue the oldest eligible remote checkpoint snapshot"
+assert_contains "$queued_low_space_cleanup" $'\tdestination_checkpoint\tfeedfacecafe' "SSH low-space cleanup must queue remote checkpoint deletes with destination checkpoint scope"
+assert_not_contains "$queued_low_space_cleanup" "backup/data@manual-remote-snapshot" "SSH low-space cleanup must skip remote generic snapshots that are not send-managed checkpoints"
+assert_not_contains "$queued_low_space_cleanup" "backup/data@manual-zero-older" "SSH low-space cleanup must skip remote generic zero-written snapshots that are not send-managed checkpoints"
+assert_not_contains "$queued_low_space_cleanup" "backup/data@zfs-send-feedfacecafe-old" "SSH low-space cleanup must still protect the newest/latest-common remote checkpoint"
+
+rm -f "$DELETE_QUEUE_INBOX_FILE" "$PERSISTED_DELETE_QUEUE_FILE"
+clear_send_cleanup_caches
+queue_schedule_zero_change_cleanup "feedfacecafe"
+if [[ -f "$DELETE_QUEUE_INBOX_FILE" ]]; then
+  queued_zero_change_cleanup="$(cat "$DELETE_QUEUE_INBOX_FILE")"
+  assert_not_contains "$queued_zero_change_cleanup" "backup/data@manual-zero-older" "SSH zero-change cleanup must not queue remote generic zero-written snapshots that are not send-managed checkpoints"
+  assert_not_contains "$queued_zero_change_cleanup" "backup/data@manual-zero-newer" "SSH zero-change cleanup must not queue remote generic zero-written snapshots that are not send-managed checkpoints"
+fi
+
+# spiped is intentionally staged/fail-closed until receiver-side inventory and
+# receive verification exist.  Even if a stale/manual job file reaches the worker,
+# the pipeline must refuse before creating a destructive unverified send stream.
+cat >"${tmp_bin}/spipe" <<'SPIPE_FAKE'
+#!/bin/bash
+echo "spipe should not be invoked while spiped transport is fail-closed" >&2
+exit 88
+SPIPE_FAKE
+chmod +x "${tmp_bin}/spipe"
+spiped_send_marker="${retention_root}/spiped-zfs-send-called"
+zfs() {
+  if [[ "$1" == "send" ]]; then
+    : >"$spiped_send_marker"
+    return 0
+  fi
+  if [[ "$1" == "list" ]]; then
+    local args=" $* "
+    if [[ "$args" == *" -o name "* && "$args" == *" source/data "* ]]; then
+      printf '%s\n' "source/data"
+      return 0
+    fi
+    if [[ "$args" == *" -t snapshot "* && "$args" == *" source/data "* ]]; then
+      printf '%s\t%s\n' \
+        "source/data@zfs-send-feedfacecafe-ancient" "50" \
+        "source/data@zfs-send-feedfacecafe-old" "100" \
+        "source/data@zfs-send-feedfacecafe-new" "200"
+      return 0
+    fi
+    if [[ "$args" == *" backup/data "* ]]; then
+      return 1
+    fi
+  fi
+  return 1
+}
+declare -gA job=()
+job[SEND_TRANSPORT]="spiped"
+SEND_SPIPED_REMOTE_HOST=""
+SEND_SPIPED_REMOTE_PORT="8023"
+SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
+if pipeline_message="$(run_pipeline_with_status "spiped missing sender settings" "" "source/data@zfs-send-feedfacecafe-new" "backup/data" 0 0 99 2>&1)"; then
+  fail "spiped pipelines must fail when sender endpoint settings are incomplete"
+fi
+assert_contains "$pipeline_message" "spiped remote host is required" "spiped pipeline dispatch should report missing sender settings before the staged receiver guard"
+[[ ! -e "$spiped_send_marker" ]] || fail "spiped sender-settings guard must stop before zfs send is invoked"
+
+SEND_SPIPED_REMOTE_HOST="receiver.example.test"
+SEND_SPIPED_REMOTE_PORT="8023"
+SEND_SPIPED_KEY_PATH="/boot/config/plugins/zfs.autosnapshot/spiped/key.bin"
+if run_pipeline_with_status "spiped staged pipeline guard" "" "source/data@zfs-send-feedfacecafe-new" "backup/data" 0 0 99; then
+  fail "spiped pipelines must fail closed until receiver inventory/verification is implemented"
+fi
+[[ ! -e "$spiped_send_marker" ]] || fail "spiped fail-closed guard must stop before zfs send is invoked"
+
+printf '%s\n' "PASS: send transport command checks"

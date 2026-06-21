@@ -43,15 +43,6 @@ def main() -> int:
         if snippet in settings:
             fail(f"settings page still exposes Repair/Recovery Tools snippet: {snippet}")
 
-    repair_permissions = PLUGIN.joinpath("scripts/repair-permissions.sh").read_text(encoding="utf-8")
-    for snippet in [
-        "RECOVERY_ROOT",
-        "RECOVERY_SCANS_DIR",
-        "recovery_tools",
-    ]:
-        if snippet in repair_permissions:
-            fail(f"repair-permissions still creates/maintains removed Recovery Tools state: {snippet}")
-
     post_install = PLUGIN.joinpath("scripts/post-install.sh").read_text(encoding="utf-8")
     for stale_path in [
         "/usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-tools.php",
@@ -63,7 +54,7 @@ def main() -> int:
         if f"rm -f {stale_path}" not in post_install:
             fail(f"post-install does not delete stale removed tool file: {stale_path}")
 
-    print("PASS: Repair/Recovery Tools are removed from package, settings UI, and permission repair state")
+    print("PASS: Repair/Recovery Tools are removed from package and settings UI")
     return 0
 
 

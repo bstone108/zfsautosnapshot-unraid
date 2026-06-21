@@ -597,6 +597,18 @@ process_send_checkpoint_delete() {
   fi
 
   if [[ "$delete_scope" == "destination_checkpoint" ]]; then
+    if [[ "${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}" == "ssh" ]]; then
+      local command
+      log "Deleting remote SSH destination scheduled-send checkpoint snapshot ${snapshot}."
+      build_ssh_zfs_command "zfs destroy -- $(shell_quote_word "$snapshot")" command || {
+        fail_delete_job "Cannot delete remote SSH destination checkpoint ${snapshot}; SSH settings are incomplete or invalid."
+        return 0
+      }
+      eval "$command" || return $?
+      complete_delete_job "Deleted remote SSH destination scheduled-send checkpoint snapshot ${snapshot}."
+      return 0
+    fi
+
     log "Deleting destination scheduled-send checkpoint snapshot ${snapshot}."
     delete_single_snapshot "$snapshot" || return $?
     complete_delete_job "Deleted destination scheduled-send checkpoint snapshot ${snapshot}."

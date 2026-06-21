@@ -91,6 +91,15 @@ $csrfToken = zfsas_get_csrf_token();
       opacity: 1;
     }
 
+    .zfsas-select {
+      box-sizing: border-box;
+      padding: 7px 10px;
+      border: 1px solid var(--input-border-color, var(--border-color, #b8c5d1));
+      border-radius: 8px;
+      background: var(--input-background-color, var(--background-color, #fff));
+      color: var(--text-color, #1f2933);
+    }
+
     .zfsas-sm-feedback {
       min-height: 28px;
       margin-top: 12px;
@@ -214,9 +223,12 @@ $csrfToken = zfsas_get_csrf_token();
       position: fixed;
       inset: 0;
       display: flex;
-      justify-content: flex-end;
+      align-items: flex-start;
+      justify-content: center;
       z-index: 1060;
       pointer-events: none;
+      padding: 24px;
+      box-sizing: border-box;
     }
 
     .zfsas-sm-drawer[hidden] {
@@ -225,12 +237,14 @@ $csrfToken = zfsas_get_csrf_token();
 
     .zfsas-sm-drawer-panel {
       width: min(1120px, 96vw);
-      height: 100%;
+      max-height: calc(100vh - 48px);
       background: var(--background-color, #fff);
-      box-shadow: -10px 0 32px rgba(0, 0, 0, 0.16);
+      border-radius: 12px;
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
       display: flex;
       flex-direction: column;
       pointer-events: auto;
+      overflow: hidden;
     }
 
     .zfsas-sm-drawer-header,
@@ -288,6 +302,10 @@ $csrfToken = zfsas_get_csrf_token();
     }
 
     @media (max-width: 920px) {
+      .zfsas-sm-drawer {
+        padding: 10px;
+      }
+
       .zfsas-sm-progress {
         min-width: 160px;
       }
@@ -322,6 +340,11 @@ $csrfToken = zfsas_get_csrf_token();
     </div>
     <div class="zfsas-sm-toolbar">
       <button type="button" class="btn" id="snapshot_manager_refresh">Refresh Dataset Summary</button>
+      <label class="zfsas-sm-help" for="snapshot_manager_pool_filter"><strong>Pool:</strong></label>
+      <select id="snapshot_manager_pool_filter" class="zfsas-select">
+        <option value="__all">All pools</option>
+      </select>
+      <div id="snapshot_manager_dataset_count" class="zfsas-sm-toolbar-status">No datasets loaded.</div>
       <div id="snapshot_manager_toolbar_status" class="zfsas-sm-toolbar-status">Snapshot Manager is ready.</div>
     </div>
     <div id="snapshot_manager_feedback" class="zfsas-sm-feedback"></div>
@@ -712,6 +735,66 @@ $csrfToken = zfsas_get_csrf_token();
     return '<span class="zfsas-sm-help">Idle</span>';
   }
 
+  function datasetPool(dataset) {
+    var value = String(dataset || '');
+    var slash = value.indexOf('/');
+    return slash === -1 ? value : value.slice(0, slash);
+  }
+
+  function populatePoolFilter(datasets) {
+    var filter = byId('snapshot_manager_pool_filter');
+    if (!filter) {
+      return;
+    }
+
+    var currentValue = filter.value || '__all';
+    var pools = {};
+    (Array.isArray(datasets) ? datasets : []).forEach(function (row) {
+      var pool = row.pool || datasetPool(row.dataset);
+      if (pool) {
+        pools[pool] = true;
+      }
+    });
+
+    var options = '<option value="__all">All pools</option>';
+    Object.keys(pools).sort().forEach(function (pool) {
+      options += '<option value="' + escapeHtml(pool) + '">' + escapeHtml(pool) + '</option>';
+    });
+    filter.innerHTML = options;
+    filter.value = Object.prototype.hasOwnProperty.call(pools, currentValue) ? currentValue : '__all';
+  }
+
+  function updateDatasetCount() {
+    var countNode = byId('snapshot_manager_dataset_count');
+    if (!countNode) {
+      return;
+    }
+
+    var rows = document.querySelectorAll('#snapshot_manager_dataset_rows tr[data-dataset]');
+    if (!rows.length) {
+      countNode.textContent = 'No datasets loaded.';
+      return;
+    }
+
+    var visible = 0;
+    rows.forEach(function (row) {
+      if (!row.hidden) {
+        visible += 1;
+      }
+    });
+    countNode.textContent = visible + ' of ' + rows.length + ' dataset' + (rows.length === 1 ? '' : 's') + ' shown.';
+  }
+
+  function applySnapshotManagerPoolFilter() {
+    var filter = byId('snapshot_manager_pool_filter');
+    var selectedPool = filter ? filter.value : '__all';
+    document.querySelectorAll('#snapshot_manager_dataset_rows tr[data-dataset]').forEach(function (row) {
+      var rowPool = row.getAttribute('data-pool') || '';
+      row.hidden = selectedPool !== '__all' && rowPool !== selectedPool;
+    });
+    updateDatasetCount();
+  }
+
   function renderDatasetRows(datasets) {
     var tbody = byId('snapshot_manager_dataset_rows');
     if (!tbody) {
@@ -719,13 +802,16 @@ $csrfToken = zfsas_get_csrf_token();
     }
 
     if (!Array.isArray(datasets) || datasets.length === 0) {
+      populatePoolFilter([]);
       tbody.innerHTML = '<tr><td colspan="6" class="zfsas-sm-help">No datasets were found for Snapshot Manager.</td></tr>';
+      updateDatasetCount();
       return;
     }
 
+    populatePoolFilter(datasets);
     var html = '';
     datasets.forEach(function (row) {
-      html += '<tr data-dataset="' + escapeHtml(row.dataset) + '">';
+      html += '<tr data-dataset="' + escapeHtml(row.dataset) + '" data-pool="' + escapeHtml(row.pool || datasetPool(row.dataset)) + '">';
       html += '<td><code>' + escapeHtml(row.dataset) + '</code></td>';
       html += '<td>' + (row.lastSnapshotText ? escapeHtml(row.lastSnapshotText) : '<span class="zfsas-sm-help">No snapshots yet.</span>') + '</td>';
       html += '<td class="zfsas-center">' + String(row.snapshotCount || 0) + '</td>';
@@ -739,11 +825,28 @@ $csrfToken = zfsas_get_csrf_token();
     });
 
     tbody.innerHTML = html;
+    applySnapshotManagerPoolFilter();
   }
 
   function selectedSnapshots() {
     return Object.keys(currentSelection).filter(function (key) {
       return !!currentSelection[key];
+    });
+  }
+
+  function actionableSelectedSnapshots(action) {
+    return selectedSnapshots().filter(function (snapshot) {
+      var row = currentSnapshotMap[snapshot] || null;
+      if (!row || row.pendingDelete) {
+        return false;
+      }
+      if (action === 'hold' && row.held) {
+        return false;
+      }
+      if (action === 'release' && !row.held) {
+        return false;
+      }
+      return true;
     });
   }
 
@@ -802,11 +905,16 @@ $csrfToken = zfsas_get_csrf_token();
         currentSnapshotMap[row.snapshot] = row;
         var isSelected = !!currentSelection[row.snapshot];
         var holdLabel = row.held ? 'Release' : 'Hold';
-        html += '<tr data-snapshot="' + escapeHtml(row.snapshot) + '">';
-        html += '<td class="zfsas-select-cell"><input type="checkbox" class="snapshot-manager-select" value="' + escapeHtml(row.snapshot) + '"' + (isSelected ? ' checked' : '') + '></td>';
+        var pendingDelete = !!row.pendingDelete;
+        var pendingDeleteLabel = row.pendingDeleteState ? ('Delete ' + row.pendingDeleteState) : 'Delete queued';
+        html += '<tr data-snapshot="' + escapeHtml(row.snapshot) + '"' + (pendingDelete ? ' class="zfsas-sm-pending-delete"' : '') + '>';
+        html += '<td class="zfsas-select-cell"><input type="checkbox" class="snapshot-manager-select" value="' + escapeHtml(row.snapshot) + '"' + (isSelected ? ' checked' : '') + (pendingDelete ? ' disabled title="Snapshot deletion is already queued."' : '') + '></td>';
         html += '<td><code>' + escapeHtml(row.snapshotName) + '</code><div class="zfsas-sm-snapshot-meta">';
         if (row.sendProtected) {
           html += '<span class="zfsas-sm-meta-chip is-protected">Protected send checkpoint</span>';
+        }
+        if (pendingDelete) {
+          html += '<span class="zfsas-sm-meta-chip is-pending-delete">' + escapeHtml(pendingDeleteLabel) + '</span>';
         }
         if (row.held) {
           html += '<span class="zfsas-sm-meta-chip">Held: ' + escapeHtml((row.holdTags || []).join(', ') || 'yes') + '</span>';
@@ -817,10 +925,14 @@ $csrfToken = zfsas_get_csrf_token();
         html += '<td class="zfsas-center">' + escapeHtml(row.writtenText) + '</td>';
         html += '<td class="zfsas-center">' + String(row.userrefs || 0) + '</td>';
         html += '<td class="zfsas-actions-cell">';
-        html += '<button type="button" class="btn snapshot-manager-row-action" data-action="rollback" data-snapshot="' + escapeHtml(row.snapshot) + '"' + (row.sendProtected ? ' disabled' : '') + '>Rollback</button> ';
-        html += '<button type="button" class="btn snapshot-manager-row-action" data-action="delete" data-snapshot="' + escapeHtml(row.snapshot) + '">Delete</button> ';
-        html += '<button type="button" class="btn snapshot-manager-row-action" data-action="' + (row.held ? 'release' : 'hold') + '" data-snapshot="' + escapeHtml(row.snapshot) + '">' + holdLabel + '</button> ';
-        html += '<button type="button" class="btn snapshot-manager-row-action" data-action="send" data-snapshot="' + escapeHtml(row.snapshot) + '">Send</button>';
+        if (pendingDelete) {
+          html += '<span class="zfsas-sm-help">Delete already queued</span>';
+        } else {
+          html += '<button type="button" class="btn snapshot-manager-row-action" data-action="rollback" data-snapshot="' + escapeHtml(row.snapshot) + '"' + (row.sendProtected ? ' disabled' : '') + '>Rollback</button> ';
+          html += '<button type="button" class="btn snapshot-manager-row-action" data-action="delete" data-snapshot="' + escapeHtml(row.snapshot) + '">Delete</button> ';
+          html += '<button type="button" class="btn snapshot-manager-row-action" data-action="' + (row.held ? 'release' : 'hold') + '" data-snapshot="' + escapeHtml(row.snapshot) + '">' + holdLabel + '</button> ';
+          html += '<button type="button" class="btn snapshot-manager-row-action" data-action="send" data-snapshot="' + escapeHtml(row.snapshot) + '">Send</button>';
+        }
         html += '</td>';
         html += '</tr>';
       });
@@ -863,16 +975,31 @@ $csrfToken = zfsas_get_csrf_token();
     refreshBulkCount();
     renderFeedback('snapshot_manager_drawer_feedback', [], false);
     openDrawer();
+    reloadCurrentDatasetDetails('Unable to load snapshots for ' + dataset + ': ');
+  }
+
+  function reloadCurrentDatasetDetails(errorPrefix) {
+    if (!currentDataset) {
+      return;
+    }
     requestJson(
-      datasetUrl + '?dataset=' + encodeURIComponent(dataset) + '&_=' + Date.now(),
+      datasetUrl + '?dataset=' + encodeURIComponent(currentDataset) + '&_=' + Date.now(),
       function (payload) {
-        renderSnapshotRows(dataset, payload.snapshots || [], payload.status || null);
+        renderSnapshotRows(currentDataset, payload.snapshots || [], payload.status || null);
         refreshBulkCount();
       },
       function (error) {
-        renderFeedback('snapshot_manager_drawer_feedback', ['Unable to load snapshots for ' + dataset + ': ' + error.message], true);
+        renderFeedback('snapshot_manager_drawer_feedback', [(errorPrefix || 'Unable to refresh snapshots for ' + currentDataset + ': ') + error.message], true);
       }
     );
+  }
+
+  function refreshSnapshotManagerState() {
+    loadDatasetList();
+    if (!currentDataset) {
+      return;
+    }
+    reloadCurrentDatasetDetails();
   }
 
   function requestAction(body, onSuccess) {
@@ -884,7 +1011,7 @@ $csrfToken = zfsas_get_csrf_token();
         loadDatasetList();
         if (currentDataset) {
           window.setTimeout(function () {
-            loadDataset(currentDataset);
+            reloadCurrentDatasetDetails();
           }, 250);
         }
         if (typeof onSuccess === 'function') {
@@ -911,9 +1038,16 @@ $csrfToken = zfsas_get_csrf_token();
       return;
     }
 
-    var snapshots = selectedSnapshots();
-    if (snapshots.length === 0) {
+    var selected = selectedSnapshots();
+    if (selected.length === 0) {
       renderFeedback('snapshot_manager_drawer_feedback', ['Select at least one snapshot first.'], true);
+      return;
+    }
+
+    var snapshots = actionableSelectedSnapshots(action);
+    if (snapshots.length === 0) {
+      var actionLabel = action === 'hold' ? 'hold' : (action === 'release' ? 'release' : action);
+      renderFeedback('snapshot_manager_drawer_feedback', ['No selected snapshots are eligible to ' + actionLabel + '.'], true);
       return;
     }
 
@@ -949,6 +1083,7 @@ $csrfToken = zfsas_get_csrf_token();
   }
 
   byId('snapshot_manager_refresh').addEventListener('click', loadDatasetList);
+  byId('snapshot_manager_pool_filter').addEventListener('change', applySnapshotManagerPoolFilter);
   byId('snapshot_manager_close').addEventListener('click', closeDrawer);
   byId('snapshot_manager_backdrop').addEventListener('click', closeDrawer);
   byId('snapshot_manager_refresh_dataset').addEventListener('click', function () {
@@ -1056,6 +1191,11 @@ $csrfToken = zfsas_get_csrf_token();
   byId('snapshot_manager_select_all').addEventListener('change', function () {
     var checked = byId('snapshot_manager_select_all').checked;
     document.querySelectorAll('.snapshot-manager-select').forEach(function (checkbox) {
+      if (checkbox.disabled) {
+        checkbox.checked = false;
+        delete currentSelection[checkbox.value];
+        return;
+      }
       checkbox.checked = checked;
       currentSelection[checkbox.value] = checked;
     });
@@ -1090,7 +1230,7 @@ $csrfToken = zfsas_get_csrf_token();
   });
 
   loadDatasetList();
-  refreshTimer = window.setInterval(loadDatasetList, 5000);
+  refreshTimer = window.setInterval(refreshSnapshotManagerState, 5000);
 
   if (embeddedMode && window.parent !== window) {
     var heightObserver = new MutationObserver(function () {

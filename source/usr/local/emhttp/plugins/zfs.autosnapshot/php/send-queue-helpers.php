@@ -1330,10 +1330,14 @@ function zfsas_ops_recent_send_jobs($limit = 100)
 {
     $jobs = zfsas_ops_list_jobs(['send']);
     $jobs = array_values(array_filter($jobs, function ($job) {
-        if ((string) ($job['JOB_ACTION'] ?? '') !== 'pool_prep') {
-            return true;
+        $action = (string) ($job['JOB_ACTION'] ?? '');
+        $state = (string) ($job['STATE'] ?? '');
+
+        if (in_array($action, ['pool_prep', 'finalize'], true)) {
+            return $state === 'failed';
         }
-        return !in_array((string) ($job['STATE'] ?? ''), ['complete', 'skipped'], true);
+
+        return true;
     }));
     usort($jobs, function ($a, $b) {
         $leftSort = (int) ($a['QUEUE_SORT'] ?? PHP_INT_MAX);

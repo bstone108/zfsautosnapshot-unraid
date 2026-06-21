@@ -48,6 +48,121 @@ function zfsas_send_frequency_options()
     ];
 }
 
+function zfsas_send_transport_options()
+{
+    return [
+        'local' => 'Local pool/dataset',
+        'ssh' => 'SSH (key/preconfigured auth)',
+        'spiped' => 'spiped (encrypted network)',
+    ];
+}
+
+function zfsas_send_gui_transport_options()
+{
+    $options = zfsas_send_transport_options();
+    unset($options['spiped']);
+    return $options;
+}
+
+function zfsas_send_normalize_ssh_host($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '';
+    }
+
+    return (preg_match('/^[A-Za-z0-9._:-]+$/', $value) === 1) ? $value : null;
+}
+
+function zfsas_send_normalize_ssh_user($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return 'root';
+    }
+
+    return (preg_match('/^[A-Za-z0-9._-]+$/', $value) === 1) ? $value : null;
+}
+
+function zfsas_send_normalize_ssh_port($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '22';
+    }
+    if (preg_match('/^[0-9]+$/', $value) !== 1) {
+        return null;
+    }
+
+    $port = (int) $value;
+    return ($port >= 1 && $port <= 65535) ? (string) $port : null;
+}
+
+function zfsas_send_normalize_ssh_key_path($value)
+{
+    return zfsas_send_normalize_absolute_secret_path($value);
+}
+
+function zfsas_send_normalize_spiped_listen_host($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '0.0.0.0';
+    }
+
+    return (preg_match('/^[A-Za-z0-9._:-]+$/', $value) === 1) ? $value : null;
+}
+
+function zfsas_send_normalize_spiped_remote_host($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '';
+    }
+
+    return (preg_match('/^[A-Za-z0-9._:-]+$/', $value) === 1) ? $value : null;
+}
+
+function zfsas_send_normalize_spiped_port($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '8023';
+    }
+    if (preg_match('/^[0-9]+$/', $value) !== 1) {
+        return null;
+    }
+
+    $port = (int) $value;
+    return ($port >= 1 && $port <= 65535) ? (string) $port : null;
+}
+
+function zfsas_send_normalize_spiped_remote_port($value)
+{
+    return zfsas_send_normalize_spiped_port($value);
+}
+
+function zfsas_send_normalize_spiped_key_path($value)
+{
+    return zfsas_send_normalize_absolute_secret_path($value);
+}
+
+function zfsas_send_normalize_absolute_secret_path($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '') {
+        return '';
+    }
+    if ($value[0] !== '/') {
+        return null;
+    }
+    if (strpos($value, "\0") !== false || strpos($value, "\n") !== false || strpos($value, "\r") !== false) {
+        return null;
+    }
+
+    return $value;
+}
+
 function zfsas_send_legacy_frequency_upgrades()
 {
     return [
@@ -168,6 +283,16 @@ function zfsas_send_normalize_children_flag($value)
     return '0';
 }
 
+function zfsas_send_normalize_transport($value)
+{
+    $value = strtolower(trim((string) $value));
+    if ($value === '') {
+        return 'local';
+    }
+
+    return in_array($value, ['local', 'ssh', 'spiped'], true) ? $value : null;
+}
+
 function zfsas_send_normalize_parallel_limit($value)
 {
     $value = (int) $value;
@@ -213,6 +338,15 @@ function zfsas_send_defaults()
         'SEND_KEEP_ALL_FOR_DAYS' => '14',
         'SEND_KEEP_DAILY_UNTIL_DAYS' => '30',
         'SEND_KEEP_WEEKLY_UNTIL_DAYS' => '183',
+        'SEND_SSH_HOST' => '',
+        'SEND_SSH_PORT' => '22',
+        'SEND_SSH_USER' => 'root',
+        'SEND_SSH_KEY_PATH' => '',
+        'SEND_SPIPED_LISTEN_HOST' => '0.0.0.0',
+        'SEND_SPIPED_PORT' => '8023',
+        'SEND_SPIPED_REMOTE_HOST' => '',
+        'SEND_SPIPED_REMOTE_PORT' => '8023',
+        'SEND_SPIPED_KEY_PATH' => '',
         'SEND_JOBS' => '',
     ];
 }
@@ -265,6 +399,7 @@ function zfsas_send_render_jobs_string($jobs)
             $job['frequency'],
             $job['threshold'],
             $job['children'] ?? '0',
+            $job['transport'] ?? 'local',
         ]);
     }
 
@@ -340,7 +475,7 @@ function zfsas_send_parse_jobs($jobsRaw, &$errors = [], &$warnings = [])
         }
 
         $pieces = explode('|', $entry);
-        if (count($pieces) !== 5 && count($pieces) !== 6) {
+        if (count($pieces) !== 5 && count($pieces) !== 6 && count($pieces) !== 7) {
             $warnings[] = "Ignoring invalid SEND_JOBS entry '{$entry}'.";
             continue;
         }
@@ -351,12 +486,14 @@ function zfsas_send_parse_jobs($jobsRaw, &$errors = [], &$warnings = [])
         $frequencyRaw = $pieces[3] ?? '';
         $thresholdRaw = $pieces[4] ?? '';
         $childrenRaw = $pieces[5] ?? '0';
+        $transportRaw = $pieces[6] ?? 'local';
         $jobId = zfsas_send_trim($jobIdRaw);
         $source = zfsas_send_normalize_dataset_path($sourceRaw);
         $destination = zfsas_send_normalize_dataset_path($destinationRaw);
         $frequency = zfsas_send_normalize_frequency($frequencyRaw, true);
         $threshold = zfsas_send_normalize_threshold($thresholdRaw);
         $children = zfsas_send_normalize_children_flag($childrenRaw);
+        $transport = zfsas_send_normalize_transport($transportRaw);
 
         if ($jobId === '' || preg_match('/^[a-f0-9]{12}$/', $jobId) !== 1) {
             $warnings[] = "Ignoring invalid ZFS send job id '{$jobIdRaw}'.";
@@ -393,6 +530,10 @@ function zfsas_send_parse_jobs($jobsRaw, &$errors = [], &$warnings = [])
             $warnings[] = "Ignoring ZFS send job '{$entry}' because the destination free-space target is invalid.";
             continue;
         }
+        if ($transport === null) {
+            $warnings[] = "Ignoring ZFS send job '{$entry}' because the transport is invalid.";
+            continue;
+        }
 
         if (isset($seen[$jobId])) {
             $warnings[] = "Ignoring duplicate ZFS send job '{$source}' -> '{$destination}'.";
@@ -408,6 +549,7 @@ function zfsas_send_parse_jobs($jobsRaw, &$errors = [], &$warnings = [])
             'frequency_label' => zfsas_send_frequency_label($frequency),
             'threshold' => $threshold,
             'children' => $children,
+            'transport' => $transport,
         ];
         $seen[$jobId] = true;
     }
@@ -435,6 +577,7 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
     $frequencies = (isset($post['job_frequency']) && is_array($post['job_frequency'])) ? $post['job_frequency'] : [];
     $thresholds = (isset($post['job_threshold']) && is_array($post['job_threshold'])) ? $post['job_threshold'] : [];
     $childrenFlags = (isset($post['job_children']) && is_array($post['job_children'])) ? $post['job_children'] : [];
+    $transports = (isset($post['job_transport']) && is_array($post['job_transport'])) ? $post['job_transport'] : [];
     $removes = (isset($post['job_remove']) && is_array($post['job_remove'])) ? $post['job_remove'] : [];
 
     foreach ($sources as $index => $sourceRaw) {
@@ -447,6 +590,7 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
         $frequency = zfsas_send_normalize_frequency($frequencies[$index] ?? '');
         $threshold = zfsas_send_normalize_threshold($thresholds[$index] ?? '');
         $children = zfsas_send_normalize_children_flag($childrenFlags[$index] ?? '0');
+        $transport = zfsas_send_normalize_transport($transports[$index] ?? 'local');
         $jobId = zfsas_send_trim($jobIds[$index] ?? '');
 
         if ($source === '' && $destination === '') {
@@ -489,6 +633,10 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
             $errors[] = "Destination free-space target for '{$source}' -> '{$destination}' is invalid.";
             continue;
         }
+        if ($transport === null) {
+            $errors[] = "Transport for '{$source}' -> '{$destination}' is invalid.";
+            continue;
+        }
 
         if ($jobId === '' || preg_match('/^[a-f0-9]{12}$/', $jobId) !== 1) {
             $jobId = zfsas_send_job_id($source, $destination);
@@ -508,6 +656,7 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
             'frequency_label' => zfsas_send_frequency_label($frequency),
             'threshold' => $threshold,
             'children' => $children,
+            'transport' => $transport,
         ];
         $seenJobIds[$jobId] = true;
     }
@@ -517,11 +666,13 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
     $newFrequencyRaw = zfsas_send_trim($post['new_job_frequency'] ?? '');
     $newThresholdRaw = zfsas_send_trim($post['new_job_threshold'] ?? '');
     $newChildrenRaw = zfsas_send_trim($post['new_job_children'] ?? '0');
+    $newTransportRaw = zfsas_send_trim($post['new_job_transport'] ?? 'local');
 
     if ($newSource !== '' || $newDestination !== '') {
         $newFrequency = zfsas_send_normalize_frequency($newFrequencyRaw);
         $newThreshold = zfsas_send_normalize_threshold($newThresholdRaw);
         $newChildren = zfsas_send_normalize_children_flag($newChildrenRaw);
+        $newTransport = zfsas_send_normalize_transport($newTransportRaw);
 
         if (!zfsas_send_is_valid_dataset_name($newSource)) {
             $errors[] = 'New ZFS send source dataset is invalid.';
@@ -539,6 +690,8 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
             $errors[] = 'New ZFS send frequency is invalid.';
         } elseif ($newThreshold === null) {
             $errors[] = 'New ZFS send destination free-space target is invalid.';
+        } elseif ($newTransport === null) {
+            $errors[] = 'New ZFS send transport is invalid.';
         } else {
             $newJobId = zfsas_send_job_id($newSource, $newDestination);
             if (isset($seenJobIds[$newJobId])) {
@@ -553,6 +706,7 @@ function zfsas_send_collect_submitted_jobs($post, &$errors)
                     'frequency_label' => zfsas_send_frequency_label($newFrequency),
                     'threshold' => $newThreshold,
                     'children' => $newChildren,
+                    'transport' => $newTransport,
                 ];
             }
         }
@@ -593,9 +747,24 @@ function zfsas_send_render_config($config)
     $lines[] = 'SEND_KEEP_DAILY_UNTIL_DAYS=' . zfsas_send_normalize_retention_days($config['SEND_KEEP_DAILY_UNTIL_DAYS'], 30);
     $lines[] = 'SEND_KEEP_WEEKLY_UNTIL_DAYS=' . zfsas_send_normalize_retention_days($config['SEND_KEEP_WEEKLY_UNTIL_DAYS'], 183);
     $lines[] = '';
+    $lines[] = '# SSH transport receiver settings. SSH uses keys or other preconfigured non-interactive auth; raw passwords are not stored here.';
+    $lines[] = 'SEND_SSH_HOST=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_host($config['SEND_SSH_HOST'] ?? '') ?? '');
+    $lines[] = 'SEND_SSH_PORT=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_port($config['SEND_SSH_PORT'] ?? '22') ?? '22');
+    $lines[] = 'SEND_SSH_USER=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_user($config['SEND_SSH_USER'] ?? 'root') ?? 'root');
+    $lines[] = 'SEND_SSH_KEY_PATH=' . zfsas_send_quote_config_string(zfsas_send_normalize_ssh_key_path($config['SEND_SSH_KEY_PATH'] ?? '') ?? '');
+    $lines[] = '';
+    $lines[] = '# spiped receiver/listener settings. Store only the local symmetric-key file path; never paste raw key material here.';
+    $lines[] = 'SEND_SPIPED_LISTEN_HOST=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_listen_host($config['SEND_SPIPED_LISTEN_HOST'] ?? '0.0.0.0') ?? '0.0.0.0');
+    $lines[] = 'SEND_SPIPED_PORT=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_port($config['SEND_SPIPED_PORT'] ?? '8023') ?? '8023');
+    $lines[] = '# spiped sender target endpoint for spipe -t host:port.';
+    $lines[] = 'SEND_SPIPED_REMOTE_HOST=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_remote_host($config['SEND_SPIPED_REMOTE_HOST'] ?? '') ?? '');
+    $lines[] = 'SEND_SPIPED_REMOTE_PORT=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_remote_port($config['SEND_SPIPED_REMOTE_PORT'] ?? '8023') ?? '8023');
+    $lines[] = 'SEND_SPIPED_KEY_PATH=' . zfsas_send_quote_config_string(zfsas_send_normalize_spiped_key_path($config['SEND_SPIPED_KEY_PATH'] ?? '') ?? '');
+    $lines[] = '';
     $lines[] = '# Semicolon-separated jobs encoded as:';
-    $lines[] = '#   jobid|source|destination|frequency|threshold|children';
+    $lines[] = '#   jobid|source|destination|frequency|threshold|children|transport';
     $lines[] = '# frequency values: 6h, 12h, 1d, 7d';
+    $lines[] = '# transport values: local, ssh, spiped (network transports require receiver settings before use).';
     $lines[] = 'SEND_JOBS=' . zfsas_send_quote_config_string($config['SEND_JOBS']);
     $lines[] = '';
 
@@ -639,6 +808,15 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
     $submitted['SEND_KEEP_ALL_FOR_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_all_for_days'] ?? $submitted['SEND_KEEP_ALL_FOR_DAYS'], 14);
     $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_daily_until_days'] ?? $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'], 30);
     $submitted['SEND_KEEP_WEEKLY_UNTIL_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_weekly_until_days'] ?? $submitted['SEND_KEEP_WEEKLY_UNTIL_DAYS'], 183);
+    $submitted['SEND_SSH_HOST'] = zfsas_send_normalize_ssh_host($post['send_ssh_host'] ?? ($submitted['SEND_SSH_HOST'] ?? ''));
+    $submitted['SEND_SSH_PORT'] = zfsas_send_normalize_ssh_port($post['send_ssh_port'] ?? ($submitted['SEND_SSH_PORT'] ?? '22'));
+    $submitted['SEND_SSH_USER'] = zfsas_send_normalize_ssh_user($post['send_ssh_user'] ?? ($submitted['SEND_SSH_USER'] ?? 'root'));
+    $submitted['SEND_SSH_KEY_PATH'] = zfsas_send_normalize_ssh_key_path($post['send_ssh_key_path'] ?? ($submitted['SEND_SSH_KEY_PATH'] ?? ''));
+    $submitted['SEND_SPIPED_LISTEN_HOST'] = zfsas_send_normalize_spiped_listen_host($post['send_spiped_listen_host'] ?? ($submitted['SEND_SPIPED_LISTEN_HOST'] ?? '0.0.0.0'));
+    $submitted['SEND_SPIPED_PORT'] = zfsas_send_normalize_spiped_port($post['send_spiped_port'] ?? ($submitted['SEND_SPIPED_PORT'] ?? '8023'));
+    $submitted['SEND_SPIPED_REMOTE_HOST'] = zfsas_send_normalize_spiped_remote_host($post['send_spiped_remote_host'] ?? ($submitted['SEND_SPIPED_REMOTE_HOST'] ?? ''));
+    $submitted['SEND_SPIPED_REMOTE_PORT'] = zfsas_send_normalize_spiped_remote_port($post['send_spiped_remote_port'] ?? ($submitted['SEND_SPIPED_REMOTE_PORT'] ?? '8023'));
+    $submitted['SEND_SPIPED_KEY_PATH'] = zfsas_send_normalize_spiped_key_path($post['send_spiped_key_path'] ?? ($submitted['SEND_SPIPED_KEY_PATH'] ?? ''));
     $submittedJobs = zfsas_send_collect_submitted_jobs($post, $errors);
 
     if ($submitted['SEND_SNAPSHOT_PREFIX'] === '') {
@@ -657,6 +835,66 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
         || (int) $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'] >= (int) $submitted['SEND_KEEP_WEEKLY_UNTIL_DAYS']
     ) {
         $errors[] = 'Send retention order is invalid. Keep all days must be less than keep daily until, and keep daily until must be less than keep weekly until.';
+    }
+
+    if ($submitted['SEND_SSH_HOST'] === null) {
+        $errors[] = 'SSH host may contain only letters, numbers, dot, dash, underscore, colon, and IPv6 brackets are not required.';
+        $submitted['SEND_SSH_HOST'] = zfsas_send_trim($post['send_ssh_host'] ?? '');
+    }
+    if ($submitted['SEND_SSH_PORT'] === null) {
+        $errors[] = 'SSH port must be a number from 1 to 65535.';
+        $submitted['SEND_SSH_PORT'] = zfsas_send_trim($post['send_ssh_port'] ?? '');
+    }
+    if ($submitted['SEND_SSH_USER'] === null) {
+        $errors[] = 'SSH user may contain only letters, numbers, dot, dash, and underscore.';
+        $submitted['SEND_SSH_USER'] = zfsas_send_trim($post['send_ssh_user'] ?? '');
+    }
+    if ($submitted['SEND_SSH_KEY_PATH'] === null) {
+        $errors[] = 'SSH key path must be an absolute local path. Raw key contents and passwords are not stored in this config.';
+        $submitted['SEND_SSH_KEY_PATH'] = zfsas_send_trim($post['send_ssh_key_path'] ?? '');
+    }
+    if ($submitted['SEND_SPIPED_LISTEN_HOST'] === null) {
+        $errors[] = 'spiped listen host may contain only letters, numbers, dot, dash, underscore, and colon.';
+        $submitted['SEND_SPIPED_LISTEN_HOST'] = zfsas_send_trim($post['send_spiped_listen_host'] ?? '');
+    }
+    if ($submitted['SEND_SPIPED_PORT'] === null) {
+        $errors[] = 'spiped port must be a number from 1 to 65535.';
+        $submitted['SEND_SPIPED_PORT'] = zfsas_send_trim($post['send_spiped_port'] ?? '');
+    }
+    if ($submitted['SEND_SPIPED_REMOTE_HOST'] === null) {
+        $errors[] = 'spiped remote host may contain only letters, numbers, dot, dash, underscore, and colon.';
+        $submitted['SEND_SPIPED_REMOTE_HOST'] = zfsas_send_trim($post['send_spiped_remote_host'] ?? '');
+    }
+    if ($submitted['SEND_SPIPED_REMOTE_PORT'] === null) {
+        $errors[] = 'spiped remote port must be a number from 1 to 65535.';
+        $submitted['SEND_SPIPED_REMOTE_PORT'] = zfsas_send_trim($post['send_spiped_remote_port'] ?? '');
+    }
+    if ($submitted['SEND_SPIPED_KEY_PATH'] === null) {
+        $errors[] = 'spiped key path must be an absolute local path. Raw symmetric-key contents are not stored in this config.';
+        $submitted['SEND_SPIPED_KEY_PATH'] = zfsas_send_trim($post['send_spiped_key_path'] ?? '');
+    }
+
+    $usesSshTransport = false;
+    $usesSpipedTransport = false;
+    foreach ($submittedJobs as $submittedJob) {
+        $transport = strtolower((string) ($submittedJob['transport'] ?? 'local'));
+        if ($transport === 'ssh') {
+            $usesSshTransport = true;
+        } elseif ($transport === 'spiped') {
+            $usesSpipedTransport = true;
+        }
+    }
+
+    if ($usesSshTransport && zfsas_send_trim((string) ($submitted['SEND_SSH_HOST'] ?? '')) === '') {
+        $errors[] = 'SSH host is required when any ZFS send job uses SSH transport.';
+    }
+    if ($usesSpipedTransport) {
+        if (zfsas_send_trim((string) ($submitted['SEND_SPIPED_REMOTE_HOST'] ?? '')) === '') {
+            $errors[] = 'spiped remote host is required when any ZFS send job uses spiped transport.';
+        }
+        if (zfsas_send_trim((string) ($submitted['SEND_SPIPED_KEY_PATH'] ?? '')) === '') {
+            $errors[] = 'spiped key path is required when any ZFS send job uses spiped transport.';
+        }
     }
 
     if (empty($errors)) {

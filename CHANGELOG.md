@@ -5,6 +5,14 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.21.01 (2026-06-21)
+
+- Fixed SSH ZFS send queue space approval so the sender checks remote destination capacity over SSH instead of reading the sender's local ZFS pool state. This prevents SSH send jobs from looping with `available=0` when the receiver actually has enough space.
+- Fixed remote ZFS send finalizers so zero-byte coordinator work skips destination space reservation instead of waiting forever on remote capacity checks. Completed child sends now finish their coordinator and leave the queue normally.
+- Kept routine ZFS send coordinator jobs out of the visible queue list so a manual remote send shows the actual send row instead of an extra waiting finalizer or pool-prep row. Failed coordinators still remain visible for clearing or troubleshooting.
+- Removed unfinished spiped controls from the ZFS Send WebGUI while keeping the staged backend/config plumbing in place for future work. Existing hidden spiped jobs are preserved in config, but the GUI no longer offers spiped for new jobs.
+- Fixed a queue-manager helper error that could log `ensure_delete_worker_for_backlog: command not found` while planning destination cleanup.
+
 ### 2026.06.19.01 (2026-06-19)
 
 - Removed the broken Recovery/Repair Tools feature from the plugin package, settings UI, endpoints, helper code, manual scan command, and permission-repair state. Older direct-install files are deleted during post-install so the removed tools cannot still be opened from a stale install.
