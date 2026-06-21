@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.21.t02 (Testing Branch Only)
+
+- Kept routine ZFS send coordinator jobs out of the visible queue list so a manual remote send shows the actual send row instead of an extra waiting finalizer/pool-prep row. Failed coordinators still remain visible for clearing or troubleshooting.
+
 ### 2026.06.21.t01 (Testing Branch Only)
 
 - Fixed SSH send queue space approval so the sender checks remote destination capacity over SSH instead of reading the sender's local ZFS pool state. This prevents SSH send jobs from looping with `available=0` when the receiver actually has enough space.
