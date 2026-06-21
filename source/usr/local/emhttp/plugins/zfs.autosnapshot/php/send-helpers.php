@@ -57,6 +57,13 @@ function zfsas_send_transport_options()
     ];
 }
 
+function zfsas_send_gui_transport_options()
+{
+    $options = zfsas_send_transport_options();
+    unset($options['spiped']);
+    return $options;
+}
+
 function zfsas_send_normalize_ssh_host($value)
 {
     $value = zfsas_send_trim($value);

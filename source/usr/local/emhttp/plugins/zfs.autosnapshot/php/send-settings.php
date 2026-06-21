@@ -540,34 +540,6 @@ if ($isPostRequest) {
       </div>
 
       <div class="zfsas-send-card" style="margin-top: 14px;">
-        <h4 style="margin-top:0;">spiped receiver and sender settings</h4>
-        <div class="zfsas-send-help">
-          spiped uses a shared symmetric key file on both sides. Store only the local key-file path here; do not paste raw key contents into the WebGUI or config. Receiver/listener fields describe the local <code>spiped -d</code> endpoint; sender target fields describe the remote <code>spipe -t host:port</code> endpoint.
-        </div>
-        <div class="zfsas-send-retention-grid" style="margin-top: 12px;">
-          <div class="zfsas-send-field">
-            <label for="send_spiped_listen_host">spiped listen host</label>
-            <input id="send_spiped_listen_host" name="send_spiped_listen_host" class="zfsas-send-input" value="<?php echo zfsas_send_h($config['SEND_SPIPED_LISTEN_HOST'] ?? '0.0.0.0'); ?>" placeholder="0.0.0.0">
-          </div>
-          <div class="zfsas-send-field">
-            <label for="send_spiped_port">spiped listen port</label>
-            <input id="send_spiped_port" name="send_spiped_port" class="zfsas-send-input" type="number" min="1" max="65535" value="<?php echo zfsas_send_h($config['SEND_SPIPED_PORT'] ?? '8023'); ?>">
-          </div>
-          <div class="zfsas-send-field">
-            <label for="send_spiped_remote_host">spiped remote host</label>
-            <input id="send_spiped_remote_host" name="send_spiped_remote_host" class="zfsas-send-input" value="<?php echo zfsas_send_h($config['SEND_SPIPED_REMOTE_HOST'] ?? ''); ?>" placeholder="backup.example.lan">
-          </div>
-          <div class="zfsas-send-field">
-            <label for="send_spiped_remote_port">spiped remote port</label>
-            <input id="send_spiped_remote_port" name="send_spiped_remote_port" class="zfsas-send-input" type="number" min="1" max="65535" value="<?php echo zfsas_send_h($config['SEND_SPIPED_REMOTE_PORT'] ?? '8023'); ?>">
-          </div>
-          <div class="zfsas-send-field">
-            <label for="send_spiped_key_path">spiped key path</label>
-            <input id="send_spiped_key_path" name="send_spiped_key_path" class="zfsas-send-input" value="<?php echo zfsas_send_h($config['SEND_SPIPED_KEY_PATH'] ?? ''); ?>" placeholder="/boot/config/plugins/zfs.autosnapshot/spiped.key">
-          </div>
-        </div>
-      </div>
-
       <?php if (count($formJobs) === 0) : ?>
         <div class="zfsas-send-empty">No ZFS send jobs are configured yet. Add one below, then save.</div>
       <?php endif; ?>
@@ -611,11 +583,17 @@ if ($isPostRequest) {
                   </select>
                 </td>
                 <td>
-                  <select name="job_transport[<?php echo (int) $index; ?>]" class="zfsas-send-select">
-                    <?php foreach (zfsas_send_transport_options() as $value => $label) : ?>
-                      <option value="<?php echo zfsas_send_h($value); ?>" <?php echo ($value === ($job['transport'] ?? 'local')) ? 'selected' : ''; ?>><?php echo zfsas_send_h($label); ?></option>
-                    <?php endforeach; ?>
-                  </select>
+                  <?php $jobTransport = (string) ($job['transport'] ?? 'local'); ?>
+                  <?php if (array_key_exists($jobTransport, zfsas_send_gui_transport_options())) : ?>
+                    <select name="job_transport[<?php echo (int) $index; ?>]" class="zfsas-send-select">
+                      <?php foreach (zfsas_send_gui_transport_options() as $value => $label) : ?>
+                        <option value="<?php echo zfsas_send_h($value); ?>" <?php echo ($value === $jobTransport) ? 'selected' : ''; ?>><?php echo zfsas_send_h($label); ?></option>
+                      <?php endforeach; ?>
+                    </select>
+                  <?php else : ?>
+                    <input type="hidden" name="job_transport[<?php echo (int) $index; ?>]" value="<?php echo zfsas_send_h($jobTransport); ?>">
+                    <span class="zfsas-send-help">Unavailable transport saved in config</span>
+                  <?php endif; ?>
                 </td>
                 <td><input class="zfsas-send-input" name="job_threshold[<?php echo (int) $index; ?>]" value="<?php echo zfsas_send_h($job['threshold']); ?>"></td>
                 <td>
@@ -660,11 +638,11 @@ if ($isPostRequest) {
         <div class="zfsas-send-field">
           <label for="new_job_transport">Transport</label>
           <select id="new_job_transport" name="new_job_transport" class="zfsas-send-select">
-            <?php foreach (zfsas_send_transport_options() as $value => $label) : ?>
+            <?php foreach (zfsas_send_gui_transport_options() as $value => $label) : ?>
               <option value="<?php echo zfsas_send_h($value); ?>"><?php echo zfsas_send_h($label); ?></option>
             <?php endforeach; ?>
           </select>
-          <div class="zfsas-send-help">SSH sends run zfs send through an audited ssh receive command on the configured receiver. spiped settings are staged for encrypted sender/receiver coordination, but spiped jobs fail closed until receiver-side snapshot inventory and receive verification are implemented.</div>
+          <div class="zfsas-send-help">SSH sends run zfs send through an audited ssh receive command on the configured receiver.</div>
         </div>
         <div class="zfsas-send-field">
           <label for="new_job_threshold">Destination free-space target</label>

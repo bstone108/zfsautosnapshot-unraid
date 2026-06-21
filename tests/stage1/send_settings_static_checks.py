@@ -36,8 +36,16 @@ def main() -> int:
         "function zfsas_send_normalize_transport",
         "send settings must have explicit transport-mode normalization before network-send fields are accepted",
     )
-    if "spiped (network, not enabled yet)" in text:
-        raise AssertionError("send transport selector must not label spiped as disabled after sender pipeline support is wired")
+    assert_contains(
+        text,
+        "function zfsas_send_gui_transport_options",
+        "send settings must keep a separate GUI transport list so unfinished transports can remain wired but hidden",
+    )
+    assert_contains(
+        text,
+        "unset($options['spiped'])",
+        "send settings GUI must hide unfinished spiped transport while preserving backend config parsing",
+    )
     assert_contains(
         text,
         "$transportRaw = $pieces[6] ?? 'local';",
@@ -128,31 +136,32 @@ def main() -> int:
         "SEND_SPIPED_REMOTE_PORT",
         "send settings must persist the remote spiped receiver port separately from the local listener",
     )
-    assert_contains(
-        settings,
+    for hidden_field in (
         'name="send_spiped_key_path"',
-        "send settings UI must expose a spiped key path field rather than raw key contents",
-    )
-    assert_contains(
-        settings,
         'name="send_spiped_remote_host"',
-        "send settings UI must expose the remote spiped host used by sender-side spipe",
+        'name="send_spiped_port"',
+        'name="send_spiped_listen_host"',
+        'name="send_spiped_remote_port"',
+    ):
+        if hidden_field in settings:
+            raise AssertionError("send settings UI must not expose unfinished spiped fields")
+    assert_contains(
+        settings,
+        "zfsas_send_gui_transport_options()",
+        "send settings UI must use the GUI-safe transport options list",
     )
     assert_contains(
         settings,
-        'name="send_spiped_port"',
-        "send settings UI must expose a spiped port field near network transport controls",
+        "Unavailable transport saved in config",
+        "send settings UI must preserve existing hidden/future transports without exposing them for new selection",
     )
     assert_contains(
         settings,
         "SSH sends run zfs send through an audited ssh receive command",
         "send settings UI must explain that SSH transport is an active transfer path, not only saved future metadata",
     )
-    assert_contains(
-        settings,
-        "spiped settings are staged for encrypted sender/receiver coordination",
-        "send settings UI must explain that spiped is not active until receiver-side inventory/verification is implemented",
-    )
+    if "spiped" in settings.lower():
+        raise AssertionError("send settings UI must not show unfinished spiped copy or controls")
     if "spiped sends stream through the configured remote spipe endpoint" in settings:
         raise AssertionError("send settings UI must not claim spiped jobs are active while worker fail-closed receiver inventory is still pending")
     if "Network transport choices are saved for future receiver plumbing; local sends remain the active transfer path." in settings:
@@ -191,8 +200,8 @@ def main() -> int:
     )
     assert_contains(
         readme,
-        "spiped settings are present for staged encrypted transport work, but spiped jobs currently fail closed",
-        "README ZFS Send section must document spiped's current fail-closed staged status",
+        "spiped code and config plumbing are retained for future encrypted transport work, but the feature is incomplete and intentionally hidden from the WebGUI",
+        "README ZFS Send section must document spiped's incomplete hidden status",
     )
     assert_contains(
         readme,

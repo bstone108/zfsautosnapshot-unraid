@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.06.21.t04 (Testing Branch Only)
+
+- Removed unfinished spiped controls from the ZFS Send WebGUI while keeping the staged backend/config plumbing in place for future work. Existing hidden spiped jobs are preserved in config, but the GUI no longer offers spiped for new jobs.
+
 ### 2026.06.21.t03 (Testing Branch Only)
 
 - Fixed remote ZFS send finalizers so zero-byte coordinator work skips destination space reservation instead of waiting forever on remote capacity checks. This lets completed child sends finish their coordinator and leave the queue normally.

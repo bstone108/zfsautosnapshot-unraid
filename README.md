@@ -114,7 +114,7 @@ Transport choices are per send job:
 
 - Local sends replicate to a destination dataset visible on the same Unraid host.
 - SSH transport can send over the network using non-interactive SSH. Configure the remote host, port, user, and optional local private-key path; the plugin stores connection metadata and paths, not raw passwords or private-key contents.
-- spiped settings are present for staged encrypted transport work, but spiped jobs currently fail closed until receiver-side snapshot inventory and receive verification are implemented. Use SSH for active network sends until that receiver-safety work is complete.
+- spiped code and config plumbing are retained for future encrypted transport work, but the feature is incomplete and intentionally hidden from the WebGUI. Use SSH for active network sends until spiped receiver-side inventory and receive verification are implemented.
 
 Destination cleanup uses the same keep-all, daily, and weekly style retention policy. The newest confirmed send checkpoint is protected so the next incremental send still has a base snapshot. For SSH sends, cleanup/protection uses remote SSH destination snapshots instead of assuming the destination dataset exists locally.
 
