@@ -2883,7 +2883,7 @@ build_ssh_zfs_command() {
   local ssh_user="${SEND_SSH_USER:-$DEFAULT_SEND_SSH_USER}"
   local ssh_key_path="$SEND_SSH_KEY_PATH"
   local remote_target built_command part
-  local -a ssh_parts=(ssh -o BatchMode=yes -o PasswordAuthentication=no)
+  local -a ssh_parts=(ssh -o BatchMode=yes -o PasswordAuthentication=no -o StrictHostKeyChecking=yes -o UpdateHostKeys=no)
 
   printf -v "$result_var" ''
   [[ -n "$remote_zfs_command" ]] || return 1

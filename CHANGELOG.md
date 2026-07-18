@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.07.18.t02 (Testing Branch Only)
+
+- Hardened SSH replication host verification: sends now require the pinned host key and do not rewrite known-host entries while connecting.
+
 ### 2026.07.18.t01 (Testing Branch Only)
 
 - Added resumable SSH ZFS receives. If a remote receive is interrupted, the sender now detects the receiver's saved token and resumes the matching stream instead of restarting it. Unsafe or mismatched saved tokens fail closed for review.

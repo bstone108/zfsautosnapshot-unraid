@@ -39,6 +39,8 @@ fi
 assert_contains "$command" "ssh" "SSH receive command must use ssh"
 assert_contains "$command" "BatchMode=yes" "SSH receive command must remain non-interactive"
 assert_contains "$command" "PasswordAuthentication=no" "SSH receive command must not fall back to password prompts"
+assert_contains "$command" "StrictHostKeyChecking=yes" "SSH receive command must require the pinned receiver host key"
+assert_contains "$command" "UpdateHostKeys=no" "SSH receive command must not rewrite pinned receiver host-key state"
 assert_contains "$command" "-p 2222" "SSH receive command must include configured port"
 assert_contains "$command" "replicator@backup.example.test" "SSH receive command must target configured user and host"
 assert_contains "$command" "zfs\\ receive" "SSH receive command must carry remote zfs receive command"
