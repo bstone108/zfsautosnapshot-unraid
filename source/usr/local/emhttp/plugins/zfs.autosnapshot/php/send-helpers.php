@@ -305,6 +305,18 @@ function zfsas_send_normalize_parallel_limit($value)
     return (string) $value;
 }
 
+function zfsas_send_normalize_rate_limit($value)
+{
+    $value = zfsas_send_trim($value);
+    if ($value === '' || $value === '0') {
+        return '0';
+    }
+    if (preg_match('/^[1-9][0-9]*[bBkKmMgG]?$/', $value) !== 1) {
+        return null;
+    }
+    return $value;
+}
+
 function zfsas_send_normalize_prep_extra_workers($value)
 {
     $value = (int) $value;
@@ -334,6 +346,7 @@ function zfsas_send_defaults()
     return [
         'SEND_SNAPSHOT_PREFIX' => 'zfs-send-',
         'SEND_MAX_PARALLEL' => '1',
+        'SEND_RATE_LIMIT' => '0',
         'SEND_PREP_EXTRA_WORKERS' => '16',
         'SEND_KEEP_ALL_FOR_DAYS' => '14',
         'SEND_KEEP_DAILY_UNTIL_DAYS' => '30',
@@ -738,6 +751,9 @@ function zfsas_send_render_config($config)
     $lines[] = '# Maximum number of queued ZFS send jobs allowed to transfer in parallel.';
     $lines[] = 'SEND_MAX_PARALLEL=' . zfsas_send_normalize_parallel_limit($config['SEND_MAX_PARALLEL']);
     $lines[] = '';
+    $lines[] = '# Maximum outbound ZFS stream rate through mbuffer; 0 disables throttling.';
+    $lines[] = 'SEND_RATE_LIMIT=' . zfsas_send_quote_config_string(zfsas_send_normalize_rate_limit($config['SEND_RATE_LIMIT'] ?? '0') ?? '0');
+    $lines[] = '';
     $lines[] = '# Extra queue worker processes allowed to prepare snapshots, estimate space, and wait before transfer slots open.';
     $lines[] = 'SEND_PREP_EXTRA_WORKERS=' . zfsas_send_normalize_prep_extra_workers($config['SEND_PREP_EXTRA_WORKERS'] ?? '16');
     $lines[] = '';
@@ -804,6 +820,7 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
     $submitted = $config;
     $submitted['SEND_SNAPSHOT_PREFIX'] = zfsas_send_trim($post['send_snapshot_prefix'] ?? $submitted['SEND_SNAPSHOT_PREFIX']);
     $submitted['SEND_MAX_PARALLEL'] = zfsas_send_normalize_parallel_limit($post['send_max_parallel'] ?? $submitted['SEND_MAX_PARALLEL']);
+    $submitted['SEND_RATE_LIMIT'] = zfsas_send_normalize_rate_limit($post['send_rate_limit'] ?? ($submitted['SEND_RATE_LIMIT'] ?? '0'));
     $submitted['SEND_PREP_EXTRA_WORKERS'] = zfsas_send_normalize_prep_extra_workers($post['send_prep_extra_workers'] ?? ($submitted['SEND_PREP_EXTRA_WORKERS'] ?? '16'));
     $submitted['SEND_KEEP_ALL_FOR_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_all_for_days'] ?? $submitted['SEND_KEEP_ALL_FOR_DAYS'], 14);
     $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'] = zfsas_send_normalize_retention_days($post['send_keep_daily_until_days'] ?? $submitted['SEND_KEEP_DAILY_UNTIL_DAYS'], 30);
@@ -825,6 +842,10 @@ function zfsas_send_handle_save_request($post, $configDir, $configFile, $syncScr
         $errors[] = 'Send snapshot prefix cannot contain @.';
     } elseif (preg_match('/^[A-Za-z0-9._:-]+$/', $submitted['SEND_SNAPSHOT_PREFIX']) !== 1) {
         $errors[] = 'Send snapshot prefix can only contain letters, numbers, dot, underscore, colon, and dash.';
+    }
+    if ($submitted['SEND_RATE_LIMIT'] === null) {
+        $errors[] = 'Outbound rate limit must be 0 or a positive mbuffer rate such as 1M or 8M.';
+        $submitted['SEND_RATE_LIMIT'] = zfsas_send_trim($post['send_rate_limit'] ?? '');
     }
 
     if (zfsas_snapshot_prefixes_conflict($autoSnapshotPrefix, $submitted['SEND_SNAPSHOT_PREFIX'])) {

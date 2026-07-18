@@ -24,6 +24,7 @@ function base_post($transport) {
     return [
         'send_snapshot_prefix' => 'zfs-send-',
         'send_max_parallel' => '1',
+        'send_rate_limit' => '1M',
         'send_prep_extra_workers' => '16',
         'send_keep_all_for_days' => '14',
         'send_keep_daily_until_days' => '30',
@@ -74,6 +75,7 @@ $validSsh['send_ssh_port'] = '22';
 $validSsh['send_ssh_user'] = 'root';
 $validSshResult = zfsas_send_handle_save_request($validSsh, $configDir, $configFile, $syncScript, $config, '/Settings/ZFSSnapshots');
 assert_true($validSshResult['saved'], 'SSH jobs with receiver host and non-interactive/preconfigured auth should still save.');
+assert_true(strpos(file_get_contents($configFile), 'SEND_RATE_LIMIT="1M"') !== false, 'Saved SSH send settings must persist the configured outbound rate limit.');
 
 @unlink($configFile);
 @rmdir($configDir);

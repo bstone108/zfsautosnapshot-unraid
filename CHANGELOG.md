@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.07.18.t04 (Testing Branch Only)
+
+- Added an Outbound stream rate limit field to the ZFS Send WebGUI. It validates and saves the same `SEND_RATE_LIMIT` used by the send pipeline; use `0` to disable or a rate such as `1M`/`8M` to protect an Internet-constrained link.
+
 ### 2026.07.18.t03 (Testing Branch Only)
 
 - Made interrupted-receive probing fail closed: a new SSH receive is allowed only after the receiver explicitly reports that the target dataset does not exist. Fixed pipeline failure diagnostics to retain actual component exit statuses.

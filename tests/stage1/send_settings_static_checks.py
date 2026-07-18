@@ -103,6 +103,16 @@ def main() -> int:
     )
     assert_contains(
         settings,
+        'name="send_rate_limit"',
+        "send settings UI must expose an outbound stream rate limit",
+    )
+    assert_contains(
+        text,
+        "function zfsas_send_normalize_rate_limit",
+        "send settings must validate the outbound stream rate limit",
+    )
+    assert_contains(
+        settings,
         'name="send_ssh_key_path"',
         "send settings UI must expose an SSH key path field rather than a raw private-key/password field",
     )
