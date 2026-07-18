@@ -42,6 +42,7 @@ assert_contains "$command" "PasswordAuthentication=no" "SSH receive command must
 assert_contains "$command" "-p 2222" "SSH receive command must include configured port"
 assert_contains "$command" "replicator@backup.example.test" "SSH receive command must target configured user and host"
 assert_contains "$command" "zfs\\ receive" "SSH receive command must carry remote zfs receive command"
+assert_contains "$command" "zfs\\ receive\\ -s\\ -uF" "SSH receive command must preserve partial receives for resumable transfers"
 assert_contains "$command" "backup/root" "SSH receive command must include destination dataset"
 assert_not_contains "$command" " -i " "SSH receive command must not include an empty identity-file argument"
 
@@ -375,5 +376,61 @@ if run_pipeline_with_status "spiped staged pipeline guard" "" "source/data@zfs-s
   fail "spiped pipelines must fail closed until receiver inventory/verification is implemented"
 fi
 [[ ! -e "$spiped_send_marker" ]] || fail "spiped fail-closed guard must stop before zfs send is invoked"
+
+# SSH sends must resume a saved receiver stream before selecting/restarting a
+# normal full or incremental pipeline.  The remote receive token is bound to
+# the source snapshot reported by `zfs send -nvt`; a mismatched token must fail
+# closed rather than letting -F discard the receiver's saved state.
+resume_send_marker="${retention_root}/resume-zfs-send-called"
+normal_send_marker="${retention_root}/normal-zfs-send-called"
+cat >"${tmp_bin}/ssh" <<'SSH_RESUME_FAKE'
+#!/bin/bash
+remote_command="${*: -1}"
+case "$remote_command" in
+  *"zfs list -H -o name -- backup/data"*)
+    printf '%s\n' "backup/data"
+    exit 0
+    ;;
+  *"zfs get -H -o value receive_resume_token -- backup/data"*)
+    printf '%s\n' "1-fake-resume-token"
+    exit 0
+    ;;
+  *"zfs receive -s -uF -- backup/data"*)
+    cat >/dev/null
+    exit 0
+    ;;
+esac
+exit 1
+SSH_RESUME_FAKE
+chmod +x "${tmp_bin}/ssh"
+zfs() {
+  case "$1" in
+    send)
+      if [[ " $* " == *" -nvt 1-fake-resume-token "* ]]; then
+        printf '%s\n' "resume token contents:" "    toname = source/data@zfs-send-feedfacecafe-new"
+        return 0
+      fi
+      if [[ " $* " == *" -t 1-fake-resume-token "* ]]; then
+        : >"$resume_send_marker"
+        printf '%s' "resumed-stream"
+        return 0
+      fi
+      : >"$normal_send_marker"
+      return 91
+      ;;
+  esac
+  return 1
+}
+declare -gA job=()
+job[SEND_TRANSPORT]="ssh"
+SEND_SSH_HOST="backup.example.test"
+SEND_SSH_PORT="2222"
+SEND_SSH_USER="replicator"
+SEND_SSH_KEY_PATH=""
+if ! run_pipeline_with_status "resume saved SSH stream" "" "source/data@zfs-send-feedfacecafe-new" "backup/data" 0 0 99; then
+  fail "SSH pipeline must resume a matching receiver token"
+fi
+[[ -e "$resume_send_marker" ]] || fail "SSH resume must invoke zfs send -t with the receiver token"
+[[ ! -e "$normal_send_marker" ]] || fail "SSH resume must not restart a normal send while a valid receiver token exists"
 
 printf '%s\n' "PASS: send transport command checks"

@@ -2917,7 +2917,9 @@ build_ssh_receive_command() {
 
   printf -v "$result_var" ''
   is_valid_dataset_name "$destination" || return 1
-  remote_receive="zfs receive -uF -- $(shell_quote_word "$destination")"
+  # -s preserves partial receive state and exposes receive_resume_token after
+  # an interrupted stream, allowing zfs send -t to resume rather than resend.
+  remote_receive="zfs receive -s -uF -- $(shell_quote_word "$destination")"
   build_ssh_zfs_command "$remote_receive" "$result_var"
 }
 
@@ -2993,6 +2995,52 @@ ssh_dataset_exists() {
   eval "$command" >/dev/null 2>&1
 }
 
+# Return 0 with a saved token, 1 when no partial receive exists, and 2 when
+# receiver state cannot be established safely.  A remote query error must not
+# be mistaken for an empty resume token, or a new receive could replace state.
+ssh_receive_resume_token() {
+  local dataset="$1"
+  local result_var="$2"
+  local command output rc
+
+  printf -v "$result_var" ''
+  is_valid_dataset_name "$dataset" || return 2
+  if ! ssh_dataset_exists "$dataset"; then
+    return 1
+  fi
+  build_ssh_zfs_command "zfs get -H -o value receive_resume_token -- $(shell_quote_word "$dataset")" command || return 2
+  output="$(eval "$command" 2>/dev/null)"
+  rc=$?
+  (( rc == 0 )) || return 2
+  output="$(trim "$output")"
+  [[ -n "$output" && "$output" != "-" && "$output" != "none" ]] || return 1
+  [[ "$output" != *$'\n'* && "$output" != *$'\r'* ]] || return 2
+  printf -v "$result_var" '%s' "$output"
+  return 0
+}
+
+# zfs send -nvt validates the token against local source snapshots and reports
+# the source snapshot it will complete.  Do not resume a token for a different
+# scheduled checkpoint; that situation needs operator resolution, not -F.
+resume_token_target_snapshot() {
+  local resume_token="$1"
+  local result_var="$2"
+  local inspection line candidate=""
+
+  printf -v "$result_var" ''
+  [[ -n "$resume_token" && "$resume_token" != *$'\n'* && "$resume_token" != *$'\r'* ]] || return 1
+  inspection="$(zfs send -nvt "$resume_token" 2>&1)" || return 1
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^[[:space:]]*toname[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+      candidate="$(trim "${BASH_REMATCH[1]}")"
+      break
+    fi
+  done <<<"$inspection"
+  is_valid_snapshot_name "$candidate" || return 1
+  printf -v "$result_var" '%s' "$candidate"
+  return 0
+}
+
 ssh_snapshot_exists() {
   local snapshot="$1"
   local command
@@ -3047,6 +3095,9 @@ run_pipeline_with_status() {
   local send_transport
   local receive_command=""
   local spiped_message=""
+  local resume_token=""
+  local resume_snapshot=""
+  local resume_query_rc=0
 
   is_valid_snapshot_name "$snapshot" || {
     log "Refusing pipeline for invalid snapshot name: $snapshot"
@@ -3071,6 +3122,35 @@ run_pipeline_with_status() {
     if ! build_ssh_receive_command "$destination" receive_command; then
       log "Unsupported ZFS send transport '$send_transport' requested for $description; SSH receiver settings are incomplete or invalid."
       return 1
+    fi
+    if ssh_receive_resume_token "$destination" resume_token; then
+      if ! resume_token_target_snapshot "$resume_token" resume_snapshot; then
+        log "Refusing SSH send for ${destination}: receiver has an unreadable receive_resume_token; inspect or explicitly abort the interrupted receive on the receiver."
+        return 1
+      fi
+      if [[ "$resume_snapshot" != "$snapshot" ]]; then
+        log "Refusing SSH send for ${destination}: receiver resume token targets ${resume_snapshot}, but this job targets ${snapshot}. Resolve the saved receive before starting another stream."
+        return 1
+      fi
+      log "Resuming interrupted SSH receive for ${snapshot} -> ${destination}."
+      zfsas_send_debug_marker "pipeline_resume_start snapshot=${snapshot} destination=${destination} transport=ssh"
+      zfs send -t "$resume_token" | eval "$receive_command"
+      pipeline_rc=$?
+      send_rc=${PIPESTATUS[0]:-0}
+      receive_rc=${PIPESTATUS[1]:-0}
+      if (( pipeline_rc != 0 )); then
+        log "Resumed SSH send pipeline failed: snapshot=${snapshot} destination=${destination} send_exit=${send_rc} receive_exit=${receive_rc}"
+        zfsas_send_debug_marker "pipeline_resume_failed snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} receive_exit=${receive_rc}"
+        return 1
+      fi
+      zfsas_send_debug_marker "pipeline_resume_complete snapshot=${snapshot} destination=${destination} send_exit=${send_rc} receive_exit=${receive_rc}"
+      return 0
+    else
+      resume_query_rc=$?
+      if (( resume_query_rc != 1 )); then
+        log "Unable to query SSH receiver resume state for ${destination}; refusing to start a new receive."
+        return 1
+      fi
     fi
   fi
   if [[ "$send_transport" == "spiped" ]]; then

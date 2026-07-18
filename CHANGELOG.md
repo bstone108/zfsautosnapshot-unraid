@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.07.18.t01 (Testing Branch Only)
+
+- Added resumable SSH ZFS receives. If a remote receive is interrupted, the sender now detects the receiver's saved token and resumes the matching stream instead of restarting it. Unsafe or mismatched saved tokens fail closed for review.
+
 ### 2026.06.21.t04 (Testing Branch Only)
 
 - Removed unfinished spiped controls from the ZFS Send WebGUI while keeping the staged backend/config plumbing in place for future work. Existing hidden spiped jobs are preserved in config, but the GUI no longer offers spiped for new jobs.
