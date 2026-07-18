@@ -385,16 +385,27 @@ fi
 # closed rather than letting -F discard the receiver's saved state.
 resume_send_marker="${retention_root}/resume-zfs-send-called"
 normal_send_marker="${retention_root}/normal-zfs-send-called"
+rate_limit_marker="${retention_root}/rate-limit-called"
+cat >"${tmp_bin}/mbuffer" <<'MBUFFER_RATE_FAKE'
+#!/bin/bash
+[[ " $* " == *" -q -R 20M "* ]] || exit 66
+: >"$RATE_LIMIT_MARKER"
+cat
+MBUFFER_RATE_FAKE
+chmod +x "${tmp_bin}/mbuffer"
 cat >"${tmp_bin}/ssh" <<'SSH_RESUME_FAKE'
 #!/bin/bash
 remote_command="${*: -1}"
+if [[ "${SSH_RESUME_MODE:-resume}" == "probe_failure" && "$remote_command" == *"zfs list -H -o name -- backup/data"* ]]; then
+  exit 77
+fi
 case "$remote_command" in
-  *"zfs list -H -o name -- backup/data"*)
-    printf '%s\n' "backup/data"
-    exit 0
-    ;;
   *"zfs get -H -o value receive_resume_token -- backup/data"*)
     printf '%s\n' "1-fake-resume-token"
+    exit 0
+    ;;
+  *"zfs list -H -o name -- backup/data"*)
+    printf '%s\n' "backup/data"
     exit 0
     ;;
   *"zfs receive -s -uF -- backup/data"*)
@@ -414,6 +425,9 @@ zfs() {
       fi
       if [[ " $* " == *" -t 1-fake-resume-token "* ]]; then
         : >"$resume_send_marker"
+        if [[ "${SSH_RESUME_MODE:-resume}" == "sender_failure" ]]; then
+          return 17
+        fi
         printf '%s' "resumed-stream"
         return 0
       fi
@@ -429,10 +443,36 @@ SEND_SSH_HOST="backup.example.test"
 SEND_SSH_PORT="2222"
 SEND_SSH_USER="replicator"
 SEND_SSH_KEY_PATH=""
+SEND_RATE_LIMIT="20M"
+export RATE_LIMIT_MARKER="$rate_limit_marker"
 if ! run_pipeline_with_status "resume saved SSH stream" "" "source/data@zfs-send-feedfacecafe-new" "backup/data" 0 0 99; then
   fail "SSH pipeline must resume a matching receiver token"
 fi
 [[ -e "$resume_send_marker" ]] || fail "SSH resume must invoke zfs send -t with the receiver token"
 [[ ! -e "$normal_send_marker" ]] || fail "SSH resume must not restart a normal send while a valid receiver token exists"
+[[ -e "$rate_limit_marker" ]] || fail "configured send rate limit must route the resumed stream through mbuffer -R"
+
+# A failed remote dataset probe is not proof that a receiver dataset is absent.
+# It must fail closed instead of allowing a new zfs receive -F path to start.
+export SSH_RESUME_MODE="probe_failure"
+resume_token=""
+if ssh_receive_resume_token "backup/data" resume_token; then
+  fail "SSH resume-token probe must reject a failed remote dataset lookup"
+else
+  probe_rc=$?
+  [[ "$probe_rc" -eq 2 ]] || fail "SSH resume-token probe failure must return the fail-closed status"
+fi
+unset SSH_RESUME_MODE
+
+# Capture each resume pipeline component status before PIPESTATUS is overwritten
+# by later assignments, so diagnostics identify the failed side of the stream.
+rm -f "$resume_send_marker" "$normal_send_marker"
+export SSH_RESUME_MODE="sender_failure"
+if resume_failure_output="$(run_pipeline_with_status "resume sender failure" "" "source/data@zfs-send-feedfacecafe-new" "backup/data" 0 0 99 2>&1)"; then
+  fail "SSH resume must fail when zfs send -t fails"
+fi
+assert_contains "$resume_failure_output" "send_exit=17" "resume failure diagnostics must report the sender exit status"
+assert_contains "$resume_failure_output" "receive_exit=0" "resume failure diagnostics must report the receiver exit status"
+unset SSH_RESUME_MODE
 
 printf '%s\n' "PASS: send transport command checks"
