@@ -511,6 +511,11 @@ if ($isPostRequest) {
           <input id="send_max_parallel" name="send_max_parallel" class="zfsas-send-input" type="number" min="1" max="8" value="<?php echo zfsas_send_h($config['SEND_MAX_PARALLEL']); ?>">
           <div class="zfsas-send-help">How many queued send jobs may transfer at the same time. Deletes still run one at a time.</div>
         </div>
+        <div class="zfsas-send-field">
+          <label for="send_rate_limit">Outbound stream rate limit</label>
+          <input id="send_rate_limit" name="send_rate_limit" class="zfsas-send-input" value="<?php echo zfsas_send_h($config['SEND_RATE_LIMIT'] ?? '0'); ?>" placeholder="1M">
+          <div class="zfsas-send-help">Caps every ZFS send stream before SSH using mbuffer. Use 0 to disable, or a positive rate such as 1M or 8M. Keep this non-zero on Internet-constrained links.</div>
+        </div>
       </div>
 
       <div class="zfsas-send-card" style="margin-top: 14px;">

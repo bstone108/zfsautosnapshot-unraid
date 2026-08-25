@@ -47,6 +47,7 @@ ZFSAS_SEND_DEBUG_MARKERS="${ZFSAS_SEND_DEBUG_MARKERS:-1}"
 
 DEFAULT_SEND_SNAPSHOT_PREFIX="zfs-send-"
 DEFAULT_SEND_MAX_PARALLEL="1"
+DEFAULT_SEND_RATE_LIMIT="0"
 DEFAULT_SEND_PREP_EXTRA_WORKERS="16"
 DEFAULT_SEND_KEEP_ALL_FOR_DAYS="14"
 DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS="30"
@@ -64,6 +65,7 @@ DELETE_QUEUE_IDLE_TIMEOUT_SECONDS="${DELETE_QUEUE_IDLE_TIMEOUT_SECONDS:-30}"
 
 SEND_SNAPSHOT_PREFIX="$DEFAULT_SEND_SNAPSHOT_PREFIX"
 SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
+SEND_RATE_LIMIT="$DEFAULT_SEND_RATE_LIMIT"
 SEND_PREP_EXTRA_WORKERS="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
 SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
 SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
@@ -732,6 +734,7 @@ load_send_config() {
 
   SEND_SNAPSHOT_PREFIX="$DEFAULT_SEND_SNAPSHOT_PREFIX"
   SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
+  SEND_RATE_LIMIT="$DEFAULT_SEND_RATE_LIMIT"
   SEND_PREP_EXTRA_WORKERS="$DEFAULT_SEND_PREP_EXTRA_WORKERS"
   SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
   SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
@@ -758,7 +761,7 @@ load_send_config() {
       raw="${BASH_REMATCH[2]}"
       value="$(parse_config_value "$raw")"
       case "$key" in
-        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_SSH_HOST|SEND_SSH_PORT|SEND_SSH_USER|SEND_SSH_KEY_PATH|SEND_SPIPED_LISTEN_HOST|SEND_SPIPED_PORT|SEND_SPIPED_REMOTE_HOST|SEND_SPIPED_REMOTE_PORT|SEND_SPIPED_KEY_PATH|SEND_JOBS)
+        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_RATE_LIMIT|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_SSH_HOST|SEND_SSH_PORT|SEND_SSH_USER|SEND_SSH_KEY_PATH|SEND_SPIPED_LISTEN_HOST|SEND_SPIPED_PORT|SEND_SPIPED_REMOTE_HOST|SEND_SPIPED_REMOTE_PORT|SEND_SPIPED_KEY_PATH|SEND_JOBS)
           printf -v "$key" '%s' "$value"
           ;;
       esac
@@ -897,6 +900,28 @@ parse_send_transport() {
       ;;
   esac
   return 1
+}
+
+# Mbuffer's rate syntax is deliberately narrow here: a positive byte rate with
+# an optional supported suffix.  "0" disables throttling.
+is_valid_send_rate_limit() {
+  local value="$(trim "${1:-0}")"
+  [[ "$value" == "0" ]] && return 0
+  [[ "$value" =~ ^[1-9][0-9]*[bBkKmMgG]?$ ]]
+}
+
+build_send_rate_limiter_command() {
+  local result_var="$1"
+  local rate_limit="$(trim "${SEND_RATE_LIMIT:-$DEFAULT_SEND_RATE_LIMIT}")"
+  local built_command
+
+  printf -v "$result_var" ''
+  [[ -n "$rate_limit" ]] || rate_limit="$DEFAULT_SEND_RATE_LIMIT"
+  is_valid_send_rate_limit "$rate_limit" || return 1
+  [[ "$rate_limit" == "0" ]] && return 0
+  command -v mbuffer >/dev/null 2>&1 || return 1
+  built_command="mbuffer -q -R $(shell_quote_word "$rate_limit")"
+  printf -v "$result_var" '%s' "$built_command"
 }
 
 parse_send_jobs_config() {
@@ -2883,7 +2908,7 @@ build_ssh_zfs_command() {
   local ssh_user="${SEND_SSH_USER:-$DEFAULT_SEND_SSH_USER}"
   local ssh_key_path="$SEND_SSH_KEY_PATH"
   local remote_target built_command part
-  local -a ssh_parts=(ssh -o BatchMode=yes -o PasswordAuthentication=no)
+  local -a ssh_parts=(ssh -o BatchMode=yes -o PasswordAuthentication=no -o StrictHostKeyChecking=yes -o UpdateHostKeys=no)
 
   printf -v "$result_var" ''
   [[ -n "$remote_zfs_command" ]] || return 1
@@ -2917,7 +2942,9 @@ build_ssh_receive_command() {
 
   printf -v "$result_var" ''
   is_valid_dataset_name "$destination" || return 1
-  remote_receive="zfs receive -uF -- $(shell_quote_word "$destination")"
+  # -s preserves partial receive state and exposes receive_resume_token after
+  # an interrupted stream, allowing zfs send -t to resume rather than resend.
+  remote_receive="zfs receive -s -uF -- $(shell_quote_word "$destination")"
   build_ssh_zfs_command "$remote_receive" "$result_var"
 }
 
@@ -2993,6 +3020,55 @@ ssh_dataset_exists() {
   eval "$command" >/dev/null 2>&1
 }
 
+# Return 0 with a saved token, 1 when no partial receive exists, and 2 when
+# receiver state cannot be established safely.  A remote query error must not
+# be mistaken for an empty resume token, or a new receive could replace state.
+ssh_receive_resume_token() {
+  local dataset="$1"
+  local result_var="$2"
+  local command output rc
+  local absent_marker="__ZFSAS_RECEIVER_DATASET_ABSENT__"
+  local remote_probe
+
+  printf -v "$result_var" ''
+  is_valid_dataset_name "$dataset" || return 2
+  # Positively distinguish an absent receiver dataset from a failed probe.
+  # zfs receive -F must never be allowed after an ambiguous SSH/ZFS failure.
+  remote_probe="probe_error=\$(zfs list -H -o name -- $(shell_quote_word "$dataset") 2>&1); probe_rc=\$?; if [ \"\$probe_rc\" -eq 0 ]; then zfs get -H -o value receive_resume_token -- $(shell_quote_word "$dataset"); else case \"\$probe_error\" in *\"dataset does not exist\"*) printf '%s\\n' $(shell_quote_word "$absent_marker");; *) printf '%s\\n' \"\$probe_error\" >&2; exit \"\$probe_rc\";; esac; fi"
+  build_ssh_zfs_command "$remote_probe" command || return 2
+  output="$(eval "$command" 2>/dev/null)"
+  rc=$?
+  (( rc == 0 )) || return 2
+  output="$(trim "$output")"
+  [[ "$output" != "$absent_marker" ]] || return 1
+  [[ -n "$output" && "$output" != "-" && "$output" != "none" ]] || return 1
+  [[ "$output" != *$'\n'* && "$output" != *$'\r'* ]] || return 2
+  printf -v "$result_var" '%s' "$output"
+  return 0
+}
+
+# zfs send -nvt validates the token against local source snapshots and reports
+# the source snapshot it will complete.  Do not resume a token for a different
+# scheduled checkpoint; that situation needs operator resolution, not -F.
+resume_token_target_snapshot() {
+  local resume_token="$1"
+  local result_var="$2"
+  local inspection line candidate=""
+
+  printf -v "$result_var" ''
+  [[ -n "$resume_token" && "$resume_token" != *$'\n'* && "$resume_token" != *$'\r'* ]] || return 1
+  inspection="$(zfs send -nvt "$resume_token" 2>&1)" || return 1
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^[[:space:]]*toname[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+      candidate="$(trim "${BASH_REMATCH[1]}")"
+      break
+    fi
+  done <<<"$inspection"
+  is_valid_snapshot_name "$candidate" || return 1
+  printf -v "$result_var" '%s' "$candidate"
+  return 0
+}
+
 ssh_snapshot_exists() {
   local snapshot="$1"
   local command
@@ -3043,10 +3119,16 @@ run_pipeline_with_status() {
   local send_rc=0
   local meter_rc=0
   local receive_rc=0
+  local rate_rc=0
   local progress_supported=0
   local send_transport
   local receive_command=""
+  local rate_limiter_command=""
   local spiped_message=""
+  local resume_token=""
+  local resume_snapshot=""
+  local resume_query_rc=0
+  local -a pipeline_status=()
 
   is_valid_snapshot_name "$snapshot" || {
     log "Refusing pipeline for invalid snapshot name: $snapshot"
@@ -3067,10 +3149,55 @@ run_pipeline_with_status() {
     log "Refusing send pipeline for invalid transport: $send_transport"
     return 1
   }
+  if ! build_send_rate_limiter_command rate_limiter_command; then
+    log "Refusing send pipeline for ${description}: SEND_RATE_LIMIT must be 0 or a positive mbuffer rate such as 20M, and mbuffer must be installed when enabled."
+    return 1
+  fi
   if [[ "$send_transport" == "ssh" ]]; then
     if ! build_ssh_receive_command "$destination" receive_command; then
       log "Unsupported ZFS send transport '$send_transport' requested for $description; SSH receiver settings are incomplete or invalid."
       return 1
+    fi
+    if ssh_receive_resume_token "$destination" resume_token; then
+      if ! resume_token_target_snapshot "$resume_token" resume_snapshot; then
+        log "Refusing SSH send for ${destination}: receiver has an unreadable receive_resume_token; inspect or explicitly abort the interrupted receive on the receiver."
+        return 1
+      fi
+      if [[ "$resume_snapshot" != "$snapshot" ]]; then
+        log "Refusing SSH send for ${destination}: receiver resume token targets ${resume_snapshot}, but this job targets ${snapshot}. Resolve the saved receive before starting another stream."
+        return 1
+      fi
+      log "Resuming interrupted SSH receive for ${snapshot} -> ${destination}."
+      zfsas_send_debug_marker "pipeline_resume_start snapshot=${snapshot} destination=${destination} transport=ssh rate_limit=${SEND_RATE_LIMIT:-0}"
+      if [[ -n "$rate_limiter_command" ]]; then
+        zfs send -t "$resume_token" | eval "$rate_limiter_command" | eval "$receive_command"
+        pipeline_status=("${PIPESTATUS[@]}")
+        send_rc=${pipeline_status[0]:-0}
+        rate_rc=${pipeline_status[1]:-0}
+        receive_rc=${pipeline_status[2]:-0}
+      else
+        zfs send -t "$resume_token" | eval "$receive_command"
+        pipeline_status=("${PIPESTATUS[@]}")
+        send_rc=${pipeline_status[0]:-0}
+        receive_rc=${pipeline_status[1]:-0}
+      fi
+      pipeline_rc=0
+      (( send_rc != 0 )) && pipeline_rc=$send_rc
+      (( rate_rc != 0 )) && pipeline_rc=$rate_rc
+      (( receive_rc != 0 )) && pipeline_rc=$receive_rc
+      if (( pipeline_rc != 0 )); then
+        log "Resumed SSH send pipeline failed: snapshot=${snapshot} destination=${destination} send_exit=${send_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
+        zfsas_send_debug_marker "pipeline_resume_failed snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
+        return 1
+      fi
+      zfsas_send_debug_marker "pipeline_resume_complete snapshot=${snapshot} destination=${destination} send_exit=${send_rc} receive_exit=${receive_rc}"
+      return 0
+    else
+      resume_query_rc=$?
+      if (( resume_query_rc != 1 )); then
+        log "Unable to query SSH receiver resume state for ${destination}; refusing to start a new receive."
+        return 1
+      fi
     fi
   fi
   if [[ "$send_transport" == "spiped" ]]; then
@@ -3081,6 +3208,9 @@ run_pipeline_with_status() {
     log "Unsupported ZFS send transport '$send_transport' requested for $description; spiped receiver inventory and receive verification are not implemented yet."
     return 1
   fi
+  if [[ "$send_transport" == "local" ]]; then
+    receive_command="zfs receive -uF -- $(shell_quote_word "$destination")"
+  fi
 
   log "$description (transport=$send_transport)"
   zfsas_send_debug_marker "pipeline_start mode=$([[ -n "$base_snapshot" ]] && printf incremental || printf full) base=${base_snapshot:-none} snapshot=${snapshot} destination=${destination} transport=${send_transport} progress_total_bytes=${progress_total_bytes} progress_window=${progress_start_percent}-${progress_end_percent}"
@@ -3090,54 +3220,82 @@ run_pipeline_with_status() {
 
   if [[ -n "$base_snapshot" ]]; then
     if (( progress_supported == 1 )); then
-      if [[ "$send_transport" == "ssh" || "$send_transport" == "spiped" ]]; then
+      if [[ -n "$rate_limiter_command" ]]; then
+        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$rate_limiter_command" | eval "$receive_command"
+        pipeline_status=("${PIPESTATUS[@]}")
+        send_rc=${pipeline_status[0]:-0}
+        meter_rc=${pipeline_status[1]:-0}
+        rate_rc=${pipeline_status[2]:-0}
+        receive_rc=${pipeline_status[3]:-0}
+      else
         zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command"
-      else
-        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | zfs receive -uF "$destination"
+        pipeline_status=("${PIPESTATUS[@]}")
+        send_rc=${pipeline_status[0]:-0}
+        meter_rc=${pipeline_status[1]:-0}
+        receive_rc=${pipeline_status[2]:-0}
       fi
-      pipeline_rc=$?
-      send_rc=${PIPESTATUS[0]:-0}
-      meter_rc=${PIPESTATUS[1]:-0}
-      receive_rc=${PIPESTATUS[2]:-0}
     else
-      if [[ "$send_transport" == "ssh" || "$send_transport" == "spiped" ]]; then
-        zfs send -I "$base_snapshot" "$snapshot" | eval "$receive_command"
+      if [[ -n "$rate_limiter_command" ]]; then
+        zfs send -I "$base_snapshot" "$snapshot" | eval "$rate_limiter_command" | eval "$receive_command"
+        pipeline_status=("${PIPESTATUS[@]}")
+        send_rc=${pipeline_status[0]:-0}
+        rate_rc=${pipeline_status[1]:-0}
+        receive_rc=${pipeline_status[2]:-0}
       else
-        zfs send -I "$base_snapshot" "$snapshot" | zfs receive -uF "$destination"
+        zfs send -I "$base_snapshot" "$snapshot" | eval "$receive_command"
+        pipeline_status=("${PIPESTATUS[@]}")
+        send_rc=${pipeline_status[0]:-0}
+        receive_rc=${pipeline_status[1]:-0}
       fi
-      pipeline_rc=$?
-      send_rc=${PIPESTATUS[0]:-0}
-      receive_rc=${PIPESTATUS[1]:-0}
     fi
+    pipeline_rc=0
+    (( send_rc != 0 )) && pipeline_rc=$send_rc
+    (( meter_rc != 0 )) && pipeline_rc=$meter_rc
+    (( rate_rc != 0 )) && pipeline_rc=$rate_rc
+    (( receive_rc != 0 )) && pipeline_rc=$receive_rc
     if (( pipeline_rc != 0 )); then
-      log "Send pipeline failed: mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
-      zfsas_send_debug_marker "pipeline_failed mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
+      log "Send pipeline failed: mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
+      zfsas_send_debug_marker "pipeline_failed mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
       return 1
     fi
   else
     if (( progress_supported == 1 )); then
-      if [[ "$send_transport" == "ssh" || "$send_transport" == "spiped" ]]; then
+      if [[ -n "$rate_limiter_command" ]]; then
+        zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$rate_limiter_command" | eval "$receive_command"
+        pipeline_status=("${PIPESTATUS[@]}")
+        send_rc=${pipeline_status[0]:-0}
+        meter_rc=${pipeline_status[1]:-0}
+        rate_rc=${pipeline_status[2]:-0}
+        receive_rc=${pipeline_status[3]:-0}
+      else
         zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command"
-      else
-        zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | zfs receive -uF "$destination"
+        pipeline_status=("${PIPESTATUS[@]}")
+        send_rc=${pipeline_status[0]:-0}
+        meter_rc=${pipeline_status[1]:-0}
+        receive_rc=${pipeline_status[2]:-0}
       fi
-      pipeline_rc=$?
-      send_rc=${PIPESTATUS[0]:-0}
-      meter_rc=${PIPESTATUS[1]:-0}
-      receive_rc=${PIPESTATUS[2]:-0}
     else
-      if [[ "$send_transport" == "ssh" || "$send_transport" == "spiped" ]]; then
-        zfs send "$snapshot" | eval "$receive_command"
+      if [[ -n "$rate_limiter_command" ]]; then
+        zfs send "$snapshot" | eval "$rate_limiter_command" | eval "$receive_command"
+        pipeline_status=("${PIPESTATUS[@]}")
+        send_rc=${pipeline_status[0]:-0}
+        rate_rc=${pipeline_status[1]:-0}
+        receive_rc=${pipeline_status[2]:-0}
       else
-        zfs send "$snapshot" | zfs receive -uF "$destination"
+        zfs send "$snapshot" | eval "$receive_command"
+        pipeline_status=("${PIPESTATUS[@]}")
+        send_rc=${pipeline_status[0]:-0}
+        receive_rc=${pipeline_status[1]:-0}
       fi
-      pipeline_rc=$?
-      send_rc=${PIPESTATUS[0]:-0}
-      receive_rc=${PIPESTATUS[1]:-0}
     fi
+    pipeline_rc=0
+    (( send_rc != 0 )) && pipeline_rc=$send_rc
+    (( meter_rc != 0 )) && pipeline_rc=$meter_rc
+    (( rate_rc != 0 )) && pipeline_rc=$rate_rc
+    (( receive_rc != 0 )) && pipeline_rc=$receive_rc
     if (( pipeline_rc != 0 )); then
-      log "Send pipeline failed: mode=full snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
-      zfsas_send_debug_marker "pipeline_failed mode=full snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
+      log "Send pipeline failed: mode=full snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
+      zfsas_send_debug_marker "pipeline_failed mode=full snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
       return 1
     fi
   fi
