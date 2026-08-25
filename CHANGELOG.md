@@ -12,7 +12,7 @@ It answers one question: "What changed for me?"
 - Added optional outbound stream throttling via `SEND_RATE_LIMIT` and `mbuffer -R` (for example `8M`); `0` leaves throttling disabled.
 - Added an Outbound stream rate limit field to the ZFS Send WebGUI. It validates and saves the same `SEND_RATE_LIMIT` used by the send pipeline; use `0` to disable or a rate such as `1M`/`8M` to protect an Internet-constrained link.
 - Made interrupted-receive probing fail closed: a new SSH receive is allowed only after the receiver explicitly reports that the target dataset does not exist. Pipeline failure diagnostics now retain actual component exit statuses.
-- Removed testing-only ZFS send debug log markers from the public package so `/var/log/zfs_autosnapshot_send.log` is no longer filled with `TESTING_DEBUG_MARKER` breadcrumbs.
+- Removed testing-only ZFS send debug log markers from the public package so send logs stay focused on real send progress and errors.
 
 ### 2026.06.21.01 (2026-06-21)
 
