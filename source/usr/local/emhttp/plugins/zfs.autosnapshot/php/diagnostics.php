@@ -377,16 +377,13 @@ function zfsas_diagnostics_write_log_summary($baseDir, $relativePath, $sourcePat
         'command_not_found' => '/command not found/i',
         'permission_denied' => '/permission denied/i',
         'traceback' => '/traceback/i',
-        'testing_debug_marker' => '/TESTING_DEBUG_MARKER/',
     ];
     $counts = array_fill_keys(array_keys($patterns), 0);
     foreach ($lines as $line) {
         foreach ($patterns as $key => $pattern) {
             if (preg_match($pattern, $line)) {
                 $counts[$key]++;
-                if ($key !== 'testing_debug_marker') {
-                    $notable[] = $line;
-                }
+                $notable[] = $line;
             }
         }
     }

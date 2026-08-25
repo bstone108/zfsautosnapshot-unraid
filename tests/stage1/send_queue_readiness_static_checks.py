@@ -282,8 +282,8 @@ def main() -> int:
     )
     assert_contains(
         approve_body,
-        "space_reservation_skipped job_id=${job_id}",
-        "zero-byte space bypass should emit a debug marker for troubleshooting stuck finalizers",
+        'launch_job[LAST_MESSAGE]="Destination space approval not required."',
+        "zero-byte space bypass must mark the job approved without waiting on destination capacity",
     )
     if approve_body.find("if (( required_bytes == 0 )); then") > approve_body.find("acquire_send_space_reservation_for_transport"):
         raise AssertionError(
@@ -368,7 +368,7 @@ def main() -> int:
         )
     if "action=purge_destination_for_reseed" in pre_ssh_no_common_body:
         raise AssertionError(
-            "scheduled no-common debug marker must not claim purge_destination_for_reseed before the SSH fail-closed branch"
+            "scheduled no-common handling must not claim purge_destination_for_reseed before the SSH fail-closed branch"
         )
     ssh_no_common_body = scheduled_no_common_body.split('if [[ "$send_transport" == "ssh" ]]; then', 1)[1].split("        fi", 1)[0]
     if "purge_destination_for_reseed" in ssh_no_common_body or "action=purge_destination_for_reseed" in ssh_no_common_body:
