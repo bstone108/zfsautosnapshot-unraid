@@ -41,9 +41,6 @@ LOG_FILE="/var/log/zfs_autosnapshot_send.log"
 LOG_ARCHIVE_FILE="/var/log/zfs_autosnapshot_send.archive.log"
 SEND_LOG_MAX_BYTES="${SEND_LOG_MAX_BYTES:-2097152}"
 SEND_LOG_ARCHIVE_MAX_BYTES="${SEND_LOG_ARCHIVE_MAX_BYTES:-4194304}"
-# TESTING_DEBUG_MARKER: Enabled on the testing branch to collect detailed ZFS send behavior.
-# Strip this setting and zfsas_send_debug_marker calls before promoting to main/release.
-ZFSAS_SEND_DEBUG_MARKERS="${ZFSAS_SEND_DEBUG_MARKERS:-1}"
 
 DEFAULT_SEND_SNAPSHOT_PREFIX="zfs-send-"
 DEFAULT_SEND_MAX_PARALLEL="1"
@@ -118,12 +115,6 @@ SEND_PROTECTED_BASENAME_CACHE_LOADED=0
 
 log() {
   printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$(zfsas_log_sanitize_text "$*")"
-}
-
-zfsas_send_debug_marker() {
-  [[ "${ZFSAS_SEND_DEBUG_MARKERS:-0}" == "1" ]] || return 0
-  # TESTING_DEBUG_MARKER: testing-only behavioral breadcrumb. Remove before main/release promotion.
-  log "TESTING_DEBUG_MARKER zfs_send $*"
 }
 
 find_mdcmd() {
@@ -1686,7 +1677,6 @@ acquire_send_space_reservation_for_transport() {
   }
 
   cleanup_stale_send_space_reservations_locked
-  zfsas_send_debug_marker "space_reservation_check job_id=${job_id} destination=${destination} capacity_dataset=${capacity_dataset} required=${required_bytes} buffer=${buffer_bytes} needed=${needed}"
   if send_space_effective_avail_after_reservations_locked_for_transport "$capacity_dataset" "$job_id" available "$transport" && (( available >= needed )); then
     reservation_file="$(send_space_reservation_file_for_job "$job_id")"
     reservation[JOB_ID]="$job_id"
@@ -1705,7 +1695,6 @@ acquire_send_space_reservation_for_transport() {
     }
     flock -u "$fd" || true
     eval "exec ${fd}>&-"
-    zfsas_send_debug_marker "space_reservation_acquired job_id=${job_id} destination=${destination} capacity_dataset=${capacity_dataset} available_after_existing=${available} needed=${needed} required=${required_bytes} buffer=${buffer_bytes}"
     printf -v "$available_var" '%s' "$available"
     printf -v "$needed_var" '%s' "$needed"
     return 0
@@ -1713,7 +1702,6 @@ acquire_send_space_reservation_for_transport() {
 
   flock -u "$fd" || true
   eval "exec ${fd}>&-"
-  zfsas_send_debug_marker "space_reservation_denied job_id=${job_id} destination=${destination} capacity_dataset=${capacity_dataset} available=${available:-0} needed=${needed} required=${required_bytes} buffer=${buffer_bytes}"
   printf -v "$available_var" '%s' "${available:-0}"
   printf -v "$needed_var" '%s' "$needed"
   return 1
@@ -1787,7 +1775,6 @@ adopt_send_space_reservation_for_job() {
   }
   flock -u "$fd" || true
   eval "exec ${fd}>&-"
-  zfsas_send_debug_marker "space_reservation_adopted job_id=${job_id} pid=${pid}"
   return 0
 }
 
@@ -1843,7 +1830,6 @@ acquire_send_transfer_slot() {
     if mkdir "$lock_dir" 2>/dev/null; then
       printf '%s\n' "$pid" > "${lock_dir}/pid" 2>/dev/null || true
       printf '%s\n' "$job_id" > "${lock_dir}/job_id" 2>/dev/null || true
-      zfsas_send_debug_marker "transfer_slot_acquired job_id=${job_id} slot=${slot} lock_dir=${lock_dir}"
       printf -v "$result_var" '%s' "$lock_dir"
       return 0
     fi
@@ -1854,7 +1840,6 @@ acquire_send_transfer_slot() {
       if mkdir "$lock_dir" 2>/dev/null; then
         printf '%s\n' "$pid" > "${lock_dir}/pid" 2>/dev/null || true
         printf '%s\n' "$job_id" > "${lock_dir}/job_id" 2>/dev/null || true
-        zfsas_send_debug_marker "transfer_slot_recovered job_id=${job_id} slot=${slot} lock_dir=${lock_dir}"
         printf -v "$result_var" '%s' "$lock_dir"
         return 0
       fi
@@ -3168,7 +3153,6 @@ run_pipeline_with_status() {
         return 1
       fi
       log "Resuming interrupted SSH receive for ${snapshot} -> ${destination}."
-      zfsas_send_debug_marker "pipeline_resume_start snapshot=${snapshot} destination=${destination} transport=ssh rate_limit=${SEND_RATE_LIMIT:-0}"
       if [[ -n "$rate_limiter_command" ]]; then
         zfs send -t "$resume_token" | eval "$rate_limiter_command" | eval "$receive_command"
         pipeline_status=("${PIPESTATUS[@]}")
@@ -3187,10 +3171,8 @@ run_pipeline_with_status() {
       (( receive_rc != 0 )) && pipeline_rc=$receive_rc
       if (( pipeline_rc != 0 )); then
         log "Resumed SSH send pipeline failed: snapshot=${snapshot} destination=${destination} send_exit=${send_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
-        zfsas_send_debug_marker "pipeline_resume_failed snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
         return 1
       fi
-      zfsas_send_debug_marker "pipeline_resume_complete snapshot=${snapshot} destination=${destination} send_exit=${send_rc} receive_exit=${receive_rc}"
       return 0
     else
       resume_query_rc=$?
@@ -3213,7 +3195,6 @@ run_pipeline_with_status() {
   fi
 
   log "$description (transport=$send_transport)"
-  zfsas_send_debug_marker "pipeline_start mode=$([[ -n "$base_snapshot" ]] && printf incremental || printf full) base=${base_snapshot:-none} snapshot=${snapshot} destination=${destination} transport=${send_transport} progress_total_bytes=${progress_total_bytes} progress_window=${progress_start_percent}-${progress_end_percent}"
   if [[ "$progress_total_bytes" =~ ^[0-9]+$ ]] && (( progress_total_bytes > 0 )) && dd_status_progress_supported; then
     progress_supported=1
   fi
@@ -3255,7 +3236,6 @@ run_pipeline_with_status() {
     (( receive_rc != 0 )) && pipeline_rc=$receive_rc
     if (( pipeline_rc != 0 )); then
       log "Send pipeline failed: mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
-      zfsas_send_debug_marker "pipeline_failed mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
       return 1
     fi
   else
@@ -3295,12 +3275,10 @@ run_pipeline_with_status() {
     (( receive_rc != 0 )) && pipeline_rc=$receive_rc
     if (( pipeline_rc != 0 )); then
       log "Send pipeline failed: mode=full snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
-      zfsas_send_debug_marker "pipeline_failed mode=full snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
       return 1
     fi
   fi
 
-  zfsas_send_debug_marker "pipeline_complete mode=$([[ -n "$base_snapshot" ]] && printf incremental || printf full) base=${base_snapshot:-none} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} receive_exit=${receive_rc}"
   return 0
 }
 
@@ -3668,7 +3646,6 @@ find_latest_common_basename_for_member() {
       printf -v "$result_name_var" '%s' "$snap_base"
     fi
   done <<< "$source_inventory"
-  zfsas_send_debug_marker "latest_common_scan source=${source_dataset} destination=${dest_dataset} prefix=${prefix} source_matches=${source_count} destination_matches=${dest_count} latest_common=${!result_name_var:-none}"
 }
 
 find_latest_common_snapshot_for_target() {
@@ -3735,7 +3712,6 @@ find_latest_common_basename_for_member_transport() {
       printf -v "$result_name_var" '%s' "$snap_base"
     fi
   done <<< "$source_inventory"
-  zfsas_send_debug_marker "latest_common_scan source=${source_dataset} destination=${dest_dataset} prefix=${prefix} transport=${transport} source_matches=${source_count} destination_matches=${dest_count} latest_common=${!result_name_var:-none}"
 }
 
 find_latest_common_snapshot_for_target_transport() {
@@ -5455,7 +5431,6 @@ approve_send_job_space_for_launch() {
     launch_job[LAST_MESSAGE]="Destination space approval not required."
     launch_job[SPACE_APPROVED_AT]="$(date +%s)"
     job_write "$job_path" launch_job || true
-    zfsas_send_debug_marker "space_reservation_skipped job_id=${job_id} destination=${destination} required=0 reason=no_transfer_space_required"
     return 0
   fi
 
@@ -5480,13 +5455,11 @@ approve_send_job_space_for_launch() {
 
   if (( shortfall <= 0 || freeing_bytes >= shortfall )); then
     defer_send_launch_approval "$job_path" launch_job "Waiting for ZFS freeing to satisfy destination space." 3
-    zfsas_send_debug_marker "space_approval_wait_freeing job_id=${job_id} destination=${destination} available=${available_bytes} needed=${needed_bytes} freeing=${freeing_bytes}"
     return 1
   fi
 
   if pool_has_active_delete_jobs "$dest_pool"; then
     defer_send_launch_approval "$job_path" launch_job "Waiting for queued destination cleanup to free space." 3
-    zfsas_send_debug_marker "space_approval_wait_delete_queue job_id=${job_id} destination=${destination} pool=${dest_pool} available=${available_bytes} needed=${needed_bytes} freeing=${freeing_bytes}"
     return 1
   fi
 
