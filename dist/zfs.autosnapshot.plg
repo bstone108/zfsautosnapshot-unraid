@@ -1,7 +1,11 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.07.18.t04" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.09.24.t01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.07.18.t04 (2026-07-18)
+### 2026.09.24.t01 (2026-09-24)
+- If a dataset migration is interrupted, Unraid raises an alert that the migration was interrupted, apps may not function properly until it finishes, the migration will resume in about 15 minutes, and non-functioning apps should be ignored until then.
+- The migration records an in-progress flag on the boot drive. The existing once-a-minute queue check restarts recovery or the migration when that flag is present and the migrator is not running.
+- Interrupted folders keep the original folder name in a recognizable temporary name so a restart can tell which folder was being migrated.
+- Snapshot Manager keeps the manage-snapshots panel at the top of the visible window when you scroll the embedded page.
 - Added an Outbound stream rate limit field to the ZFS Send WebGUI. It validates and saves SEND_RATE_LIMIT; use 0 to disable or a rate such as 1M/8M to protect an Internet-constrained link.
 - Made interrupted-receive probing fail closed: a new SSH receive is allowed only after the receiver explicitly reports that the target dataset does not exist. Fixed pipeline failure diagnostics to retain actual component exit statuses.
 - Added optional outbound stream throttling via SEND_RATE_LIMIT and mbuffer -R (for example 8M); 0 leaves throttling disabled.
@@ -14,9 +18,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.07.18.t04-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.07.18.t04-noarch-1.txz</URL>
-    <MD5>02f33953965c6ce7fbecc1550e3e898d</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.09.24.t01-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.09.24.t01-noarch-1.txz</URL>
+    <MD5>9f0443ffdb7436d927fb443d826dc84b</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -24,10 +28,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.07.18.t04-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.09.24.t01-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="02f33953965c6ce7fbecc1550e3e898d"
+PKG_MD5="9f0443ffdb7436d927fb443d826dc84b"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
