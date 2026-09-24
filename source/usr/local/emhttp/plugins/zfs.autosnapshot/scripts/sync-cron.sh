@@ -275,6 +275,9 @@ trap cleanup_cron_tmp EXIT
 {
 	echo "# Managed by ${PLUGIN_NAME}; edit ${CONFIG_FILE}"
 	# Unraid uses BusyBox crond format in /etc/cron.d: no username column.
+	# The queue kicker also resumes an interrupted dataset migration when
+	# migration.inprogress or recovery.env is still on the boot config and
+	# the migrator process is not running.
 	if [[ -n "$CRON_SCHEDULE_EFFECTIVE" ]]; then
 		echo "${CRON_SCHEDULE_EFFECTIVE} ${RUN_CMD} >> /var/log/zfs_autosnapshot.log 2>&1"
 	fi
@@ -287,7 +290,7 @@ trap - EXIT
 refresh_cron_runtime
 
 if [[ -n "$CRON_SCHEDULE_EFFECTIVE" ]]; then
-	echo "Cron schedule applied: $CRON_SCHEDULE_EFFECTIVE (queue kicker checks every minute and starts the live queue handler when needed)"
+	echo "Cron schedule applied: $CRON_SCHEDULE_EFFECTIVE (queue kicker checks every minute, starts the live queue handler when needed, and resumes an interrupted dataset migration)"
 else
-	echo "Main autosnapshot schedule disabled; queue kicker still checks every minute and starts the live queue handler when needed."
+	echo "Main autosnapshot schedule disabled; queue kicker still checks every minute, starts the live queue handler when needed, and resumes an interrupted dataset migration."
 fi

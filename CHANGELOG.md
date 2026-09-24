@@ -5,6 +5,13 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.09.24.t01 (Testing Branch Only)
+
+- If a dataset migration is interrupted, Unraid raises an alert that the migration was interrupted, apps may not function properly until it finishes, the migration will resume in about 15 minutes, and non-functioning apps should be ignored until then.
+- The migration records an in-progress flag on the boot drive. The existing once-a-minute queue check restarts recovery or the migration when that flag is present and the migrator is not running.
+- Interrupted folders keep the original folder name in a recognizable temporary name so a restart can tell which folder was being migrated.
+- Snapshot Manager keeps the manage-snapshots panel at the top of the visible window when you scroll the embedded page, without letting the panel run below the window.
+
 ### 2026.07.18.t04 (Testing Branch Only)
 
 - Added an Outbound stream rate limit field to the ZFS Send WebGUI. It validates and saves the same `SEND_RATE_LIMIT` used by the send pipeline; use `0` to disable or a rate such as `1M`/`8M` to protect an Internet-constrained link.
