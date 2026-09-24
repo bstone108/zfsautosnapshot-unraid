@@ -215,6 +215,27 @@ function zfsas_migrate_is_valid_child_name($name)
     return preg_match('/^[A-Za-z0-9._:+\-]+$/', (string) $name) === 1;
 }
 
+function zfsas_migrate_original_name_from_temp($name)
+{
+    $name = (string) $name;
+    $marker = '.__migration_tmp__.';
+    $pos = strpos($name, $marker);
+    if ($pos === false || $pos < 1) {
+        return '';
+    }
+
+    $original = substr($name, 0, $pos);
+    $suffix = substr($name, $pos + strlen($marker));
+    if (preg_match('/^[0-9]+\.[0-9]+\.[0-9]+$/', $suffix) !== 1) {
+        return '';
+    }
+    if (!zfsas_migrate_is_valid_child_name($original)) {
+        return '';
+    }
+
+    return $original;
+}
+
 function zfsas_migrate_dataset_mountpoint($dataset, &$error = null)
 {
     $error = null;
@@ -367,7 +388,12 @@ function zfsas_migrate_preview_dataset($dataset, &$error = null, $includeSizes =
 
         if (strpos($name, '.__migration_tmp__.') !== false) {
             $state = 'temp_leftover';
-            $message = 'Leftover temporary directory from an earlier migration attempt.';
+            $originalName = zfsas_migrate_original_name_from_temp($name);
+            if ($originalName !== '') {
+                $message = 'Leftover temporary directory for "' . $originalName . '". The migration was not completed.';
+            } else {
+                $message = 'Leftover temporary directory from an earlier migration attempt.';
+            }
             $eligible = false;
         } elseif (!zfsas_migrate_is_valid_child_name($name)) {
             $state = 'invalid_name';

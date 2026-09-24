@@ -17,13 +17,20 @@ STATUS_FILE="${ZFSAS_MIGRATOR_STATUS_FILE:-${PLUGIN_ROOT}/status.env}"
 FOLDERS_FILE="${ZFSAS_MIGRATOR_FOLDERS_FILE:-${PLUGIN_ROOT}/folders.tsv}"
 CONTAINERS_FILE="${ZFSAS_MIGRATOR_CONTAINERS_FILE:-${PLUGIN_ROOT}/containers.tsv}"
 RECOVERY_STATE_FILE="${ZFSAS_MIGRATOR_RECOVERY_STATE_FILE:-${PLUGIN_ROOT}/recovery.env}"
+RECOVERY_ALERT_STAMP="${ZFSAS_MIGRATOR_RECOVERY_ALERT_STAMP:-${PLUGIN_ROOT}/recovery.alert}"
+IN_PROGRESS_FLAG="${ZFSAS_MIGRATOR_IN_PROGRESS_FLAG:-${PLUGIN_ROOT}/migration.inprogress}"
 LOG_FILE="${ZFSAS_MIGRATOR_LOG_FILE:-/var/log/zfs_autosnapshot_migrate_datasets.log}"
 LOG_ARCHIVE_FILE="${ZFSAS_MIGRATOR_LOG_ARCHIVE_FILE:-/var/log/zfs_autosnapshot_migrate_datasets.archive.log}"
 LOCK_FILE="${ZFSAS_MIGRATOR_LOCK_FILE:-/var/run/zfs-autosnapshot-migrator/migrator.lock}"
 SPACE_RECHECK_SECONDS="${ZFSAS_MIGRATOR_SPACE_RECHECK_SECONDS:-300}"
 RESTART_RETRY_DELAY="${ZFSAS_MIGRATOR_RESTART_RETRY_DELAY:-300}"
 RECOVERY_BOOT_DELAY_SECONDS="${ZFSAS_MIGRATOR_RECOVERY_BOOT_DELAY_SECONDS:-900}"
+MIGRATION_TEMP_MARKER=".__migration_tmp__."
+INTERRUPTED_MIGRATION_ALERT_SUBJECT="Dataset migration was interrupted"
+INTERRUPTED_MIGRATION_ALERT_DESCRIPTION="Dataset migration was interrupted before it finished. Apps may not function properly until the migration completes. Migration will be resumed in about 15 minutes, and apps should begin functioning properly again after that. Until migration is completed, ignore any non-functioning apps caused by the incomplete migration."
 RUN_RECOVERY=0
+KICK_IF_IDLE=0
+IN_PROGRESS_FLAG_PREEXISTED=0
 ABSOLUTE_SAFETY_MARGIN=$((1024 * 1024 * 1024))
 PERCENT_SAFETY_MARGIN=10
 CURRENT_FOLDER_INDEX=-1
@@ -54,6 +61,7 @@ RECOVERY_SOURCE_PATH=""
 RECOVERY_TEMP_PATH=""
 RECOVERY_TARGET_DATASET=""
 RECOVERY_BATCH_CONTAINERS=""
+RECOVERY_ORIGINAL_NAME=""
 
 TOTAL_FOLDERS=0
 COMPLETED_FOLDERS=0
@@ -272,6 +280,7 @@ RECOVERY_SOURCE_PATH="$(kv_escape "$RECOVERY_SOURCE_PATH")"
 RECOVERY_TEMP_PATH="$(kv_escape "$RECOVERY_TEMP_PATH")"
 RECOVERY_TARGET_DATASET="$(kv_escape "$RECOVERY_TARGET_DATASET")"
 RECOVERY_BATCH_CONTAINERS="$(kv_escape "$RECOVERY_BATCH_CONTAINERS")"
+RECOVERY_ORIGINAL_NAME="$(kv_escape "$RECOVERY_ORIGINAL_NAME")"
 DATASET="$(kv_escape "$ACTIVE_DATASET")"
 STARTED_EPOCH="$(kv_escape "$STARTED_EPOCH")"
 UPDATED_EPOCH="$(date +%s)"
@@ -287,7 +296,8 @@ clear_recovery_state() {
   RECOVERY_TEMP_PATH=""
   RECOVERY_TARGET_DATASET=""
   RECOVERY_BATCH_CONTAINERS=""
-  rm -f -- "$RECOVERY_STATE_FILE" >/dev/null 2>&1 || true
+  RECOVERY_ORIGINAL_NAME=""
+  rm -f -- "$RECOVERY_STATE_FILE" "$RECOVERY_ALERT_STAMP" >/dev/null 2>&1 || true
 }
 
 load_tsv_state_for_recovery() {
@@ -359,11 +369,219 @@ load_tsv_state_for_recovery() {
 
 load_recovery_state() {
   [[ -r "$RECOVERY_STATE_FILE" ]] || return 1
+  RECOVERY_ORIGINAL_NAME=""
   # shellcheck source=/dev/null
   source "$RECOVERY_STATE_FILE"
   ACTIVE_DATASET="${DATASET:-$ACTIVE_DATASET}"
   RECOVERY_BATCH_CONTAINERS="$(normalize_word_list "${RECOVERY_BATCH_CONTAINERS:-}")"
   load_tsv_state_for_recovery
+  return 0
+}
+
+normalize_state_token() {
+  local value="$1"
+  value="$(trim "$value")"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value,,}"
+  printf '%s' "$value"
+}
+
+state_token_is_actionable() {
+  case "$(normalize_state_token "$1")" in
+    1|yes|true|started|started_mounted|mounted|array_started|array_started_mounted|running)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+state_token_is_not_actionable() {
+  case "$(normalize_state_token "$1")" in
+    0|no|false|stopped|stopping|starting|shutdown|shutting_down|array_stopped|array_stopping|array_starting)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+migration_host_ready() {
+  local status_text key value
+  status_text="$(get_unraid_array_status 2>/dev/null || true)"
+  [[ -n "$status_text" ]] || return 0
+  for key in mdState fsState sbState started; do
+    value="$(printf '%s\n' "$status_text" | extract_status_value "$key")"
+    [[ -n "$value" ]] || continue
+    if state_token_is_actionable "$value"; then
+      return 0
+    fi
+    if state_token_is_not_actionable "$value"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+notify_interrupted_migration() {
+  local subject="$INTERRUPTED_MIGRATION_ALERT_SUBJECT"
+  local description="$INTERRUPTED_MIGRATION_ALERT_DESCRIPTION"
+  local notify_bin=""
+  ensure_dir "$(dirname "$RECOVERY_ALERT_STAMP")"
+  if ! (set -o noclobber; printf '%s\n' "$(date +%s)" > "$RECOVERY_ALERT_STAMP") 2>/dev/null; then
+    return 0
+  fi
+  log "Unraid alert: ${subject} — ${description}"
+  notify_bin="${ZFSAS_NOTIFY_BIN:-}"
+  if [[ -z "$notify_bin" ]]; then
+    if [[ -x /usr/local/emhttp/webGui/scripts/notify ]]; then
+      notify_bin="/usr/local/emhttp/webGui/scripts/notify"
+    elif command -v notify >/dev/null 2>&1; then
+      notify_bin="$(command -v notify)"
+    fi
+  fi
+  if [[ -n "$notify_bin" && -x "$notify_bin" ]]; then
+    "$notify_bin" \
+      -e "ZFS Auto Snapshot Dataset Migration" \
+      -s "$subject" \
+      -d "$description" \
+      -m "$description" \
+      -i "alert" || log "Unraid notify command failed."
+    return 0
+  fi
+  if [[ -f /usr/local/emhttp/webGui/include/Notifications.php ]] && command -v php >/dev/null 2>&1; then
+    ZFSAS_ALERT_EVENT="ZFS Auto Snapshot Dataset Migration" \
+      ZFSAS_ALERT_SUBJECT="$subject" \
+      ZFSAS_ALERT_DESCRIPTION="$description" \
+      php -r '
+        require_once "/usr/local/emhttp/webGui/include/Notifications.php";
+        if (!class_exists("Notifications")) { exit(0); }
+        $notifications = new Notifications();
+        $notifications->notify(getenv("ZFSAS_ALERT_EVENT"), getenv("ZFSAS_ALERT_SUBJECT"), getenv("ZFSAS_ALERT_DESCRIPTION"), getenv("ZFSAS_ALERT_DESCRIPTION"), "alert");
+      ' || log "Unraid Notifications.php alert failed."
+    return 0
+  fi
+  log "Unraid notify is unavailable. The interruption alert was recorded in the migrator log only."
+}
+
+write_in_progress_flag() {
+  [[ -n "$ACTIVE_DATASET" ]] || return 0
+  cat > "$IN_PROGRESS_FLAG" <<EOF
+DATASET="$(kv_escape "$ACTIVE_DATASET")"
+STARTED_EPOCH="$(kv_escape "$STARTED_EPOCH")"
+PID="$(kv_escape "$$")"
+EOF
+  chmod 0640 "$IN_PROGRESS_FLAG" >/dev/null 2>&1 || true
+  apply_owner "$IN_PROGRESS_FLAG"
+}
+
+clear_in_progress_flag() {
+  rm -f -- "$IN_PROGRESS_FLAG" >/dev/null 2>&1 || true
+}
+
+read_in_progress_dataset() {
+  local line value
+  [[ -r "$IN_PROGRESS_FLAG" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^DATASET=\"(.*)\"$ ]] || continue
+    value="${BASH_REMATCH[1]}"
+    value="${value//\\\"/\"}"
+    value="${value//\\\\/\\}"
+    printf '%s' "$value"
+    return 0
+  done < "$IN_PROGRESS_FLAG"
+  return 1
+}
+
+migration_temp_name() {
+  local name="$1"
+  printf '%s' "${name}${MIGRATION_TEMP_MARKER}$(date +%s).$$.$RANDOM"
+}
+
+original_name_from_migration_temp() {
+  local base="$1"
+  local prefix suffix
+  [[ "$base" == *"$MIGRATION_TEMP_MARKER"* ]] || return 1
+  prefix="${base%%"$MIGRATION_TEMP_MARKER"*}"
+  suffix="${base#*"$MIGRATION_TEMP_MARKER"}"
+  [[ -n "$prefix" && "$prefix" != "$base" ]] || return 1
+  [[ "$suffix" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  [[ "$prefix" =~ ^[A-Za-z0-9._:+\-]+$ ]] || return 1
+  printf '%s' "$prefix"
+}
+
+discover_leftover_temp_recovery() {
+  local mountpoint child name original target_dataset
+  [[ -n "$ACTIVE_DATASET" ]] || return 1
+  [[ -e "$RECOVERY_STATE_FILE" ]] && return 1
+  mountpoint="$(zfs get -H -o value mountpoint "$ACTIVE_DATASET" 2>/dev/null | head -n 1 || true)"
+  [[ -n "$mountpoint" && "$mountpoint" != "legacy" && "$mountpoint" != "none" && -d "$mountpoint" ]] || return 1
+  while IFS= read -r -d '' child; do
+    name="$(basename "$child")"
+    original="$(original_name_from_migration_temp "$name" || true)"
+    [[ -n "$original" ]] || continue
+    target_dataset="${ACTIVE_DATASET}/${original}"
+    RECOVERY_PHASE="renamed_source"
+    if dataset_exists "$target_dataset"; then
+      RECOVERY_PHASE="dataset_created"
+    fi
+    RECOVERY_FOLDER_INDEX="-1"
+    RECOVERY_SOURCE_PATH="${mountpoint}/${original}"
+    RECOVERY_TEMP_PATH="$child"
+    RECOVERY_TARGET_DATASET="$target_dataset"
+    RECOVERY_ORIGINAL_NAME="$original"
+    RECOVERY_BATCH_CONTAINERS="${RECOVERY_BATCH_CONTAINERS:-}"
+    write_recovery_state
+    log "Recognized incomplete migration temp folder '$name' as original folder '$original'."
+    return 0
+  done < <(find "$mountpoint" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+  return 1
+}
+
+migrator_lock_is_held() {
+  ensure_dir "$(dirname "$LOCK_FILE")"
+  if (
+    flock -n 8
+  ) 8>"$LOCK_FILE"; then
+    return 1
+  fi
+  return 0
+}
+
+spawn_migrator() {
+  local arg line=""
+  if [[ -n "${ZFSAS_MIGRATOR_SPAWN_LOG:-}" ]]; then
+    for arg in "$@"; do
+      line+="${line:+ }${arg}"
+    done
+    printf '%s\n' "$line" >> "$ZFSAS_MIGRATOR_SPAWN_LOG"
+    return 0
+  fi
+  nohup "$0" "$@" >/dev/null 2>&1 &
+}
+
+kick_pending_migration() {
+  local dataset=""
+  if ! migration_host_ready; then
+    log "Dataset migration kicker is waiting for the array before resuming an interrupted migration."
+    return 0
+  fi
+  if [[ ! -e "$RECOVERY_STATE_FILE" && ! -e "$IN_PROGRESS_FLAG" ]]; then
+    return 0
+  fi
+  if migrator_lock_is_held; then
+    log "Dataset migration kicker found pending migration state, but the migrator is already running."
+    return 0
+  fi
+  if [[ -e "$RECOVERY_STATE_FILE" ]]; then
+    notify_interrupted_migration
+    spawn_migrator --recover-pending
+    log "Dataset migration kicker started delayed recovery."
+    return 0
+  fi
+  dataset="$(read_in_progress_dataset || true)"
+  [[ -n "$dataset" ]] || return 0
+  spawn_migrator --dataset "$dataset"
+  log "Dataset migration kicker restarted dataset migration for $dataset."
   return 0
 }
 
@@ -448,8 +666,8 @@ get_unraid_array_status() {
     cat /proc/mdcmd
     return 0
   fi
-  if [[ -r /var/local/emhttp/var.ini ]]; then
-    cat /var/local/emhttp/var.ini
+  if [[ -r "${ZFSAS_UNRAID_VAR_INI:-/var/local/emhttp/var.ini}" ]]; then
+    cat "${ZFSAS_UNRAID_VAR_INI:-/var/local/emhttp/var.ini}"
     return 0
   fi
   return 1
@@ -1318,7 +1536,7 @@ migrate_one_directory() {
   wait_for_free_space "$required_bytes" "$name" "$folder_index" || return 1
   set_status "migrating" "renaming_source" "Preparing $name for child dataset creation."
 
-  temp_name="${name}.__migration_tmp__.$(date +%s).$$.$RANDOM"
+  temp_name="$(migration_temp_name "$name")"
   temp_path="${parent_path}/${temp_name}"
   [[ ! -e "$temp_path" ]] || { die "Temporary path already exists: $temp_path"; return 1; }
 
@@ -1329,6 +1547,7 @@ migrate_one_directory() {
   RECOVERY_TEMP_PATH="$temp_path"
   RECOVERY_TARGET_DATASET="$child_ds"
   RECOVERY_BATCH_CONTAINERS="$protected_container_indexes"
+  RECOVERY_ORIGINAL_NAME="$name"
   write_recovery_state
 
   wait_for_free_space "$required_bytes" "$name" "$folder_index" || { rollback_failed_folder "$entry_path" "$temp_path" "$child_ds"; return 1; }
@@ -1376,7 +1595,7 @@ build_folder_plan() {
 
   while IFS= read -r -d '' child; do
     name="$(basename "$child")"
-    [[ "$name" == *".__migration_tmp__."* ]] && continue
+    [[ "$name" == *"$MIGRATION_TEMP_MARKER"* ]] && continue
     [[ "$name" == "." || "$name" == ".." ]] && continue
     [[ "$name" =~ ^[A-Za-z0-9._:+\-]+$ ]] || continue
 
@@ -1406,6 +1625,18 @@ build_folder_plan() {
   TOTAL_FOLDERS="${#FOLDER_NAMES[@]}"
   write_status_file
   if (( TOTAL_FOLDERS == 0 )); then
+    if (( IN_PROGRESS_FLAG_PREEXISTED == 1 )) && [[ ! -e "$RECOVERY_STATE_FILE" ]]; then
+      clear_in_progress_flag
+      STATE="complete"
+      CURRENT_STEP="complete"
+      MESSAGE="Dataset migration already finished. No eligible folders remain."
+      ENDED_EPOCH="$(date +%s)"
+      MIGRATION_COMPLETE=1
+      write_status_file
+      log "Dataset migration already finished. No eligible folders remain under $ACTIVE_DATASET."
+      return 0
+    fi
+    clear_in_progress_flag
     die "No eligible top-level folders were found under $ACTIVE_DATASET."
     return 1
   fi
@@ -1422,11 +1653,24 @@ rsync_recover_exact() {
 
 run_delayed_recovery() {
   if ! load_recovery_state; then
-    log "No pending Dataset Migrator recovery state found."
-    return 0
+    if [[ -z "$ACTIVE_DATASET" ]]; then
+      ACTIVE_DATASET="$(read_in_progress_dataset || true)"
+    fi
+    if ! discover_leftover_temp_recovery; then
+      log "No pending Dataset Migrator recovery state found."
+      return 0
+    fi
   fi
 
-  set_status "recovering" "boot_delay" "Dataset migration recovery is pending. Waiting for containers to finish starting before stopping only the affected batch."
+  if [[ -z "$ACTIVE_DATASET" ]]; then
+    ACTIVE_DATASET="$(read_in_progress_dataset || true)"
+  fi
+  if [[ ! -e "$IN_PROGRESS_FLAG" ]]; then
+    write_in_progress_flag
+  fi
+
+  notify_interrupted_migration
+  set_status "recovering" "boot_delay" "Dataset migration was interrupted. Apps may not function properly until migration completes. Recovery will resume in about 15 minutes; ignore non-functioning apps until then."
   sleep "$RECOVERY_BOOT_DELAY_SECONDS"
 
   [[ -n "$RECOVERY_TEMP_PATH" ]] || die "Recovery state is missing the preserved source temp path."
@@ -1473,6 +1717,9 @@ cleanup() {
 
   if (( MIGRATION_COMPLETE == 0 )) && [[ "$EXIT_CODE" -ne 0 ]]; then
     LAST_ERROR="${LAST_ERROR:-Dataset migration stopped before completion.}"
+    if [[ -e "$RECOVERY_STATE_FILE" ]]; then
+      notify_interrupted_migration
+    fi
     if (( NEEDS_CONTAINER_RECOVERY == 1 )); then
       log "Migration did not finish cleanly. Attempting to restart previously running containers before exiting."
       start_selected_containers || true
@@ -1501,11 +1748,18 @@ while (( $# > 0 )); do
     --recover-pending)
       RUN_RECOVERY=1
       ;;
+    --kick-if-idle)
+      KICK_IF_IDLE=1
+      ;;
   esac
   shift || true
 done
 
-if (( RUN_RECOVERY == 0 )); then
+if (( KICK_IF_IDLE == 1 )); then
+  if [[ ! -e "$RECOVERY_STATE_FILE" && ! -e "$IN_PROGRESS_FLAG" ]]; then
+    exit 0
+  fi
+elif (( RUN_RECOVERY == 0 )); then
   [[ -n "$DATASET" ]] || die "Dataset is required."
   [[ "$DATASET" =~ ^[A-Za-z0-9._/:+\-]+$ ]] || die "Dataset name is invalid."
   ACTIVE_DATASET="$DATASET"
@@ -1517,11 +1771,15 @@ ensure_dir "$(dirname "$LOCK_FILE")"
 zfsas_log_prepare_for_append "$LOG_FILE" "$LOG_ARCHIVE_FILE" 1048576 600 20 2097152 || true
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+if (( KICK_IF_IDLE == 1 )); then
+  kick_pending_migration || true
+  exit 0
+fi
+
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-  die "Another dataset migration appears to already be running."
-  write_status_file
-  exit 1
+  log "Another dataset migration appears to already be running."
+  exit 0
 fi
 chmod 0640 "$LOCK_FILE" >/dev/null 2>&1 || true
 apply_owner "$LOCK_FILE"
@@ -1529,6 +1787,15 @@ apply_owner "$LOCK_FILE"
 trap cleanup EXIT INT TERM
 
 if (( RUN_RECOVERY == 1 )); then
+  run_delayed_recovery
+  exit 0
+fi
+
+IN_PROGRESS_FLAG_PREEXISTED=0
+[[ -e "$IN_PROGRESS_FLAG" ]] && IN_PROGRESS_FLAG_PREEXISTED=1
+write_in_progress_flag
+
+if [[ -e "$RECOVERY_STATE_FILE" ]] || discover_leftover_temp_recovery; then
   run_delayed_recovery
   exit 0
 fi
@@ -1553,6 +1820,9 @@ fi
 
 set_status "preparing" "planning" "Scanning the selected dataset for eligible top-level folders."
 build_folder_plan || exit 1
+if (( MIGRATION_COMPLETE == 1 )); then
+  exit 0
+fi
 
 record_running_containers
 set_status "migrating" "migrating" "Starting folder-by-folder migration."
@@ -1602,6 +1872,7 @@ CURRENT_FOLDER=""
 CURRENT_FOLDER_PERCENT=100
 ENDED_EPOCH="$(date +%s)"
 MIGRATION_COMPLETE=1
+clear_in_progress_flag
 write_status_file
 log "Dataset migration finished successfully for $ACTIVE_DATASET"
 exit 0
