@@ -11,7 +11,7 @@ It answers one question: "What changed for me?"
 - The migration records an in-progress flag on the boot drive. The existing once-a-minute queue check restarts recovery or the migration when that flag is present and the migrator is not running.
 - Interrupted folders keep the original folder name in a recognizable temporary name so a restart can tell which folder was being migrated.
 - Snapshot Manager keeps the manage-snapshots panel at the top of the visible window when you scroll the embedded page.
-- Fixed the queue kicker when Unraid's cron PATH cannot see `mdcmd`. The kicker now checks `/usr/local/sbin/mdcmd` directly, and an empty or failed `/proc/mdcmd` read falls back to `/var/local/emhttp/var.ini` instead of waiting forever for an array state while the array is already started.
+- Fixed the queue kicker and dataset migrator when Unraid's cron PATH cannot see `mdcmd`. Both now use the same check for `/usr/local/sbin/mdcmd`, and an empty or failed `/proc/mdcmd` read falls back to `/var/local/emhttp/var.ini` instead of treating the failed read as array status.
 
 ### 2026.08.24.01 (2026-08-24)
 

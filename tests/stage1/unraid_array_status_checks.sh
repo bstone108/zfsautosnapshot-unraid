@@ -7,6 +7,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OPS_LIB="${ROOT_DIR}/source/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh"
+ARRAY_STATUS_LIB="${ROOT_DIR}/source/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/unraid-array-status-lib.sh"
+MIGRATOR="${ROOT_DIR}/source/usr/local/sbin/zfs_autosnapshot_migrate_datasets"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/zfsas-array-status.XXXXXX")"
 
 cleanup() {
@@ -36,13 +38,34 @@ assert_contains() {
   [[ "$haystack" == *"$needle"* ]] || fail "$message (missing: $needle; text: $haystack)"
 }
 
-lib_text="$(/bin/cat "$OPS_LIB")"
+lib_text="$(/bin/cat "$ARRAY_STATUS_LIB")"
+ops_text="$(/bin/cat "$OPS_LIB")"
+migrator_text="$(/bin/cat "$MIGRATOR")"
+assert_contains "$ops_text" 'source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/unraid-array-status-lib.sh"' \
+  "ops-queue-lib.sh must use the shared Unraid array status helper"
+assert_contains "$migrator_text" 'unraid-array-status-lib.sh' \
+  "dataset migrator must source the shared Unraid array status helper"
+if grep -q '^get_unraid_array_status()' "$migrator_text"; then
+  fail "dataset migrator must not keep its own get_unraid_array_status copy"
+fi
+if grep -q 'cat /proc/mdcmd' "$migrator_text"; then
+  fail "dataset migrator must not read /proc/mdcmd itself"
+fi
 assert_contains "$lib_text" 'ZFSAS_MDCMD_EXPLICIT_PATH:-/usr/local/sbin/mdcmd' \
   "find_mdcmd must check /usr/local/sbin/mdcmd when it is not on PATH"
 assert_contains "$lib_text" 'ZFSAS_PROC_MDCMD_PATH:-/proc/mdcmd' \
   "get_unraid_array_status must read /proc/mdcmd only as a fallback"
-assert_contains "$lib_text" 'ZFSAS_VAR_INI_PATH:-/var/local/emhttp/var.ini' \
-  "get_unraid_array_status must fall back to /var/local/emhttp/var.ini"
+assert_contains "$lib_text" 'ZFSAS_VAR_INI_PATH:-${ZFSAS_UNRAID_VAR_INI:-/var/local/emhttp/var.ini}' \
+  "get_unraid_array_status must fall back to /var/local/emhttp/var.ini and honor the migrator override"
+
+ops_body="$(bash -c 'source "$1"; declare -f get_unraid_array_status' bash "$OPS_LIB")"
+shared_body="$(bash -c 'source "$1"; declare -f get_unraid_array_status' bash "$ARRAY_STATUS_LIB")"
+migrator_lib="$(cd "$(dirname "$MIGRATOR")/../emhttp/plugins/zfs.autosnapshot/scripts" && pwd)/unraid-array-status-lib.sh"
+migrator_body="$(bash -c 'source "$1"; declare -f get_unraid_array_status' bash "$migrator_lib")"
+assert_eq "$ops_body" "$shared_body" \
+  "ops-queue-lib.sh must use the shared get_unraid_array_status implementation"
+assert_eq "$migrator_body" "$shared_body" \
+  "dataset migrator must resolve the same get_unraid_array_status implementation"
 
 # shellcheck source=/dev/null
 source "$OPS_LIB"
@@ -209,5 +232,44 @@ assert_eq "$(status_text)" 'mdState="STARTED"' \
 if ! unraid_array_actionable; then
   fail "var.ini must be actionable when the explicit mdcmd command fails"
 fi
+
+# Dataset migrator reaches this helper through its own path and reads var.ini
+# with ZFSAS_UNRAID_VAR_INI. A failed /proc/mdcmd read must still fall through.
+reset_sources
+install_failing_cat
+export PATH="${BIN_DIR}:/usr/bin:/bin"
+printf 'unread\n' > "$PROC_MDCMD"
+printf 'mdState="STARTED"\n' > "$VAR_INI"
+unset ZFSAS_VAR_INI_PATH
+export ZFSAS_UNRAID_VAR_INI="$VAR_INI"
+(
+  set -euo pipefail
+  # shellcheck source=/dev/null
+  source "$migrator_lib"
+  status="$(get_unraid_array_status)"
+  printf '%s\n' "$status" > "${WORK}/migrator-failed-proc.status"
+)
+assert_eq "$(/bin/cat "${WORK}/migrator-failed-proc.status")" 'mdState="STARTED"' \
+  "dataset migrator must fall back to ZFSAS_UNRAID_VAR_INI when /proc/mdcmd returns an I/O error"
+unset ZFSAS_UNRAID_VAR_INI
+export ZFSAS_VAR_INI_PATH="$VAR_INI"
+
+reset_sources
+cron_path
+write_mdcmd "$EXPLICIT_MDCMD" 'printf "mdState=STARTED\n"'
+printf 'mdState="STOPPED"\n' > "$VAR_INI"
+unset ZFSAS_VAR_INI_PATH
+export ZFSAS_UNRAID_VAR_INI="$VAR_INI"
+(
+  set -euo pipefail
+  # shellcheck source=/dev/null
+  source "$migrator_lib"
+  status="$(get_unraid_array_status)"
+  printf '%s\n' "$status" > "${WORK}/migrator-explicit-mdcmd.status"
+)
+assert_eq "$(/bin/cat "${WORK}/migrator-explicit-mdcmd.status")" "mdState=STARTED" \
+  "dataset migrator must use /usr/local/sbin/mdcmd when cron PATH cannot see it"
+unset ZFSAS_UNRAID_VAR_INI
+export ZFSAS_VAR_INI_PATH="$VAR_INI"
 
 echo "PASS: unraid array status checks"

@@ -642,35 +642,19 @@ done
 
 [[ "$(id -u)" -eq 0 ]] || die "Must be run as root"
 
-find_mdcmd() {
-  if command -v mdcmd >/dev/null 2>&1; then
-    command -v mdcmd
-    return 0
-  fi
-  [[ -x /root/mdcmd ]] || return 1
-  printf '/root/mdcmd\n'
-}
+# Same array-status helper as the queue kicker. The script lives in
+# /usr/local/sbin and the helper lives under the plugin scripts directory,
+# which is the same relative path in the repo source tree.
+ZFSAS_ARRAY_STATUS_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../emhttp/plugins/zfs.autosnapshot/scripts" && pwd)/unraid-array-status-lib.sh"
+if [[ ! -r "$ZFSAS_ARRAY_STATUS_LIB" ]]; then
+  die "Missing Unraid array status helper: ${ZFSAS_ARRAY_STATUS_LIB}"
+fi
+# shellcheck source=/dev/null
+source "$ZFSAS_ARRAY_STATUS_LIB"
 
 extract_status_value() {
   local key="$1"
   awk -F= -v key="$key" '$1 == key { print $2; exit }'
-}
-
-get_unraid_array_status() {
-  local mdcmd_bin
-  if mdcmd_bin="$(find_mdcmd 2>/dev/null)"; then
-    "$mdcmd_bin" status
-    return 0
-  fi
-  if [[ -r /proc/mdcmd ]]; then
-    cat /proc/mdcmd
-    return 0
-  fi
-  if [[ -r "${ZFSAS_UNRAID_VAR_INI:-/var/local/emhttp/var.ini}" ]]; then
-    cat "${ZFSAS_UNRAID_VAR_INI:-/var/local/emhttp/var.ini}"
-    return 0
-  fi
-  return 1
 }
 
 parity_sync_in_progress() {

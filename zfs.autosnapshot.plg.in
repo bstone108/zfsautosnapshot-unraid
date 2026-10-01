@@ -5,7 +5,7 @@
 - If a dataset migration is interrupted, Unraid alerts that apps may not function properly until it finishes, that the migration will resume in about 15 minutes, and that non-functioning apps should be ignored until then. The once-a-minute queue check restarts it from the boot in-progress flag.
 - Interrupted migration folders keep the original folder name in a recognizable temporary name so a restart can tell which folder was being migrated.
 - Snapshot Manager keeps the manage-snapshots panel at the top of the visible window when the embedded page scrolls.
-- Fixed the queue kicker so a started Unraid array is recognized when cron cannot see mdcmd. An empty or failed /proc/mdcmd read falls back to var.ini instead of waiting forever.
+- Fixed the queue kicker and dataset migrator so a started Unraid array is recognized when cron cannot see mdcmd. An empty or failed /proc/mdcmd read falls back to var.ini instead of waiting forever.
 
   </CHANGES>
 
