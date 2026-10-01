@@ -1,11 +1,11 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.08.24.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.10.01.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.08.24.01 (2026-08-25)
-- Added resumable SSH ZFS receives so an interrupted remote receive resumes from the receiver's saved token instead of restarting. Unsafe or mismatched tokens fail closed.
-- Hardened SSH replication host verification so sends require the pinned host key and do not rewrite known-host entries while connecting.
-- Added optional outbound stream throttling via SEND_RATE_LIMIT and mbuffer, plus an Outbound stream rate limit field in the ZFS Send WebGUI. Use 0 to disable or a rate such as 1M/8M.
-- Made interrupted-receive probing fail closed unless the receiver explicitly reports that the target dataset does not exist. Pipeline failure diagnostics now retain actual component exit statuses.
+### 2026.10.01.01 (2026-10-01)
+- If a dataset migration is interrupted, Unraid alerts that apps may not function properly until it finishes, that the migration will resume in about 15 minutes, and that non-functioning apps should be ignored until then. The once-a-minute queue check restarts it from the boot in-progress flag.
+- Interrupted migration folders keep the original folder name in a recognizable temporary name so a restart can tell which folder was being migrated.
+- Snapshot Manager keeps the manage-snapshots panel at the top of the visible window when the embedded page scrolls.
+- Fixed the queue kicker and dataset migrator so a started Unraid array is recognized when cron cannot see mdcmd. An empty or failed /proc/mdcmd read falls back to var.ini instead of waiting forever.
 
   </CHANGES>
 
@@ -15,9 +15,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.08.24.01-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.08.24.01-noarch-1.txz</URL>
-    <MD5>37b2c524a9b80472405e5c22cf43c542</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.10.01.01-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.10.01.01-noarch-1.txz</URL>
+    <MD5>6ef541b01ed14523dd194e29cdb9ec8d</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -25,10 +25,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.08.24.01-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.10.01.01-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="37b2c524a9b80472405e5c22cf43c542"
+PKG_MD5="6ef541b01ed14523dd194e29cdb9ec8d"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
