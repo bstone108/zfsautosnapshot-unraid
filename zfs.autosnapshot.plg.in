@@ -2,10 +2,10 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
-- Added resumable SSH ZFS receives so an interrupted remote receive resumes from the receiver's saved token instead of restarting. Unsafe or mismatched tokens fail closed.
-- Hardened SSH replication host verification so sends require the pinned host key and do not rewrite known-host entries while connecting.
-- Added optional outbound stream throttling via SEND_RATE_LIMIT and mbuffer, plus an Outbound stream rate limit field in the ZFS Send WebGUI. Use 0 to disable or a rate such as 1M/8M.
-- Made interrupted-receive probing fail closed unless the receiver explicitly reports that the target dataset does not exist. Pipeline failure diagnostics now retain actual component exit statuses.
+- If a dataset migration is interrupted, Unraid alerts that apps may not function properly until it finishes, that the migration will resume in about 15 minutes, and that non-functioning apps should be ignored until then. The once-a-minute queue check restarts it from the boot in-progress flag.
+- Interrupted migration folders keep the original folder name in a recognizable temporary name so a restart can tell which folder was being migrated.
+- Snapshot Manager keeps the manage-snapshots panel at the top of the visible window when the embedded page scrolls.
+- Fixed the queue kicker and dataset migrator so a started Unraid array is recognized when cron cannot see mdcmd. An empty or failed /proc/mdcmd read falls back to var.ini instead of waiting forever.
 
   </CHANGES>
 

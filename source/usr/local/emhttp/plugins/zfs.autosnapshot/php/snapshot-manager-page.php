@@ -865,6 +865,44 @@ $csrfToken = zfsas_get_csrf_token();
     node.textContent = count + ' snapshot' + (count === 1 ? '' : 's') + ' selected on ' + currentDataset + '.';
   }
 
+  function visibleWindowMetrics() {
+    var padding = 24;
+    var top = 0;
+    var height = Math.max(0, (window.innerHeight || 0) - (padding * 2));
+    if (embeddedMode && window.parent !== window && window.frameElement && window.frameElement.getBoundingClientRect) {
+      try {
+        var rect = window.frameElement.getBoundingClientRect();
+        var parentWindow = window.parent;
+        var parentHeight = parentWindow.innerHeight || window.innerHeight || 0;
+        var intersectionTop = Math.max(0, rect.top);
+        var intersectionBottom = Math.min(parentHeight, rect.bottom);
+        var intersectionHeight = Math.max(0, intersectionBottom - intersectionTop);
+        top = Math.max(0, intersectionTop - rect.top);
+        height = Math.max(0, intersectionHeight - (padding * 2));
+      } catch (err) {
+        top = 0;
+        height = Math.max(0, (window.innerHeight || 0) - (padding * 2));
+      }
+    }
+    return {top: top, height: height};
+  }
+
+  function alignDrawerToVisibleWindow() {
+    var drawer = byId('snapshot_manager_drawer');
+    var panel = drawer ? drawer.querySelector('.zfsas-sm-drawer-panel') : null;
+    if (!drawer || !panel) {
+      return;
+    }
+    if (drawer.hidden) {
+      panel.style.marginTop = '';
+      panel.style.maxHeight = '';
+      return;
+    }
+    var metrics = visibleWindowMetrics();
+    panel.style.marginTop = metrics.top + 'px';
+    panel.style.maxHeight = metrics.height + 'px';
+  }
+
   function openDrawer() {
     var drawer = byId('snapshot_manager_drawer');
     var backdrop = byId('snapshot_manager_backdrop');
@@ -874,6 +912,7 @@ $csrfToken = zfsas_get_csrf_token();
     if (backdrop) {
       backdrop.hidden = false;
     }
+    alignDrawerToVisibleWindow();
   }
 
   function closeDrawer() {
@@ -885,6 +924,7 @@ $csrfToken = zfsas_get_csrf_token();
     if (backdrop) {
       backdrop.hidden = true;
     }
+    alignDrawerToVisibleWindow();
     currentSelection = {};
     refreshBulkCount();
     renderFeedback('snapshot_manager_drawer_feedback', [], false);
@@ -1239,6 +1279,13 @@ $csrfToken = zfsas_get_csrf_token();
     heightObserver.observe(document.body, {childList: true, subtree: true, attributes: true});
 
     window.addEventListener('resize', scheduleParentHeight);
+    window.addEventListener('resize', alignDrawerToVisibleWindow);
+    try {
+      window.parent.addEventListener('resize', alignDrawerToVisibleWindow);
+      window.parent.document.addEventListener('scroll', alignDrawerToVisibleWindow, true);
+    } catch (err) {
+      // The parent window is not accessible. CSS keeps the panel inside this iframe.
+    }
     window.addEventListener('message', function (event) {
       if (event.origin !== window.location.origin) {
         return;

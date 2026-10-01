@@ -117,35 +117,12 @@ log() {
   printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$(zfsas_log_sanitize_text "$*")"
 }
 
-find_mdcmd() {
-  if command -v mdcmd >/dev/null 2>&1; then
-    command -v mdcmd
-    return 0
-  fi
-  [[ -x /root/mdcmd ]] || return 1
-  printf '/root/mdcmd\n'
-}
+# shellcheck source=/dev/null
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/unraid-array-status-lib.sh"
 
 extract_status_value() {
   local key="$1"
   awk -F= -v key="$key" '$1 == key { print $2; exit }'
-}
-
-get_unraid_array_status() {
-  local mdcmd_bin
-  if mdcmd_bin="$(find_mdcmd 2>/dev/null)"; then
-    "$mdcmd_bin" status
-    return 0
-  fi
-  if [[ -r /proc/mdcmd ]]; then
-    cat /proc/mdcmd
-    return 0
-  fi
-  if [[ -r /var/local/emhttp/var.ini ]]; then
-    cat /var/local/emhttp/var.ini
-    return 0
-  fi
-  return 1
 }
 
 normalize_unraid_state_value() {
