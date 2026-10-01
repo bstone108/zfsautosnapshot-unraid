@@ -97,6 +97,14 @@ main() {
   zfsas_log_send_runtime_stamp "queue_kicker"
   log "Queue kicker $$ starting"
 
+  # Same cron entry resumes an interrupted dataset migration. The migrator
+  # stores migration.inprogress and recovery.env on the boot plugin config.
+  # --kick-if-idle restarts --recover-pending or the recorded dataset run
+  # when that state is present and no migrator process holds the lock.
+  if [[ -x "/usr/local/sbin/zfs_autosnapshot_migrate_datasets" ]]; then
+    "/usr/local/sbin/zfs_autosnapshot_migrate_datasets" --kick-if-idle || true
+  fi
+
   reconcile_stale_jobs
   prune_old_jobs
 

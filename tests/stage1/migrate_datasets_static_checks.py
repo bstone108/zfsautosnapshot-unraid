@@ -189,6 +189,86 @@ require_worker(
     r'--recover-pending\).*?RUN_RECOVERY=1',
     "Worker must expose a --recover-pending mode for the boot hook.",
 )
+require_worker(
+    r'--kick-if-idle\).*?KICK_IF_IDLE=1',
+    "Worker must expose --kick-if-idle so the send kicker can restart an idle interrupted migration.",
+)
+require_worker(
+    r'IN_PROGRESS_FLAG="\$\{ZFSAS_MIGRATOR_IN_PROGRESS_FLAG:-\$\{PLUGIN_ROOT\}/migration\.inprogress\}"',
+    "Worker must persist the in-progress flag on the boot plugin config path, with a test override.",
+)
+require_worker(
+    r'write_in_progress_flag\s*\(\)\s*{.*?DATASET=.*?STARTED_EPOCH=.*?PID=',
+    "Worker must create the boot in-progress flag when a migration run begins.",
+)
+require_worker(
+    r'clear_in_progress_flag\s*\(\)\s*{.*?rm\s+-f\s+--\s+"\$IN_PROGRESS_FLAG"',
+    "Worker must remove the in-progress flag when the migration finishes successfully.",
+)
+require_worker(
+    r'IN_PROGRESS_FLAG_PREEXISTED=0.*?\[\[\s+-e\s+"\$IN_PROGRESS_FLAG"\s+\]\]\s+&&\s+IN_PROGRESS_FLAG_PREEXISTED=1.*?write_in_progress_flag',
+    "Worker must create the in-progress flag at start and remember whether a resume was already pending.",
+)
+require_worker(
+    r'MIGRATION_COMPLETE=1.*?clear_in_progress_flag',
+    "Successful completion must clear the boot in-progress flag.",
+)
+require_worker(
+    r'notify_interrupted_migration\s*\(\)\s*{.*?/usr/local/emhttp/webGui/scripts/notify.*?-i\s+"alert"',
+    "Interrupted migration must alert through Unraid's notify CLI when that command is available.",
+)
+require_worker(
+    r'Apps may not function properly until the migration completes.*?about 15 minutes.*?ignore any non-functioning apps',
+    "The Unraid alert must say the migration was interrupted, apps may misbehave, resume is in about 15 minutes, and broken apps should be ignored until migration finishes.",
+)
+require_worker(
+    r'if\s+\[\[\s+-e\s+"\$RECOVERY_STATE_FILE"\s+\]\];\s+then\s+notify_interrupted_migration',
+    "Worker cleanup must alert when it exits with pending recovery state.",
+)
+require_worker(
+    r'run_delayed_recovery\s*\(\)\s*{.*?notify_interrupted_migration',
+    "Delayed recovery must alert when the about-15-minute resume begins.",
+)
+require_worker(
+    r'kick_pending_migration\s*\(\)\s*{.*?notify_interrupted_migration.*?--recover-pending',
+    "The kicker path must alert and restart --recover-pending when recovery state is present and the migrator is idle.",
+)
+require_worker(
+    r'kick_pending_migration\s*\(\)\s*{.*?spawn_migrator\s+--dataset',
+    "The kicker path must restart the dataset migration when the in-progress flag remains and recovery state is gone.",
+)
+require_worker(
+    r'migrator_lock_is_held',
+    "The kicker path must not start a second migrator while the lock is held.",
+)
+require_worker(
+    r'migration_temp_name\s*\(\)\s*{.*?\$\{name\}\$\{MIGRATION_TEMP_MARKER\}',
+    "Temporary folders must keep the original folder name as a prefix of the deterministic migration temp marker.",
+)
+require_worker(
+    r'original_name_from_migration_temp\s*\(\)\s*{.*?MIGRATION_TEMP_MARKER.*?\^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$',
+    "Restart must recover the original folder name from the deterministic temp-folder suffix.",
+)
+require_worker(
+    r'discover_leftover_temp_recovery\s*\(\)\s*{.*?original_name_from_migration_temp',
+    "Restart must recognize incomplete migration temp folders even when recovery.env is missing.",
+)
+
+KICKER = ROOT / "source/usr/local/sbin/zfs_autosnapshot_queue_kicker"
+CRON = ROOT / "source/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/sync-cron.sh"
+kicker_text = KICKER.read_text(encoding="utf-8")
+cron_text = CRON.read_text(encoding="utf-8")
+if not re.search(r'zfs_autosnapshot_migrate_datasets"\s+--kick-if-idle', kicker_text):
+    raise AssertionError("The ZFS send queue kicker must call the migrator --kick-if-idle from the same cron entrypoint.")
+if "QUEUE_KICKER_CMD" not in cron_text or "migration.inprogress" not in cron_text:
+    raise AssertionError("Cron sync must keep scheduling the queue kicker and document that it resumes a boot-persisted interrupted migration.")
+
+HELPERS = ROOT / "source/usr/local/emhttp/plugins/zfs.autosnapshot/php/migrate-datasets-helpers.php"
+helpers_text = HELPERS.read_text(encoding="utf-8")
+if not re.search(r'function zfsas_migrate_original_name_from_temp\s*\(', helpers_text):
+    raise AssertionError("Dataset Migrator preview must be able to recover the original folder name from a temp directory.")
+if "Leftover temporary directory for" not in helpers_text:
+    raise AssertionError("Dataset Migrator preview must identify the original folder for an incomplete migration temp directory.")
 
 EVENT = ROOT / "source/usr/local/emhttp/plugins/zfs.autosnapshot/event/disks_mounted"
 event_text = EVENT.read_text(encoding="utf-8")

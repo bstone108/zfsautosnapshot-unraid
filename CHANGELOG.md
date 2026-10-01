@@ -5,6 +5,14 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.10.01.01 (2026-10-01)
+
+- If a dataset migration is interrupted, Unraid raises an alert that the migration was interrupted, apps may not function properly until it finishes, the migration will resume in about 15 minutes, and non-functioning apps should be ignored until then.
+- The migration records an in-progress flag on the boot drive. The existing once-a-minute queue check restarts recovery or the migration when that flag is present and the migrator is not running.
+- Interrupted folders keep the original folder name in a recognizable temporary name so a restart can tell which folder was being migrated.
+- Snapshot Manager keeps the manage-snapshots panel at the top of the visible window when you scroll the embedded page.
+- Fixed the queue kicker when Unraid's cron PATH cannot see `mdcmd`. The kicker now checks `/usr/local/sbin/mdcmd` directly, and an empty or failed `/proc/mdcmd` read falls back to `/var/local/emhttp/var.ini` instead of waiting forever for an array state while the array is already started.
+
 ### 2026.08.24.01 (2026-08-24)
 
 - Added resumable SSH ZFS receives. If a remote receive is interrupted, the sender now detects the receiver's saved token and resumes the matching stream instead of restarting it. Unsafe or mismatched saved tokens fail closed for review.

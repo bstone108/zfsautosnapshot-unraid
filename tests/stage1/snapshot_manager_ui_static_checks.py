@@ -152,6 +152,43 @@ def main() -> int:
         "max-height: calc(100vh - 48px);",
         "Snapshot Manager drawer panel must stay within the visible viewport and let its body scroll",
     )
+    assert_contains(
+        page,
+        "function alignDrawerToVisibleWindow() {",
+        "Snapshot Manager must realign the open panel to the viewable window when the page is embedded in a tall iframe",
+    )
+    assert_contains(
+        page,
+        "window.frameElement.getBoundingClientRect()",
+        "Embedded Snapshot Manager must measure the iframe against the parent viewable window",
+    )
+    assert_contains(
+        page,
+        "panel.style.marginTop = metrics.top + 'px';",
+        "The manage-snapshots panel must shift to the top of the visible window instead of the top of the tall iframe page",
+    )
+    assert_contains(
+        page,
+        "panel.style.maxHeight = metrics.height + 'px';",
+        "The manage-snapshots panel height must be capped to the visible window so it does not extend below it",
+    )
+    assert_contains(
+        page,
+        "addEventListener('scroll', alignDrawerToVisibleWindow, true)",
+        "The open panel must follow parent scrolling so it stays at the top of the viewable window",
+    )
+    open_drawer = extract_block(
+        page,
+        "function openDrawer() {",
+        "  }\n\n  function closeDrawer()",
+        "Snapshot Manager must define openDrawer",
+        "Snapshot Manager openDrawer must be closed before closeDrawer",
+    )
+    assert_contains(
+        open_drawer,
+        "alignDrawerToVisibleWindow();",
+        "Opening Manage Snapshots must align the panel to the current viewable window",
+    )
     if 'zfsas-placeholder-title">Snapshot Manager<' in snapshot_panel:
         raise AssertionError("Embedded Snapshot Manager tab must not duplicate the iframe page header")
     if '<code>Snapshot Manager</code> is still unfinished' in snapshot_panel:

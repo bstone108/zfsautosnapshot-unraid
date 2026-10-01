@@ -139,6 +139,8 @@ Because it verifies the copy, it can be slow. That is expected.
 
 Stop any watchdogs or outside tools that might restart containers before you use it. If something relaunches containers during the migration, the tool may abort to avoid an unsafe copy. If free space runs low, the migration can pause and wait for you to free enough space before continuing.
 
+If a migration is interrupted, Unraid raises an alert. Apps may not function properly until the migration finishes. The migration resumes in about 15 minutes from a flag stored with the plugin config on the boot drive, and the once-a-minute queue check starts it again when the migrator is not already running. Until that finishes, ignore non-functioning apps caused by the incomplete migration. Folders that were mid-move keep the original folder name in a recognizable temporary name so the restart can tell which folder was being migrated.
+
 ## Snapshot Manager
 
 Snapshot Manager is still a preview feature. It shows dataset-level snapshot summaries and can load a dataset's snapshots when you choose to manage it. It has manual actions such as take snapshot, delete selected snapshots, hold, and release.
