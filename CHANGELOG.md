@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.10.10.t01 (Testing Branch Only)
+
+- Fixed the once-a-minute send and delete queue check so it can tell the array is started when the scheduler PATH does not include mdcmd. Queue work no longer stays paused on a started array just because /proc/mdcmd cannot be read.
+- If the array state still cannot be read from mdcmd, /proc/mdcmd, or var.ini, the log says that directly and repeats it at most once an hour. A stopped, stopping, or starting array still pauses queue workers.
+
 ### 2026.09.24.t01 (Testing Branch Only)
 
 - If a dataset migration is interrupted, Unraid raises an alert that the migration was interrupted, apps may not function properly until it finishes, the migration will resume in about 15 minutes, and non-functioning apps should be ignored until then.

@@ -9,6 +9,19 @@ else
   zfsas_log_prepare_for_append() { return 0; }
 fi
 
+# Keep Unraid sbin tools visible when cron PATH is /usr/bin:/bin.
+zfsas_extend_command_path() {
+  local dir
+  for dir in /usr/local/sbin /usr/local/bin /usr/sbin /sbin; do
+    case ":${PATH:-}:" in
+      *":${dir}:"*) ;;
+      *) PATH="${PATH:+${PATH}:}${dir}" ;;
+    esac
+  done
+  export PATH
+}
+zfsas_extend_command_path
+
 PLUGIN_NAME="zfs.autosnapshot"
 CONFIG_DIR="/boot/config/plugins/${PLUGIN_NAME}"
 SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
@@ -127,12 +140,28 @@ zfsas_send_debug_marker() {
 }
 
 find_mdcmd() {
+  local candidate candidates_raw
+  local -a candidates=()
+
   if command -v mdcmd >/dev/null 2>&1; then
     command -v mdcmd
     return 0
   fi
-  [[ -x /root/mdcmd ]] || return 1
-  printf '/root/mdcmd\n'
+
+  # mdcmd is installed in /usr/local/sbin on Unraid. /root/mdcmd is not always there.
+  if [[ -n "${ZFSAS_MDCMD_CANDIDATES+x}" ]]; then
+    candidates_raw="${ZFSAS_MDCMD_CANDIDATES}"
+  else
+    candidates_raw="/usr/local/sbin/mdcmd:/usr/sbin/mdcmd:/root/mdcmd"
+  fi
+
+  IFS=':' read -r -a candidates <<< "$candidates_raw"
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
 }
 
 extract_status_value() {
@@ -140,20 +169,43 @@ extract_status_value() {
   awk -F= -v key="$key" '$1 == key { print $2; exit }'
 }
 
+unraid_status_text_usable() {
+  local text="${1-}"
+  [[ -n "$text" ]] || return 1
+  if printf '%s\n' "$text" | grep -Eq '^[[:space:]]*(mdState|fsState|sbState|started)='; then
+    return 0
+  fi
+  return 1
+}
+
+read_unraid_status_command() {
+  local output=""
+  output="$("$@" 2>/dev/null)" || return 1
+  unraid_status_text_usable "$output" || return 1
+  printf '%s\n' "$output"
+}
+
 get_unraid_array_status() {
   local mdcmd_bin
+  local proc_mdcmd="${ZFSAS_PROC_MDCMD:-/proc/mdcmd}"
+  local var_ini="${ZFSAS_UNRAID_VAR_INI:-/var/local/emhttp/var.ini}"
+
   if mdcmd_bin="$(find_mdcmd 2>/dev/null)"; then
-    "$mdcmd_bin" status
+    if read_unraid_status_command "$mdcmd_bin" status; then
+      return 0
+    fi
+  fi
+
+  # -r /proc/mdcmd can be true for root while cat returns "Input/output error"
+  # and no text. Accept a source only when it exits 0 with a state key.
+  if read_unraid_status_command cat "$proc_mdcmd"; then
     return 0
   fi
-  if [[ -r /proc/mdcmd ]]; then
-    cat /proc/mdcmd
+
+  if read_unraid_status_command cat "$var_ini"; then
     return 0
   fi
-  if [[ -r /var/local/emhttp/var.ini ]]; then
-    cat /var/local/emhttp/var.ini
-    return 0
-  fi
+
   return 1
 }
 
@@ -234,8 +286,10 @@ unraid_array_actionable() {
   return 1
 }
 
+UNRAID_ARRAY_STATUS_UNREADABLE_MESSAGE="Could not read Unraid array state from mdcmd, /proc/mdcmd or var.ini"
+
 unraid_array_action_message() {
-  local md_state fs_state sb_state started
+  local md_state fs_state sb_state started status_text=""
 
   md_state="$(unraid_actionable_state_value "mdState" || true)"
   fs_state="$(unraid_actionable_state_value "fsState" || true)"
@@ -262,7 +316,57 @@ unraid_array_action_message() {
     return 0
   fi
 
+  status_text="$(get_unraid_array_status 2>/dev/null || true)"
+  if [[ -z "$status_text" ]]; then
+    printf '%s' "$UNRAID_ARRAY_STATUS_UNREADABLE_MESSAGE"
+    return 0
+  fi
+
   printf 'Waiting for Unraid to report an actionable array state'
+}
+
+unraid_unreadable_status_stamp_file() {
+  printf '%s\n' "${ZFSAS_UNRAID_STATUS_UNREADABLE_STAMP:-${RUNTIME_DIR}/unraid-array-status-unreadable.stamp}"
+}
+
+unraid_unreadable_status_should_log() {
+  local stamp now last interval
+  interval="${ZFSAS_UNRAID_STATUS_UNREADABLE_LOG_INTERVAL:-3600}"
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=3600
+  if (( interval == 0 )); then
+    return 0
+  fi
+  stamp="$(unraid_unreadable_status_stamp_file)"
+  [[ -f "$stamp" ]] || return 0
+  last="$(tr -cd '0-9' < "$stamp" 2>/dev/null || true)"
+  [[ "$last" =~ ^[0-9]+$ ]] || return 0
+  now="$(date +%s)"
+  if (( now - last >= interval )); then
+    return 0
+  fi
+  return 1
+}
+
+unraid_unreadable_status_mark_logged() {
+  local stamp dir
+  stamp="$(unraid_unreadable_status_stamp_file)"
+  dir="$(dirname "$stamp")"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  date +%s > "$stamp" 2>/dev/null || return 0
+}
+
+log_paused_for_unraid_array() {
+  local detail="$1"
+  local message=""
+
+  message="$(unraid_array_action_message)"
+  if [[ "$message" == "$UNRAID_ARRAY_STATUS_UNREADABLE_MESSAGE" ]]; then
+    if ! unraid_unreadable_status_should_log; then
+      return 0
+    fi
+    unraid_unreadable_status_mark_logged || true
+  fi
+  log "${message}. ${detail}"
 }
 
 trim() {

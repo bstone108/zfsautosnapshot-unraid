@@ -805,6 +805,7 @@ main() {
   python3 "${ROOT_DIR}/tests/stage1/send_queue_preflight_status_static_checks.py"
   php "${ROOT_DIR}/tests/stage1/prefix_overlap_contract.php"
   bash "${ROOT_DIR}/tests/stage1/zero_change_common_harness.sh"
+  bash "${ROOT_DIR}/tests/stage1/unraid_array_status_checks.sh"
 
   echo "All Stage 1 tests passed."
 }
