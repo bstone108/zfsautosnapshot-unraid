@@ -208,6 +208,26 @@ def main() -> int:
         "most recent snapshot",
         "snapshot-mismatch detection must look for the zfs receive 'most recent snapshot' error",
     )
+    assert_contains(
+        worker,
+        "acquire_child_fanout_lock()",
+        "child send fan-out must take a per-parent lock so a second prepare cannot queue the same children",
+    )
+    assert_contains(
+        worker,
+        "send_job_id_already_queued()",
+        "child send fan-out must skip job ids that already have a queue file",
+    )
+    assert_contains(
+        worker,
+        "not queueing duplicates",
+        "a repeated child fan-out must say the jobs were already queued instead of logging a second queue",
+    )
+    assert_contains(
+        worker,
+        "queue_child_send_jobs || return $?",
+        "a locked child fan-out must defer the parent instead of failing the scheduled prepare",
+    )
 
     print("PASS: send worker helper static contracts")
     return 0
