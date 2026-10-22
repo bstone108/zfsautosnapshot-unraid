@@ -782,6 +782,10 @@ function zfsas_ops_send_job_state_label($job)
         return 'Canceled';
     }
 
+    if ($state === 'failed' && (string) ($job['NEEDS_FULL_RESEND'] ?? '0') === '1') {
+        return 'Needs full resend';
+    }
+
     if ($state === 'running') {
         $raw = strtolower(trim((string) ($job['LAST_ERROR'] ?? '') . ' ' . (string) ($job['LAST_MESSAGE'] ?? '')));
         if (strpos($raw, 'autosnapshot') !== false) {
@@ -836,6 +840,7 @@ function zfsas_ops_send_queue_status_payload($limit = 120)
             'state' => (string) ($job['STATE'] ?? ''),
             'phase' => (string) ($job['PHASE'] ?? ''),
             'stateLabel' => zfsas_ops_send_job_state_label($job),
+            'needsFullResend' => ((string) ($job['NEEDS_FULL_RESEND'] ?? '0') === '1'),
             'source' => (string) ($job['SOURCE_ROOT'] ?? $job['DATASET'] ?? ''),
             'destination' => (string) ($job['DESTINATION_ROOT'] ?? ''),
             'includeChildren' => ((string) ($job['INCLUDE_CHILDREN'] ?? '0') === '1'),
@@ -919,6 +924,9 @@ function zfsas_ops_send_job_display_message($job)
     if ($state === 'failed') {
         if ((string) ($job['CANCELLED_BY_USER'] ?? '0') === '1') {
             return 'Canceled.';
+        }
+        if ((string) ($job['NEEDS_FULL_RESEND'] ?? '0') === '1') {
+            return zfsas_ops_send_compact_message($raw !== '' ? $raw : 'Full resend is required. Incremental retries were stopped.', 110);
         }
         return zfsas_ops_send_compact_message($raw !== '' ? $raw : 'Failed.', 110);
     }

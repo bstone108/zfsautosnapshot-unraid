@@ -554,12 +554,36 @@ run_pipeline_with_space_reservation() {
   if [[ -n "$send_progress" ]]; then
     set_job_progress "sending" "0" "Sending."
   fi
+  SEND_PIPELINE_NEEDS_FULL_RESEND=0
   if run_pipeline_with_status "$description" "$base_snapshot" "$snapshot" "$destination" "$required_bytes" 0 99; then
     rc=0
   else
     rc=$?
   fi
+  if (( rc != 0 )) && [[ "${SEND_PIPELINE_NEEDS_FULL_RESEND:-0}" == "1" ]]; then
+    mark_current_job_needs_full_resend "${SEND_PIPELINE_FAILURE_DETAIL:-}"
+    return 1
+  fi
   return "$rc"
+}
+
+mark_current_job_needs_full_resend() {
+  local detail="${1:-}"
+  local message="Incremental receive failed: the destination snapshot does not match the incremental base. Full resend is required; incremental retries were stopped."
+
+  log "$message"
+  if [[ -n "$detail" ]]; then
+    log "Full resend detail: ${detail}"
+  fi
+  zfsas_send_debug_marker "job_needs_full_resend job_id=$(job_get job JOB_ID) source=$(job_get job SOURCE_ROOT) destination=$(job_get job DESTINATION_ROOT) detail=${detail}"
+  job[NEEDS_FULL_RESEND]="1"
+  job[SEND_PLAN_DESCRIPTION]=""
+  job[SEND_PLAN_BASE_SNAPSHOT]=""
+  job[SEND_PLAN_SNAPSHOT]=""
+  job[SEND_PLAN_DESTINATION]=""
+  job[SPACE_ESTIMATE_KEY]=""
+  job[SPACE_REQUIRED_BYTES]=""
+  fail_current_job_final "$message"
 }
 
 schedule_run_base_sort() {
@@ -790,11 +814,65 @@ build_resume_members_for_current_job() {
   return 0
 }
 
+child_fanout_lock_dir_for_id() {
+  local run_root_id="$1"
+  printf '%s/child-fanout-%s.lockdir' "$JOB_LOCKS_DIR" "$(queue_safe_token "$run_root_id")"
+}
+
+acquire_child_fanout_lock() {
+  local run_root_id="$1"
+  local lock_dir pid
+
+  mkdir -p "$JOB_LOCKS_DIR" >/dev/null 2>&1 || return 1
+  lock_dir="$(child_fanout_lock_dir_for_id "$run_root_id")"
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
+    printf '%s' "$lock_dir"
+    return 0
+  fi
+
+  pid="$(sed -n '1p' "${lock_dir}/pid" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && process_alive "$pid"; then
+    return 1
+  fi
+
+  rm -rf "$lock_dir" >/dev/null 2>&1 || true
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
+    printf '%s' "$lock_dir"
+    return 0
+  fi
+  return 1
+}
+
+release_child_fanout_lock() {
+  local lock_dir="$1"
+  local pid
+
+  [[ -n "$lock_dir" && -d "$lock_dir" ]] || return 0
+  pid="$(sed -n '1p' "${lock_dir}/pid" 2>/dev/null || true)"
+  [[ -z "$pid" || "$pid" == "$$" ]] || return 0
+  rm -rf "$lock_dir" >/dev/null 2>&1 || true
+}
+
+send_job_id_already_queued() {
+  local job_id="$1"
+  local found=""
+
+  [[ -n "$job_id" ]] || return 1
+  case "$job_id" in
+    *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  found="$(find "$OPS_JOBS_DIR" -maxdepth 1 -type f -name "*-${job_id}.job" -print -quit 2>/dev/null || true)"
+  [[ -n "$found" ]]
+}
+
 queue_child_send_jobs() {
   local member_count requested_epoch base_sort snapshot_basename schedule_job_id prefix previous_basename run_root_id
   local requested_at window_key frequency threshold threshold_bytes snapshot_prefix_base source_root destination_root completes_schedule_window
   local run_group_id prep_job_id prep_dest_pool send_transport
   local index source_dataset destination_dataset snapshot sort_key child_job_id finalize_job_id fanout_started fanout_elapsed
+  local lock_dir="" created=0 already=0
   # shellcheck disable=SC2034
   local -A queued_job=()
   local resume_only=0
@@ -830,6 +908,13 @@ queue_child_send_jobs() {
   prep_dest_pool="$(job_get job PREP_DEST_POOL)"
   send_transport="$(job_get job SEND_TRANSPORT local)"
 
+  if ! lock_dir="$(acquire_child_fanout_lock "$run_root_id")"; then
+    log "Child send fan-out for ${run_root_id} is already in progress; not queueing duplicate child jobs."
+    zfsas_send_debug_marker "child_jobs_queue_locked parent_job_id=${run_root_id} schedule_job_id=${schedule_job_id}"
+    defer_current_job "Child send jobs are already being queued." 5
+    return 2
+  fi
+
   for ((index = 0; index < member_count; index++)); do
     source_dataset="$(job_get job MEMBER_${index}_SOURCE)"
     destination_dataset="$(job_get job MEMBER_${index}_DESTINATION)"
@@ -838,6 +923,10 @@ queue_child_send_jobs() {
 
     sort_key="$(send_member_sort_key "$base_sort" "$index")"
     child_job_id="send-child-${run_root_id}-${index}"
+    if send_job_id_already_queued "$child_job_id"; then
+      already=$((already + 1))
+      continue
+    fi
     queued_job=()
     queued_job[JOB_ID]="$child_job_id"
     queued_job[JOB_TYPE]="send"
@@ -882,46 +971,64 @@ queue_child_send_jobs() {
     queued_job[MEMBER_0_DESTINATION]="$destination_dataset"
     queued_job[MEMBER_0_SNAPSHOT]="$snapshot"
     queued_job[COMPLETES_SCHEDULE_WINDOW]="0"
-    ensure_send_job_file queued_job "$requested_epoch" || return 1
+    if ! ensure_send_job_file queued_job "$requested_epoch"; then
+      release_child_fanout_lock "$lock_dir"
+      return 1
+    fi
+    created=$((created + 1))
   done
 
   finalize_job_id="finalize-${run_root_id}"
-  queued_job=()
-  queued_job[JOB_ID]="$finalize_job_id"
-  queued_job[JOB_TYPE]="send"
-  queued_job[JOB_MODE]="scheduled"
-  queued_job[JOB_ACTION]="finalize"
-  queued_job[STATE]="queued"
-  queued_job[PHASE]="queued"
-  queued_job[REQUESTED_EPOCH]="$requested_epoch"
-  queued_job[REQUESTED_AT]="$requested_at"
-  queued_job[QUEUE_SORT]="$(finalize_sort_key "$base_sort")"
-  queued_job[WINDOW_KEY]="$window_key"
-  queued_job[SCHEDULE_JOB_ID]="$schedule_job_id"
-  queued_job[PARENT_RUN_ID]="$run_root_id"
-  queued_job[SOURCE_ROOT]="$source_root"
-  queued_job[DESTINATION_ROOT]="$destination_root"
-  queued_job[SNAPSHOT_PREFIX]="$prefix"
-  queued_job[SOURCE_SNAPSHOT_NAME]="$snapshot_basename"
-  queued_job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
-  queued_job[SEND_TRANSPORT]="$send_transport"
-  queued_job[ATTEMPT_COUNT]="0"
-  queued_job[RETRY_AT]="0"
-  queued_job[LAST_ERROR]=""
-  if (( resume_only == 1 )); then
-    queued_job[LAST_MESSAGE]="Waiting for children."
+  if send_job_id_already_queued "$finalize_job_id"; then
+    already=$((already + 1))
   else
-    queued_job[LAST_MESSAGE]="Waiting for children."
+    queued_job=()
+    queued_job[JOB_ID]="$finalize_job_id"
+    queued_job[JOB_TYPE]="send"
+    queued_job[JOB_MODE]="scheduled"
+    queued_job[JOB_ACTION]="finalize"
+    queued_job[STATE]="queued"
+    queued_job[PHASE]="queued"
+    queued_job[REQUESTED_EPOCH]="$requested_epoch"
+    queued_job[REQUESTED_AT]="$requested_at"
+    queued_job[QUEUE_SORT]="$(finalize_sort_key "$base_sort")"
+    queued_job[WINDOW_KEY]="$window_key"
+    queued_job[SCHEDULE_JOB_ID]="$schedule_job_id"
+    queued_job[PARENT_RUN_ID]="$run_root_id"
+    queued_job[SOURCE_ROOT]="$source_root"
+    queued_job[DESTINATION_ROOT]="$destination_root"
+    queued_job[SNAPSHOT_PREFIX]="$prefix"
+    queued_job[SOURCE_SNAPSHOT_NAME]="$snapshot_basename"
+    queued_job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
+    queued_job[SEND_TRANSPORT]="$send_transport"
+    queued_job[ATTEMPT_COUNT]="0"
+    queued_job[RETRY_AT]="0"
+    queued_job[LAST_ERROR]=""
+    if (( resume_only == 1 )); then
+      queued_job[LAST_MESSAGE]="Waiting for children."
+    else
+      queued_job[LAST_MESSAGE]="Waiting for children."
+    fi
+    queued_job[WORKER_PID]=""
+    queued_job[PROGRESS_PERCENT]="5"
+    # shellcheck disable=SC2034
+    queued_job[COMPLETES_SCHEDULE_WINDOW]="$completes_schedule_window"
+    if ! ensure_send_job_file queued_job "$requested_epoch"; then
+      release_child_fanout_lock "$lock_dir"
+      return 1
+    fi
+    created=$((created + 1))
   fi
-  queued_job[WORKER_PID]=""
-  queued_job[PROGRESS_PERCENT]="5"
-  # shellcheck disable=SC2034
-  queued_job[COMPLETES_SCHEDULE_WINDOW]="$completes_schedule_window"
-  ensure_send_job_file queued_job "$requested_epoch" || return 1
 
+  release_child_fanout_lock "$lock_dir"
   fanout_elapsed=$(( $(date +%s) - fanout_started ))
-  log "Queued ${member_count} child send job(s) for ${run_root_id} in ${fanout_elapsed}s"
-  zfsas_send_debug_marker "child_jobs_queued parent_job_id=${run_root_id} schedule_job_id=${schedule_job_id} run_group_id=${run_group_id} member_count=${member_count} resume_only=${resume_only} finalize_job_id=${finalize_job_id} source_root=${source_root} destination_root=${destination_root} snapshot_basename=${snapshot_basename} previous_basename=${previous_basename:-none} elapsed=${fanout_elapsed}s"
+  if (( created == 0 )); then
+    log "Child send jobs for ${run_root_id} were already queued (${already} existing); not queueing duplicates."
+    zfsas_send_debug_marker "child_jobs_already_queued parent_job_id=${run_root_id} schedule_job_id=${schedule_job_id} run_group_id=${run_group_id} member_count=${member_count} already=${already} finalize_job_id=${finalize_job_id}"
+  else
+    log "Queued ${created} child send job(s) for ${run_root_id} in ${fanout_elapsed}s (${already} already present)"
+    zfsas_send_debug_marker "child_jobs_queued parent_job_id=${run_root_id} schedule_job_id=${schedule_job_id} run_group_id=${run_group_id} member_count=${member_count} created=${created} already=${already} resume_only=${resume_only} finalize_job_id=${finalize_job_id} source_root=${source_root} destination_root=${destination_root} snapshot_basename=${snapshot_basename} previous_basename=${previous_basename:-none} elapsed=${fanout_elapsed}s"
+  fi
   return 0
 }
 
@@ -1005,6 +1112,33 @@ send_member_snapshot() {
   fi
 
   progress=$((30 + (member_index * 40 / (member_count == 0 ? 1 : member_count))))
+  if [[ "$(job_get job NEEDS_FULL_RESEND 0)" == "1" ]]; then
+    log "Full resend selected for job $(job_get job JOB_ID): source=${source_dataset} destination=${destination} snapshot=${snapshot}"
+    zfsas_send_debug_marker "full_resend_selected job_id=$(job_get job JOB_ID) source=${source_dataset} destination=${destination} snapshot=${snapshot} transport=${send_transport}"
+    if (( destination_exists == 1 )) && destination_has_any_snapshots_for_transport "$destination"; then
+      if [[ "$send_transport" == "ssh" ]]; then
+        failure_message="Full resend is required for '${destination}', but automatic remote destination purge is not enabled. Clean up the remote destination, then retry."
+        log "$failure_message"
+        zfsas_send_debug_marker "full_resend_remote_fail_closed job_id=$(job_get job JOB_ID) destination=${destination}"
+        fail_current_job_final "$failure_message"
+        return 1
+      fi
+      log "Purging destination dataset for full resend: ${destination}"
+      zfsas_send_debug_marker "full_resend_purge destination=${destination} job_id=$(job_get job JOB_ID)"
+      if ! purge_destination_for_reseed "$destination"; then
+        fail_current_job_final "Full resend could not replace destination '${destination}'."
+        return 1
+      fi
+    fi
+    description="Full resend ${snapshot} -> ${destination}"
+    set_job_progress "snapshot_created" "$progress" "Waiting for send slot."
+    run_pipeline_with_space_reservation "$description" "" "$snapshot" "$destination" "$progress" || return $?
+    job[NEEDS_FULL_RESEND]="0"
+    set_job_progress "verifying" "$((progress + 15))" "Verifying receive."
+    destination_snapshot_exists_for_transport "${destination}@${basename}"
+    return $?
+  fi
+
   if ! preflight_only_worker && current_send_plan_matches "$snapshot" "$destination"; then
     base_snapshot="$(job_get job SEND_PLAN_BASE_SNAPSHOT)"
     description="$(job_get job SEND_PLAN_DESCRIPTION)"
@@ -1375,14 +1509,14 @@ process_send_job() {
           return 1
         }
         set_job_progress "snapshot_created" "28" "Queueing missing sends."
-        queue_child_send_jobs || return 1
+        queue_child_send_jobs || return $?
         job[COMPLETES_SCHEDULE_WINDOW]="0"
         complete_job "Queued missing sends."
         return 0
       fi
       prepare_scheduled_job_snapshot || return 1
       set_job_progress "snapshot_created" "28" "Queueing child sends."
-      queue_child_send_jobs || return 1
+      queue_child_send_jobs || return $?
       job[COMPLETES_SCHEDULE_WINDOW]="0"
       complete_job "Queued child sends."
       release_current_prep_pool_lock

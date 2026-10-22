@@ -188,6 +188,47 @@ def main() -> int:
     ):
         raise AssertionError("scheduled spiped fail-closed guard must run before source checkpoint creation")
 
+    assert_contains(
+        worker,
+        "mark_current_job_needs_full_resend()",
+        "send worker must mark an incremental snapshot mismatch as needing a full resend instead of retrying it",
+    )
+    assert_contains(
+        worker,
+        'job[NEEDS_FULL_RESEND]="1"',
+        "full-resend jobs must keep a durable flag so the next attempt does not repeat the incremental",
+    )
+    assert_contains(
+        ops_lib,
+        "send_failure_text_needs_full_resend()",
+        "send pipeline must recognize a destination snapshot mismatch and a missing incremental base",
+    )
+    assert_contains(
+        ops_lib,
+        "most recent snapshot",
+        "snapshot-mismatch detection must look for the zfs receive 'most recent snapshot' error",
+    )
+    assert_contains(
+        worker,
+        "acquire_child_fanout_lock()",
+        "child send fan-out must take a per-parent lock so a second prepare cannot queue the same children",
+    )
+    assert_contains(
+        worker,
+        "send_job_id_already_queued()",
+        "child send fan-out must skip job ids that already have a queue file",
+    )
+    assert_contains(
+        worker,
+        "not queueing duplicates",
+        "a repeated child fan-out must say the jobs were already queued instead of logging a second queue",
+    )
+    assert_contains(
+        worker,
+        "queue_child_send_jobs || return $?",
+        "a locked child fan-out must defer the parent instead of failing the scheduled prepare",
+    )
+
     print("PASS: send worker helper static contracts")
     return 0
 

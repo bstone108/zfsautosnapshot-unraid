@@ -75,6 +75,7 @@ POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS:-3}"
 POST_DELETE_RECHECK_INTERVAL_SECONDS="${POST_DELETE_RECHECK_INTERVAL_SECONDS:-1}"
 JOB_SUCCESS_TTL_SECONDS="${JOB_SUCCESS_TTL_SECONDS:-5}"
 DELETE_QUEUE_IDLE_TIMEOUT_SECONDS="${DELETE_QUEUE_IDLE_TIMEOUT_SECONDS:-30}"
+PERSIST_TMP_MAX_AGE_MINUTES="${PERSIST_TMP_MAX_AGE_MINUTES:-60}"
 
 SEND_SNAPSHOT_PREFIX="$DEFAULT_SEND_SNAPSHOT_PREFIX"
 SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
@@ -93,6 +94,7 @@ SEND_SPIPED_REMOTE_HOST=""
 SEND_SPIPED_REMOTE_PORT="$DEFAULT_SEND_SPIPED_REMOTE_PORT"
 SEND_SPIPED_KEY_PATH=""
 SEND_JOBS=""
+SEND_JOBS_PARSED=0
 
 SCHEDULE_JOB_IDS=()
 declare -A SCHEDULE_SOURCE_ROOT=()
@@ -487,6 +489,9 @@ ensure_runtime_layout() {
   # Only reap clearly stale temp files. Removing every *.tmp.* file at worker startup can
   # delete another process's in-flight job write and corrupt queue items.
   find "$OPS_JOBS_DIR" -maxdepth 1 -type f -name '*.tmp.*' -mmin +60 -exec rm -f {} \; >/dev/null 2>&1 || true
+  # Same age gate as job temp files. Delete-queue snapshots use
+  # runtime_queue/*.persist.tmp.* while they are written and must be left alone.
+  find "$PERSISTED_QUEUE_DIR" -maxdepth 1 -type f -name '*.persist.tmp.*' -mmin +"${PERSIST_TMP_MAX_AGE_MINUTES}" -exec rm -f {} \; >/dev/null 2>&1 || true
   return 0
 }
 
@@ -1084,6 +1089,14 @@ parse_send_jobs_config() {
     SCHEDULE_TRANSPORT["$job_id"]="$transport"
     SCHEDULE_PREFIX["$job_id"]="${SEND_SNAPSHOT_PREFIX}${job_id}-"
   done
+
+  # A missing config must not look like "the user removed every send job".
+  if [[ -f "$SEND_CONFIG_FILE" ]]; then
+    SEND_JOBS_PARSED=1
+  else
+    SEND_JOBS_PARSED=0
+  fi
+  prune_schedule_state_for_removed_jobs
 }
 
 kv_escape() {
@@ -1254,6 +1267,8 @@ load_schedule_state() {
     [[ "$window_key" =~ ^[0-9]+$ ]] || continue
     SCHEDULE_LAST_COMPLETED_WINDOW["$job_id"]="$window_key"
   done < "$SEND_SCHEDULE_STATE_FILE"
+
+  prune_schedule_state_for_removed_jobs
 }
 
 write_schedule_state() {
@@ -1261,9 +1276,12 @@ write_schedule_state() {
   ops_ensure_dir "$CONFIG_DIR" || return 1
   tmp="$(mktemp "${SEND_SCHEDULE_STATE_FILE}.tmp.XXXXXX")" || return 1
 
-  while IFS= read -r job_id; do
-    printf '%s|%s\n' "$job_id" "${SCHEDULE_LAST_COMPLETED_WINDOW[$job_id]}" >> "$tmp"
-  done < <(printf '%s\n' "${!SCHEDULE_LAST_COMPLETED_WINDOW[@]}" | sort)
+  if ((${#SCHEDULE_LAST_COMPLETED_WINDOW[@]} > 0)); then
+    while IFS= read -r job_id; do
+      [[ -n "$job_id" ]] || continue
+      printf '%s|%s\n' "$job_id" "${SCHEDULE_LAST_COMPLETED_WINDOW[$job_id]}" >> "$tmp"
+    done < <(printf '%s\n' "${!SCHEDULE_LAST_COMPLETED_WINDOW[@]}" | sort)
+  fi
 
   mv "$tmp" "$SEND_SCHEDULE_STATE_FILE" || {
     rm -f "$tmp" >/dev/null 2>&1 || true
@@ -1271,6 +1289,44 @@ write_schedule_state() {
   }
   chmod 0640 "$SEND_SCHEDULE_STATE_FILE" >/dev/null 2>&1 || true
   ops_apply_owner "$SEND_SCHEDULE_STATE_FILE"
+}
+
+prune_schedule_state_for_removed_jobs() {
+  local job_id removed=0
+  local -A known_jobs=()
+  local -a state_job_ids=()
+
+  [[ "${SEND_JOBS_PARSED:-0}" == "1" ]] || return 0
+
+  if ((${#SCHEDULE_JOB_IDS[@]} > 0)); then
+    for job_id in "${SCHEDULE_JOB_IDS[@]}"; do
+      [[ -n "$job_id" ]] || continue
+      known_jobs["$job_id"]=1
+    done
+  fi
+
+  if ((${#SCHEDULE_LAST_COMPLETED_WINDOW[@]} > 0)); then
+    while IFS= read -r job_id; do
+      [[ -n "$job_id" ]] || continue
+      state_job_ids+=("$job_id")
+    done < <(printf '%s\n' "${!SCHEDULE_LAST_COMPLETED_WINDOW[@]}")
+  fi
+
+  if ((${#state_job_ids[@]} == 0)); then
+    return 0
+  fi
+
+  for job_id in "${state_job_ids[@]}"; do
+    [[ "$job_id" =~ ^[a-f0-9]{12}$ ]] || continue
+    [[ -n "${known_jobs[$job_id]:-}" ]] && continue
+    unset "SCHEDULE_LAST_COMPLETED_WINDOW[$job_id]"
+    log "Pruned send schedule state for job id ${job_id}; it is no longer in SEND_JOBS."
+    removed=1
+  done
+
+  if (( removed == 1 )); then
+    write_schedule_state
+  fi
 }
 
 last_completed_schedule_window_key() {
@@ -3211,6 +3267,63 @@ ssh_dataset_tree_inventory() {
   eval "$command" 2>/dev/null || true
 }
 
+send_failure_text_needs_full_resend() {
+  local text="$1"
+  local lower
+  lower="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lower" == *"most recent snapshot"* && "$lower" == *"does not match"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"incremental source"* && "$lower" == *"does not exist"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"could not find incremental source"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"missing incremental base"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+send_pipeline_reset_full_resend_state() {
+  SEND_PIPELINE_NEEDS_FULL_RESEND=0
+  SEND_PIPELINE_FAILURE_DETAIL=""
+  SEND_PIPELINE_STDERR_FILE=""
+}
+
+send_pipeline_capture_begin() {
+  SEND_PIPELINE_STDERR_FILE="$(mktemp /tmp/zfsas-send-pipeline.XXXXXX 2>/dev/null || true)"
+  if [[ -z "${SEND_PIPELINE_STDERR_FILE:-}" ]]; then
+    SEND_PIPELINE_STDERR_FILE="/tmp/zfsas-send-pipeline.$$"
+    : > "$SEND_PIPELINE_STDERR_FILE" || SEND_PIPELINE_STDERR_FILE="/dev/null"
+  fi
+}
+
+send_pipeline_capture_text() {
+  local text=""
+  if [[ -n "${SEND_PIPELINE_STDERR_FILE:-}" && -f "$SEND_PIPELINE_STDERR_FILE" && "$SEND_PIPELINE_STDERR_FILE" != "/dev/null" ]]; then
+    text="$(tail -c 4000 "$SEND_PIPELINE_STDERR_FILE" 2>/dev/null || true)"
+    rm -f "$SEND_PIPELINE_STDERR_FILE" >/dev/null 2>&1 || true
+  fi
+  SEND_PIPELINE_STDERR_FILE=""
+  printf '%s' "$text"
+}
+
+send_pipeline_note_incremental_failure() {
+  local detail="$1"
+  local flat=""
+  [[ -n "$detail" ]] || return 1
+  flat="$(printf '%s' "$detail" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+  log "Send pipeline stderr: ${flat}"
+  send_failure_text_needs_full_resend "$detail" || return 1
+  SEND_PIPELINE_NEEDS_FULL_RESEND=1
+  SEND_PIPELINE_FAILURE_DETAIL="$flat"
+  log "Incremental receive needs a full resend instead of another incremental retry."
+  zfsas_send_debug_marker "pipeline_needs_full_resend detail=${flat}"
+  return 0
+}
+
 run_pipeline_with_status() {
   local description="$1"
   local base_snapshot="$2"
@@ -3233,6 +3346,9 @@ run_pipeline_with_status() {
   local resume_snapshot=""
   local resume_query_rc=0
   local -a pipeline_status=()
+  local pipeline_detail=""
+
+  send_pipeline_reset_full_resend_state
 
   is_valid_snapshot_name "$snapshot" || {
     log "Refusing pipeline for invalid snapshot name: $snapshot"
@@ -3323,16 +3439,17 @@ run_pipeline_with_status() {
   fi
 
   if [[ -n "$base_snapshot" ]]; then
+    send_pipeline_capture_begin
     if (( progress_supported == 1 )); then
       if [[ -n "$rate_limiter_command" ]]; then
-        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$rate_limiter_command" | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$rate_limiter_command" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         meter_rc=${pipeline_status[1]:-0}
         rate_rc=${pipeline_status[2]:-0}
         receive_rc=${pipeline_status[3]:-0}
       else
-        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         meter_rc=${pipeline_status[1]:-0}
@@ -3340,13 +3457,13 @@ run_pipeline_with_status() {
       fi
     else
       if [[ -n "$rate_limiter_command" ]]; then
-        zfs send -I "$base_snapshot" "$snapshot" | eval "$rate_limiter_command" | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | eval "$rate_limiter_command" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         rate_rc=${pipeline_status[1]:-0}
         receive_rc=${pipeline_status[2]:-0}
       else
-        zfs send -I "$base_snapshot" "$snapshot" | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         receive_rc=${pipeline_status[1]:-0}
@@ -3357,9 +3474,11 @@ run_pipeline_with_status() {
     (( meter_rc != 0 )) && pipeline_rc=$meter_rc
     (( rate_rc != 0 )) && pipeline_rc=$rate_rc
     (( receive_rc != 0 )) && pipeline_rc=$receive_rc
+    pipeline_detail="$(send_pipeline_capture_text)"
     if (( pipeline_rc != 0 )); then
       log "Send pipeline failed: mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
       zfsas_send_debug_marker "pipeline_failed mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
+      send_pipeline_note_incremental_failure "$pipeline_detail" || true
       return 1
     fi
   else

@@ -475,4 +475,121 @@ assert_contains "$resume_failure_output" "send_exit=17" "resume failure diagnost
 assert_contains "$resume_failure_output" "receive_exit=0" "resume failure diagnostics must report the receiver exit status"
 unset SSH_RESUME_MODE
 
+if ! send_failure_text_needs_full_resend "cannot receive incremental stream: most recent snapshot of pool/data does not match incremental source"; then
+  fail "receive snapshot mismatch must stop incremental retries and require a full resend"
+fi
+if ! send_failure_text_needs_full_resend "cannot send pool/data@new: incremental source (pool/data@old) does not exist"; then
+  fail "a missing incremental base must stop incremental retries and require a full resend"
+fi
+if send_failure_text_needs_full_resend "destination pool is busy"; then
+  fail "unrelated pipeline failures must keep the normal retry path"
+fi
+
+# Schedule-state pruning runs only after SEND_JOBS is read from a real config
+# file. A missing config must leave the state file untouched.
+(
+  schedule_root="$(mktemp -d)"
+  trap 'rm -rf "$schedule_root"' EXIT
+  CONFIG_DIR="${schedule_root}/config"
+  SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
+  SEND_SCHEDULE_STATE_FILE="${CONFIG_DIR}/send_schedule_state.state"
+  mkdir -p "$CONFIG_DIR"
+
+  reset_schedule_case() {
+    local jobs_line="$1"
+    printf '%s\n' 'abcdef012345|100' 'deadbeefdead|50' > "$SEND_SCHEDULE_STATE_FILE"
+    if [[ -n "$jobs_line" ]]; then
+      printf '%s\n' "$jobs_line" > "$SEND_CONFIG_FILE"
+    else
+      rm -f "$SEND_CONFIG_FILE"
+    fi
+    SEND_JOBS=""
+    SEND_JOBS_PARSED=0
+    SCHEDULE_JOB_IDS=()
+    SCHEDULE_LAST_COMPLETED_WINDOW=()
+  }
+
+  reset_schedule_case 'SEND_JOBS="abcdef012345|tank/data|backup/data|1d|1G|0|local"'
+  load_send_config
+  worker_prune_log="${schedule_root}/worker-prune.log"
+  {
+    load_schedule_state
+    parse_send_jobs_config
+  } >"$worker_prune_log"
+  grep -q '^abcdef012345|100$' "$SEND_SCHEDULE_STATE_FILE" || fail "kept send job must stay in schedule state"
+  if grep -q 'deadbeefdead' "$SEND_SCHEDULE_STATE_FILE"; then
+    fail "removed send job must be pruned when the worker loads state before parsing SEND_JOBS"
+  fi
+  assert_contains "$(cat "$worker_prune_log")" "Pruned send schedule state for job id deadbeefdead; it is no longer in SEND_JOBS." "schedule prune must name the removed job id"
+  [[ " ${SCHEDULE_JOB_IDS[*]} " == *" abcdef012345 "* ]] || fail "schedule parser must still accept the remaining send job"
+
+  reset_schedule_case 'SEND_JOBS="abcdef012345|tank/data|backup/data|1d|1G|0|local"'
+  load_send_config
+  parse_send_jobs_config
+  if grep -q 'deadbeefdead' "$SEND_SCHEDULE_STATE_FILE"; then
+    :
+  else
+    fail "parsing before the state file is loaded must not rewrite schedule state from an empty map"
+  fi
+  kicker_prune_log="${schedule_root}/kicker-prune.log"
+  load_schedule_state >"$kicker_prune_log"
+  if grep -q 'deadbeefdead' "$SEND_SCHEDULE_STATE_FILE"; then
+    fail "removed send job must be pruned when schedule state is loaded after SEND_JOBS is parsed"
+  fi
+  grep -q '^abcdef012345|100$' "$SEND_SCHEDULE_STATE_FILE" || fail "kept send job must survive a post-parse schedule load"
+  assert_contains "$(cat "$kicker_prune_log")" "no longer in SEND_JOBS." "post-parse schedule load must log the pruned job"
+
+  reset_schedule_case 'SEND_JOBS=""'
+  load_send_config
+  load_schedule_state
+  parse_send_jobs_config
+  if grep -Eq 'abcdef012345|deadbeefdead' "$SEND_SCHEDULE_STATE_FILE"; then
+    fail "an empty SEND_JOBS config must drop every saved schedule-state job id"
+  fi
+
+  reset_schedule_case ""
+  before_missing="$(cat "$SEND_SCHEDULE_STATE_FILE")"
+  load_send_config
+  load_schedule_state
+  parse_send_jobs_config
+  after_missing="$(cat "$SEND_SCHEDULE_STATE_FILE")"
+  [[ "$before_missing" == "$after_missing" ]] || fail "a missing send config must not wipe schedule state"
+  [[ "${SEND_JOBS_PARSED}" == "0" ]] || fail "a missing send config must not mark SEND_JOBS as parsed"
+)
+
+(
+  persist_root="$(mktemp -d)"
+  trap 'rm -rf "$persist_root"' EXIT
+  OPS_ROOT="${persist_root}/ops"
+  OPS_JOBS_DIR="${OPS_ROOT}/jobs"
+  OPS_STATUS_DIR="${OPS_ROOT}/status"
+  PERSISTED_QUEUE_DIR="${persist_root}/config/runtime_queue"
+  FAILED_SEND_LOGS_DIR="${persist_root}/config/failed"
+  RUNTIME_DIR="${persist_root}/run"
+  SEND_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/send-workers"
+  SEND_TRANSFER_RUNTIME_DIR="${RUNTIME_DIR}/send-transfer-slots"
+  DELETE_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/delete-worker"
+  PREP_LOCKS_DIR="${RUNTIME_DIR}/prep-locks"
+  JOB_LOCKS_DIR="${RUNTIME_DIR}/job-locks"
+  ACTIVE_SEND_DATASETS_DIR="${RUNTIME_DIR}/active-send-datasets"
+  SEND_SPACE_RESERVATION_DIR="${RUNTIME_DIR}/send-space-reservations"
+  LOG_FILE="${persist_root}/log/send.log"
+  PERSIST_TMP_MAX_AGE_MINUTES=60
+  mkdir -p "$PERSISTED_QUEUE_DIR"
+  stale="${PERSISTED_QUEUE_DIR}/delete-queue.persist.tmp.old"
+  fresh="${PERSISTED_QUEUE_DIR}/delete-queue.persist.tmp.fresh"
+  keep="${PERSISTED_QUEUE_DIR}/delete-queue.persist"
+  other="${PERSISTED_QUEUE_DIR}/notes.tmp.old"
+  printf 'stale\n' > "$stale"
+  printf 'fresh\n' > "$fresh"
+  printf 'keep\n' > "$keep"
+  printf 'other\n' > "$other"
+  touch -d '2 hours ago' "$stale" "$other"
+  ensure_runtime_layout || fail "runtime layout should be created for persist temp cleanup"
+  [[ ! -e "$stale" ]] || fail "startup must remove runtime_queue persist temp files older than ${PERSIST_TMP_MAX_AGE_MINUTES} minutes"
+  [[ -e "$fresh" ]] || fail "startup must leave a fresh persist temp file alone"
+  [[ -e "$keep" ]] || fail "startup must leave the persisted delete queue in place"
+  [[ -e "$other" ]] || fail "startup must only remove *.persist.tmp.* from the runtime queue"
+)
+
 printf '%s\n' "PASS: send transport command checks"
