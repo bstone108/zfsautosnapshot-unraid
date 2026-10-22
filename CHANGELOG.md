@@ -5,6 +5,14 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.10.22.t01 (Testing Branch Only)
+
+- Dataset Migrator no longer measures folder sizes on every automatic status check. Those checks only follow a migration that is already running, so the page buttons become usable even when a size scan is slow. Folder sizes are calculated when you press Refresh, and once in the background the first time a dataset is shown. The page shows when that scan last finished. A second Refresh while a scan is running says "scan in progress" instead of starting another one. A folder that is its own ZFS dataset uses the dataset's used space instead of walking every file, and a size walk cannot run forever.
+- If a ZFS send receive says the destination snapshot does not match, or the incremental base is missing, the job stops retrying that incremental. The queue shows that a full resend is required.
+- A scheduled send no longer queues the same child send job twice when preparation runs again for that parent.
+- Saved send schedule progress is dropped for jobs that were removed from the send list. If the send config cannot be read, that saved progress is left alone.
+- On startup, leftover temporary copies of the delete queue older than one hour are removed.
+
 ### 2026.10.10.t01 (Testing Branch Only)
 
 - Fixed the once-a-minute send and delete queue check so it can tell the array is started when the scheduler PATH does not include mdcmd. Queue work no longer stays paused on a started array just because /proc/mdcmd cannot be read.
