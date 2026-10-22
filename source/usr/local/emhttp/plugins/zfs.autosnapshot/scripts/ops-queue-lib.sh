@@ -75,6 +75,7 @@ POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS:-3}"
 POST_DELETE_RECHECK_INTERVAL_SECONDS="${POST_DELETE_RECHECK_INTERVAL_SECONDS:-1}"
 JOB_SUCCESS_TTL_SECONDS="${JOB_SUCCESS_TTL_SECONDS:-5}"
 DELETE_QUEUE_IDLE_TIMEOUT_SECONDS="${DELETE_QUEUE_IDLE_TIMEOUT_SECONDS:-30}"
+PERSIST_TMP_MAX_AGE_MINUTES="${PERSIST_TMP_MAX_AGE_MINUTES:-60}"
 
 SEND_SNAPSHOT_PREFIX="$DEFAULT_SEND_SNAPSHOT_PREFIX"
 SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
@@ -488,6 +489,9 @@ ensure_runtime_layout() {
   # Only reap clearly stale temp files. Removing every *.tmp.* file at worker startup can
   # delete another process's in-flight job write and corrupt queue items.
   find "$OPS_JOBS_DIR" -maxdepth 1 -type f -name '*.tmp.*' -mmin +60 -exec rm -f {} \; >/dev/null 2>&1 || true
+  # Same age gate as job temp files. Delete-queue snapshots use
+  # runtime_queue/*.persist.tmp.* while they are written and must be left alone.
+  find "$PERSISTED_QUEUE_DIR" -maxdepth 1 -type f -name '*.persist.tmp.*' -mmin +"${PERSIST_TMP_MAX_AGE_MINUTES}" -exec rm -f {} \; >/dev/null 2>&1 || true
   return 0
 }
 

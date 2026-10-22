@@ -557,4 +557,39 @@ fi
   [[ "${SEND_JOBS_PARSED}" == "0" ]] || fail "a missing send config must not mark SEND_JOBS as parsed"
 )
 
+(
+  persist_root="$(mktemp -d)"
+  trap 'rm -rf "$persist_root"' EXIT
+  OPS_ROOT="${persist_root}/ops"
+  OPS_JOBS_DIR="${OPS_ROOT}/jobs"
+  OPS_STATUS_DIR="${OPS_ROOT}/status"
+  PERSISTED_QUEUE_DIR="${persist_root}/config/runtime_queue"
+  FAILED_SEND_LOGS_DIR="${persist_root}/config/failed"
+  RUNTIME_DIR="${persist_root}/run"
+  SEND_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/send-workers"
+  SEND_TRANSFER_RUNTIME_DIR="${RUNTIME_DIR}/send-transfer-slots"
+  DELETE_WORKER_RUNTIME_DIR="${RUNTIME_DIR}/delete-worker"
+  PREP_LOCKS_DIR="${RUNTIME_DIR}/prep-locks"
+  JOB_LOCKS_DIR="${RUNTIME_DIR}/job-locks"
+  ACTIVE_SEND_DATASETS_DIR="${RUNTIME_DIR}/active-send-datasets"
+  SEND_SPACE_RESERVATION_DIR="${RUNTIME_DIR}/send-space-reservations"
+  LOG_FILE="${persist_root}/log/send.log"
+  PERSIST_TMP_MAX_AGE_MINUTES=60
+  mkdir -p "$PERSISTED_QUEUE_DIR"
+  stale="${PERSISTED_QUEUE_DIR}/delete-queue.persist.tmp.old"
+  fresh="${PERSISTED_QUEUE_DIR}/delete-queue.persist.tmp.fresh"
+  keep="${PERSISTED_QUEUE_DIR}/delete-queue.persist"
+  other="${PERSISTED_QUEUE_DIR}/notes.tmp.old"
+  printf 'stale\n' > "$stale"
+  printf 'fresh\n' > "$fresh"
+  printf 'keep\n' > "$keep"
+  printf 'other\n' > "$other"
+  touch -d '2 hours ago' "$stale" "$other"
+  ensure_runtime_layout || fail "runtime layout should be created for persist temp cleanup"
+  [[ ! -e "$stale" ]] || fail "startup must remove runtime_queue persist temp files older than ${PERSIST_TMP_MAX_AGE_MINUTES} minutes"
+  [[ -e "$fresh" ]] || fail "startup must leave a fresh persist temp file alone"
+  [[ -e "$keep" ]] || fail "startup must leave the persisted delete queue in place"
+  [[ -e "$other" ]] || fail "startup must only remove *.persist.tmp.* from the runtime queue"
+)
+
 printf '%s\n' "PASS: send transport command checks"
