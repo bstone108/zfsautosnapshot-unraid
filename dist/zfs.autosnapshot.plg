@@ -1,7 +1,12 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.10.10.t01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.10.22.t01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.10.10.t01 (2026-10-10)
+### 2026.10.22.t01 (2026-10-22)
+- Dataset Migrator no longer measures folder sizes on every automatic status check. Those checks only follow a running migration, so the page buttons become usable even when a size scan is slow. Folder sizes are calculated when you press Refresh, and once in the background the first time a dataset is shown. The page shows when that scan last finished. A second Refresh while a scan is running says "scan in progress". A folder that is its own ZFS dataset uses the dataset's used space, and a size walk cannot run forever.
+- If a ZFS send receive says the destination snapshot does not match, or the incremental base is missing, the job stops retrying that incremental. The queue shows that a full resend is required.
+- A scheduled send no longer queues the same child send job twice when preparation runs again for that parent.
+- Saved send schedule progress is dropped for jobs that were removed from the send list. If the send config cannot be read, that saved progress is left alone.
+- On startup, leftover temporary copies of the delete queue older than one hour are removed.
 - Fixed the once-a-minute send and delete queue check so it can tell the array is started when the scheduler PATH does not include mdcmd. Queue work no longer stays paused on a started array just because /proc/mdcmd cannot be read.
 - If the array state still cannot be read from mdcmd, /proc/mdcmd, or var.ini, the log says that directly and repeats it at most once an hour. A stopped, stopping, or starting array still pauses queue workers.
 - If a dataset migration is interrupted, Unraid raises an alert that the migration was interrupted, apps may not function properly until it finishes, the migration will resume in about 15 minutes, and non-functioning apps should be ignored until then.
@@ -20,9 +25,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.10.10.t01-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.10.10.t01-noarch-1.txz</URL>
-    <MD5>af82f08e707683c596bde045bfcf86e5</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.10.22.t01-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.10.22.t01-noarch-1.txz</URL>
+    <MD5>7bd64ba4acb6cc1b89463fcbb5b84e77</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -30,10 +35,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.10.10.t01-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.10.22.t01-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="af82f08e707683c596bde045bfcf86e5"
+PKG_MD5="7bd64ba4acb6cc1b89463fcbb5b84e77"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
