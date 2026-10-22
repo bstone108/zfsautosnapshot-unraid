@@ -301,7 +301,7 @@ $csrfToken = zfsas_get_csrf_token();
 
   <div class="zfsas-dm-card">
     <h3 style="margin-top:0;">Top-Level Folder Plan</h3>
-    <div class="zfsas-dm-help">Eligible rows will be migrated into child datasets. During an active run this table switches to the worker's live folder state.</div>
+    <div class="zfsas-dm-help">Eligible rows will be migrated into child datasets. During an active run this table switches to the worker's live folder state. Folder sizes are calculated when you press Refresh, and once in the background on first load. The automatic status check does not walk folders or run du.</div>
     <div id="migrate_folder_source_notice" class="zfsas-dm-source-notice"></div>
     <div class="zfsas-table-wrap">
       <table class="zfsas-table">
@@ -359,8 +359,12 @@ $csrfToken = zfsas_get_csrf_token();
   var statusUrl = <?php echo json_encode($statusUrl); ?>;
   var actionUrl = <?php echo json_encode($actionUrl); ?>;
   var pollTimer = null;
+  var pollInFlight = false;
+  var pollQueued = false;
+  var pollDelayMs = 5000;
   var currentDataset = '';
   var startBusy = false;
+  var autoScannedDatasets = {};
 
   function byId(id) {
     return document.getElementById(id);
@@ -402,10 +406,15 @@ $csrfToken = zfsas_get_csrf_token();
     return '';
   }
 
-  function requestJson(url, onSuccess, onError) {
+  function requestJson(url, onSuccess, onError, timeoutMs) {
     var xhr = new XMLHttpRequest();
     xhr.open('GET', url, true);
-    xhr.timeout = 20000;
+    if (typeof timeoutMs !== 'number') {
+      timeoutMs = 20000;
+    }
+    if (timeoutMs > 0) {
+      xhr.timeout = timeoutMs;
+    }
     xhr.setRequestHeader('Accept', 'application/json');
     xhr.onreadystatechange = function () {
       if (xhr.readyState !== 4) {
@@ -680,19 +689,31 @@ $csrfToken = zfsas_get_csrf_token();
     el.innerHTML = '<span class="zfsas-chip' + (kind === 'warn' ? ' warn' : '') + '">' + escapeHtml(message) + '</span>';
   }
 
+  function folderScanStamp(preview) {
+    if (preview && preview.scannedAtDisplay) {
+      return ' Last scanned ' + preview.scannedAtDisplay + '.';
+    }
+    return '';
+  }
+
   function renderFolderSourceNotice(preview, status, usingLiveRows) {
     var activeDataset = status && status.DATASET ? String(status.DATASET) : '';
     var selected = selectedDatasetValue();
+    var stamp = folderScanStamp(preview);
     if (usingLiveRows) {
-      renderSourceNotice('migrate_folder_source_notice', 'Showing live worker folder state for active dataset ' + activeDataset + '.', '');
+      renderSourceNotice('migrate_folder_source_notice', 'Showing live worker folder state for active dataset ' + activeDataset + '.' + stamp, '');
       return;
     }
     if (preview && selected !== '') {
       if (activeDataset !== '' && activeDataset !== selected) {
-        renderSourceNotice('migrate_folder_source_notice', 'Showing refreshed preview rows for selected dataset ' + selected + '. Selected dataset ' + selected + ' differs from the active migration dataset ' + activeDataset + '.', 'warn');
+        renderSourceNotice('migrate_folder_source_notice', 'Showing refreshed preview rows for selected dataset ' + selected + '. Selected dataset ' + selected + ' differs from the active migration dataset ' + activeDataset + '.' + stamp, 'warn');
         return;
       }
-      renderSourceNotice('migrate_folder_source_notice', 'Showing refreshed preview rows for selected dataset ' + selected + '.', '');
+      renderSourceNotice('migrate_folder_source_notice', 'Showing refreshed preview rows for selected dataset ' + selected + '.' + stamp, '');
+      return;
+    }
+    if (selected !== '') {
+      renderSourceNotice('migrate_folder_source_notice', 'Folder sizes for ' + selected + ' have not been scanned yet.', '');
       return;
     }
     renderSourceNotice('migrate_folder_source_notice', '', '');
@@ -834,7 +855,7 @@ $csrfToken = zfsas_get_csrf_token();
       html += '<tr>';
       html += '<td><code>' + escapeHtml(row.name || '') + '</code></td>';
       html += '<td><code>' + escapeHtml(row.targetDataset || '') + '</code></td>';
-      html += '<td>' + escapeHtml(formatBytes(row.sizeBytes || 0)) + '</td>';
+      html += '<td>' + escapeHtml((row.sizeBytes === null || row.sizeBytes === undefined || row.sizeBytes === '') ? '-' : formatBytes(row.sizeBytes)) + '</td>';
       html += '<td>' + stateChip(normalizeStateLabel(state), chipKind) + '</td>';
       html += '<td>' + progressHtml(row.progressPercent || 0) + '</td>';
       html += '<td>' + escapeHtml(row.message || '') + '</td>';
@@ -916,55 +937,137 @@ $csrfToken = zfsas_get_csrf_token();
     el.textContent = lines.join('\n');
   }
 
+  function applyStatusPayload(payload) {
+    var status = payload.status || {};
+    var hasSelectedDataset = (currentDataset || payload.selectedDataset || selectedDatasetValue()) !== '';
+    populateDatasetSelect(payload.datasets || [], currentDataset || payload.selectedDataset || status.DATASET || '');
+    hasSelectedDataset = selectedDatasetValue() !== '';
+    renderSummary(status);
+    renderFolderRows(payload.preview, status);
+    renderContainerRows(payload.docker, status);
+    renderLog(payload.logTail || []);
+    updateMigrationControls(status, hasSelectedDataset);
+
+    if (payload.datasetError) {
+      renderFeedback(payload.datasetError, 'error');
+    } else if (payload.previewError && currentDataset !== '') {
+      renderFeedback(payload.previewError, 'error');
+    } else if (payload.scanMessage) {
+      renderFeedback(payload.scanMessage, 'warn');
+    } else if (payload.scanInProgress) {
+      renderFeedback('scan in progress', 'warn');
+    } else if (payload.docker && payload.docker.error) {
+      renderFeedback(payload.docker.error, 'warn');
+    } else {
+      renderFeedback('', '');
+    }
+
+    if (status && status.isStale) {
+      renderPageStatus('Dataset migrator worker stopped before it finished.', true);
+    } else if (status && status.isActive && String(status.WAITING_FOR_SPACE || '0') === '1') {
+      renderPageStatus('Dataset migration is waiting for free space before touching the next folder.', false);
+    } else if (status && status.isActive) {
+      renderPageStatus('Dataset migration is running in the background.', false);
+    } else if (payload.scanInProgress) {
+      renderPageStatus('Folder size scan is in progress.', false);
+    } else {
+      renderPageStatus('Dataset migrator is ready.', false);
+    }
+
+    return status;
+  }
+
+  function maybeAutoScan(payload) {
+    var status = payload && payload.status ? payload.status : {};
+    var dataset = selectedDatasetValue();
+    if (!dataset || autoScannedDatasets[dataset]) {
+      return;
+    }
+    if (payload && (payload.scanInProgress || payload.scanMessage === 'scan in progress')) {
+      return;
+    }
+    if (status.isActive || status.isStale) {
+      return;
+    }
+    if (payload && payload.preview && payload.preview.scannedAtDisplay) {
+      return;
+    }
+    autoScannedDatasets[dataset] = true;
+    requestFolderScan('Scanning folder sizes...');
+  }
+
+  function finishStatusPoll() {
+    pollInFlight = false;
+    if (pollQueued) {
+      pollQueued = false;
+      refreshStatus();
+      return;
+    }
+    if (pollTimer !== null) {
+      window.clearTimeout(pollTimer);
+    }
+    pollTimer = window.setTimeout(refreshStatus, pollDelayMs);
+  }
+
   function refreshStatus() {
+    if (pollTimer !== null) {
+      window.clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+    if (pollInFlight) {
+      pollQueued = true;
+      return;
+    }
+
     var dataset = selectedDatasetValue();
     currentDataset = dataset;
-    renderPageStatus('Refreshing dataset migrator status...', false);
+    pollInFlight = true;
     requestJson(
-      statusUrl + '?dataset=' + encodeURIComponent(dataset) + '&_=' + Date.now(),
+      statusUrl + '?mode=status&dataset=' + encodeURIComponent(dataset) + '&_=' + Date.now(),
       function (payload) {
-        var status = payload.status || {};
-        var hasSelectedDataset = (currentDataset || payload.selectedDataset || selectedDatasetValue()) !== '';
-        populateDatasetSelect(payload.datasets || [], currentDataset || payload.selectedDataset || status.DATASET || '');
-        hasSelectedDataset = selectedDatasetValue() !== '';
-        renderSummary(status);
-        renderFolderRows(payload.preview, status);
-        renderContainerRows(payload.docker, status);
-        renderLog(payload.logTail || []);
-        updateMigrationControls(status, hasSelectedDataset);
-
-        if (payload.datasetError) {
-          renderFeedback(payload.datasetError, 'error');
-        } else if (payload.previewError && currentDataset !== '') {
-          renderFeedback(payload.previewError, 'error');
-        } else if (payload.docker && payload.docker.error) {
-          renderFeedback(payload.docker.error, 'warn');
-        } else {
-          renderFeedback('', '');
-        }
-
-        if (status && status.isStale) {
-          renderPageStatus('Dataset migrator worker stopped before it finished.', true);
-        } else if (status && status.isActive && String(status.WAITING_FOR_SPACE || '0') === '1') {
-          renderPageStatus('Dataset migration is waiting for free space before touching the next folder.', false);
-        } else if (status && status.isActive) {
-          renderPageStatus('Dataset migration is running in the background.', false);
-        } else {
-          renderPageStatus('Dataset migrator is ready.', false);
-        }
+        pollDelayMs = 5000;
+        applyStatusPayload(payload);
+        maybeAutoScan(payload);
+        finishStatusPoll();
       },
       function (error) {
         renderPageStatus('Dataset migrator refresh failed: ' + error.message, true);
+        if (String(error && error.message || '').indexOf('timed out') !== -1) {
+          pollDelayMs = Math.min(Math.max(pollDelayMs, 5000) * 2, 60000);
+        }
+        finishStatusPoll();
       }
     );
   }
 
-  function startPolling() {
-    if (pollTimer !== null) {
-      window.clearInterval(pollTimer);
+  function requestFolderScan(statusText) {
+    var dataset = selectedDatasetValue();
+    currentDataset = dataset;
+    if (!dataset) {
+      renderFeedback('Choose a dataset first.', 'warn');
+      return;
     }
+    if (statusText) {
+      renderPageStatus(statusText, false);
+    }
+    requestJson(
+      statusUrl + '?mode=scan&dataset=' + encodeURIComponent(dataset) + '&_=' + Date.now(),
+      function (payload) {
+        applyStatusPayload(payload);
+        if (payload && payload.scanMessage === 'scan in progress') {
+          renderFeedback('scan in progress', 'warn');
+          renderPageStatus('Folder size scan is in progress.', false);
+        }
+      },
+      function (error) {
+        renderPageStatus('Dataset migrator refresh failed: ' + error.message, true);
+      },
+      0
+    );
+  }
+
+  function startPolling() {
     refreshStatus();
-    pollTimer = window.setInterval(refreshStatus, 5000);
   }
 
   var datasetSelect = byId('migrate_dataset');
@@ -978,7 +1081,7 @@ $csrfToken = zfsas_get_csrf_token();
   var refreshButton = byId('migrate_refresh');
   if (refreshButton) {
     refreshButton.addEventListener('click', function () {
-      refreshStatus();
+      requestFolderScan('Scanning folder sizes...');
     });
   }
 
@@ -986,7 +1089,7 @@ $csrfToken = zfsas_get_csrf_token();
   if (previewButton) {
     previewButton.addEventListener('click', function () {
       renderPageStatus('Previewing top-level folders...', false);
-      refreshStatus();
+      requestFolderScan('Previewing top-level folders...');
     });
   }
 
