@@ -554,12 +554,36 @@ run_pipeline_with_space_reservation() {
   if [[ -n "$send_progress" ]]; then
     set_job_progress "sending" "0" "Sending."
   fi
+  SEND_PIPELINE_NEEDS_FULL_RESEND=0
   if run_pipeline_with_status "$description" "$base_snapshot" "$snapshot" "$destination" "$required_bytes" 0 99; then
     rc=0
   else
     rc=$?
   fi
+  if (( rc != 0 )) && [[ "${SEND_PIPELINE_NEEDS_FULL_RESEND:-0}" == "1" ]]; then
+    mark_current_job_needs_full_resend "${SEND_PIPELINE_FAILURE_DETAIL:-}"
+    return 1
+  fi
   return "$rc"
+}
+
+mark_current_job_needs_full_resend() {
+  local detail="${1:-}"
+  local message="Incremental receive failed: the destination snapshot does not match the incremental base. Full resend is required; incremental retries were stopped."
+
+  log "$message"
+  if [[ -n "$detail" ]]; then
+    log "Full resend detail: ${detail}"
+  fi
+  zfsas_send_debug_marker "job_needs_full_resend job_id=$(job_get job JOB_ID) source=$(job_get job SOURCE_ROOT) destination=$(job_get job DESTINATION_ROOT) detail=${detail}"
+  job[NEEDS_FULL_RESEND]="1"
+  job[SEND_PLAN_DESCRIPTION]=""
+  job[SEND_PLAN_BASE_SNAPSHOT]=""
+  job[SEND_PLAN_SNAPSHOT]=""
+  job[SEND_PLAN_DESTINATION]=""
+  job[SPACE_ESTIMATE_KEY]=""
+  job[SPACE_REQUIRED_BYTES]=""
+  fail_current_job_final "$message"
 }
 
 schedule_run_base_sort() {
@@ -1005,6 +1029,33 @@ send_member_snapshot() {
   fi
 
   progress=$((30 + (member_index * 40 / (member_count == 0 ? 1 : member_count))))
+  if [[ "$(job_get job NEEDS_FULL_RESEND 0)" == "1" ]]; then
+    log "Full resend selected for job $(job_get job JOB_ID): source=${source_dataset} destination=${destination} snapshot=${snapshot}"
+    zfsas_send_debug_marker "full_resend_selected job_id=$(job_get job JOB_ID) source=${source_dataset} destination=${destination} snapshot=${snapshot} transport=${send_transport}"
+    if (( destination_exists == 1 )) && destination_has_any_snapshots_for_transport "$destination"; then
+      if [[ "$send_transport" == "ssh" ]]; then
+        failure_message="Full resend is required for '${destination}', but automatic remote destination purge is not enabled. Clean up the remote destination, then retry."
+        log "$failure_message"
+        zfsas_send_debug_marker "full_resend_remote_fail_closed job_id=$(job_get job JOB_ID) destination=${destination}"
+        fail_current_job_final "$failure_message"
+        return 1
+      fi
+      log "Purging destination dataset for full resend: ${destination}"
+      zfsas_send_debug_marker "full_resend_purge destination=${destination} job_id=$(job_get job JOB_ID)"
+      if ! purge_destination_for_reseed "$destination"; then
+        fail_current_job_final "Full resend could not replace destination '${destination}'."
+        return 1
+      fi
+    fi
+    description="Full resend ${snapshot} -> ${destination}"
+    set_job_progress "snapshot_created" "$progress" "Waiting for send slot."
+    run_pipeline_with_space_reservation "$description" "" "$snapshot" "$destination" "$progress" || return $?
+    job[NEEDS_FULL_RESEND]="0"
+    set_job_progress "verifying" "$((progress + 15))" "Verifying receive."
+    destination_snapshot_exists_for_transport "${destination}@${basename}"
+    return $?
+  fi
+
   if ! preflight_only_worker && current_send_plan_matches "$snapshot" "$destination"; then
     base_snapshot="$(job_get job SEND_PLAN_BASE_SNAPSHOT)"
     description="$(job_get job SEND_PLAN_DESCRIPTION)"

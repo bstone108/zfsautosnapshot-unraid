@@ -475,4 +475,14 @@ assert_contains "$resume_failure_output" "send_exit=17" "resume failure diagnost
 assert_contains "$resume_failure_output" "receive_exit=0" "resume failure diagnostics must report the receiver exit status"
 unset SSH_RESUME_MODE
 
+if ! send_failure_text_needs_full_resend "cannot receive incremental stream: most recent snapshot of pool/data does not match incremental source"; then
+  fail "receive snapshot mismatch must stop incremental retries and require a full resend"
+fi
+if ! send_failure_text_needs_full_resend "cannot send pool/data@new: incremental source (pool/data@old) does not exist"; then
+  fail "a missing incremental base must stop incremental retries and require a full resend"
+fi
+if send_failure_text_needs_full_resend "destination pool is busy"; then
+  fail "unrelated pipeline failures must keep the normal retry path"
+fi
+
 printf '%s\n' "PASS: send transport command checks"

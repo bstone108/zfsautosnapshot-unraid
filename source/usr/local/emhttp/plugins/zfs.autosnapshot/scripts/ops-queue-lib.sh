@@ -3211,6 +3211,63 @@ ssh_dataset_tree_inventory() {
   eval "$command" 2>/dev/null || true
 }
 
+send_failure_text_needs_full_resend() {
+  local text="$1"
+  local lower
+  lower="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lower" == *"most recent snapshot"* && "$lower" == *"does not match"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"incremental source"* && "$lower" == *"does not exist"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"could not find incremental source"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"missing incremental base"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+send_pipeline_reset_full_resend_state() {
+  SEND_PIPELINE_NEEDS_FULL_RESEND=0
+  SEND_PIPELINE_FAILURE_DETAIL=""
+  SEND_PIPELINE_STDERR_FILE=""
+}
+
+send_pipeline_capture_begin() {
+  SEND_PIPELINE_STDERR_FILE="$(mktemp /tmp/zfsas-send-pipeline.XXXXXX 2>/dev/null || true)"
+  if [[ -z "${SEND_PIPELINE_STDERR_FILE:-}" ]]; then
+    SEND_PIPELINE_STDERR_FILE="/tmp/zfsas-send-pipeline.$$"
+    : > "$SEND_PIPELINE_STDERR_FILE" || SEND_PIPELINE_STDERR_FILE="/dev/null"
+  fi
+}
+
+send_pipeline_capture_text() {
+  local text=""
+  if [[ -n "${SEND_PIPELINE_STDERR_FILE:-}" && -f "$SEND_PIPELINE_STDERR_FILE" && "$SEND_PIPELINE_STDERR_FILE" != "/dev/null" ]]; then
+    text="$(tail -c 4000 "$SEND_PIPELINE_STDERR_FILE" 2>/dev/null || true)"
+    rm -f "$SEND_PIPELINE_STDERR_FILE" >/dev/null 2>&1 || true
+  fi
+  SEND_PIPELINE_STDERR_FILE=""
+  printf '%s' "$text"
+}
+
+send_pipeline_note_incremental_failure() {
+  local detail="$1"
+  local flat=""
+  [[ -n "$detail" ]] || return 1
+  flat="$(printf '%s' "$detail" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+  log "Send pipeline stderr: ${flat}"
+  send_failure_text_needs_full_resend "$detail" || return 1
+  SEND_PIPELINE_NEEDS_FULL_RESEND=1
+  SEND_PIPELINE_FAILURE_DETAIL="$flat"
+  log "Incremental receive needs a full resend instead of another incremental retry."
+  zfsas_send_debug_marker "pipeline_needs_full_resend detail=${flat}"
+  return 0
+}
+
 run_pipeline_with_status() {
   local description="$1"
   local base_snapshot="$2"
@@ -3233,6 +3290,9 @@ run_pipeline_with_status() {
   local resume_snapshot=""
   local resume_query_rc=0
   local -a pipeline_status=()
+  local pipeline_detail=""
+
+  send_pipeline_reset_full_resend_state
 
   is_valid_snapshot_name "$snapshot" || {
     log "Refusing pipeline for invalid snapshot name: $snapshot"
@@ -3323,16 +3383,17 @@ run_pipeline_with_status() {
   fi
 
   if [[ -n "$base_snapshot" ]]; then
+    send_pipeline_capture_begin
     if (( progress_supported == 1 )); then
       if [[ -n "$rate_limiter_command" ]]; then
-        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$rate_limiter_command" | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$rate_limiter_command" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         meter_rc=${pipeline_status[1]:-0}
         rate_rc=${pipeline_status[2]:-0}
         receive_rc=${pipeline_status[3]:-0}
       else
-        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         meter_rc=${pipeline_status[1]:-0}
@@ -3340,13 +3401,13 @@ run_pipeline_with_status() {
       fi
     else
       if [[ -n "$rate_limiter_command" ]]; then
-        zfs send -I "$base_snapshot" "$snapshot" | eval "$rate_limiter_command" | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | eval "$rate_limiter_command" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         rate_rc=${pipeline_status[1]:-0}
         receive_rc=${pipeline_status[2]:-0}
       else
-        zfs send -I "$base_snapshot" "$snapshot" | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         receive_rc=${pipeline_status[1]:-0}
@@ -3357,9 +3418,11 @@ run_pipeline_with_status() {
     (( meter_rc != 0 )) && pipeline_rc=$meter_rc
     (( rate_rc != 0 )) && pipeline_rc=$rate_rc
     (( receive_rc != 0 )) && pipeline_rc=$receive_rc
+    pipeline_detail="$(send_pipeline_capture_text)"
     if (( pipeline_rc != 0 )); then
       log "Send pipeline failed: mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
       zfsas_send_debug_marker "pipeline_failed mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
+      send_pipeline_note_incremental_failure "$pipeline_detail" || true
       return 1
     fi
   else
