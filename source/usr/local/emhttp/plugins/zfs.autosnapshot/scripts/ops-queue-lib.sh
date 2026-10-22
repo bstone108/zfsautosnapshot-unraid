@@ -93,6 +93,7 @@ SEND_SPIPED_REMOTE_HOST=""
 SEND_SPIPED_REMOTE_PORT="$DEFAULT_SEND_SPIPED_REMOTE_PORT"
 SEND_SPIPED_KEY_PATH=""
 SEND_JOBS=""
+SEND_JOBS_PARSED=0
 
 SCHEDULE_JOB_IDS=()
 declare -A SCHEDULE_SOURCE_ROOT=()
@@ -1084,6 +1085,14 @@ parse_send_jobs_config() {
     SCHEDULE_TRANSPORT["$job_id"]="$transport"
     SCHEDULE_PREFIX["$job_id"]="${SEND_SNAPSHOT_PREFIX}${job_id}-"
   done
+
+  # A missing config must not look like "the user removed every send job".
+  if [[ -f "$SEND_CONFIG_FILE" ]]; then
+    SEND_JOBS_PARSED=1
+  else
+    SEND_JOBS_PARSED=0
+  fi
+  prune_schedule_state_for_removed_jobs
 }
 
 kv_escape() {
@@ -1254,6 +1263,8 @@ load_schedule_state() {
     [[ "$window_key" =~ ^[0-9]+$ ]] || continue
     SCHEDULE_LAST_COMPLETED_WINDOW["$job_id"]="$window_key"
   done < "$SEND_SCHEDULE_STATE_FILE"
+
+  prune_schedule_state_for_removed_jobs
 }
 
 write_schedule_state() {
@@ -1261,9 +1272,12 @@ write_schedule_state() {
   ops_ensure_dir "$CONFIG_DIR" || return 1
   tmp="$(mktemp "${SEND_SCHEDULE_STATE_FILE}.tmp.XXXXXX")" || return 1
 
-  while IFS= read -r job_id; do
-    printf '%s|%s\n' "$job_id" "${SCHEDULE_LAST_COMPLETED_WINDOW[$job_id]}" >> "$tmp"
-  done < <(printf '%s\n' "${!SCHEDULE_LAST_COMPLETED_WINDOW[@]}" | sort)
+  if ((${#SCHEDULE_LAST_COMPLETED_WINDOW[@]} > 0)); then
+    while IFS= read -r job_id; do
+      [[ -n "$job_id" ]] || continue
+      printf '%s|%s\n' "$job_id" "${SCHEDULE_LAST_COMPLETED_WINDOW[$job_id]}" >> "$tmp"
+    done < <(printf '%s\n' "${!SCHEDULE_LAST_COMPLETED_WINDOW[@]}" | sort)
+  fi
 
   mv "$tmp" "$SEND_SCHEDULE_STATE_FILE" || {
     rm -f "$tmp" >/dev/null 2>&1 || true
@@ -1271,6 +1285,44 @@ write_schedule_state() {
   }
   chmod 0640 "$SEND_SCHEDULE_STATE_FILE" >/dev/null 2>&1 || true
   ops_apply_owner "$SEND_SCHEDULE_STATE_FILE"
+}
+
+prune_schedule_state_for_removed_jobs() {
+  local job_id removed=0
+  local -A known_jobs=()
+  local -a state_job_ids=()
+
+  [[ "${SEND_JOBS_PARSED:-0}" == "1" ]] || return 0
+
+  if ((${#SCHEDULE_JOB_IDS[@]} > 0)); then
+    for job_id in "${SCHEDULE_JOB_IDS[@]}"; do
+      [[ -n "$job_id" ]] || continue
+      known_jobs["$job_id"]=1
+    done
+  fi
+
+  if ((${#SCHEDULE_LAST_COMPLETED_WINDOW[@]} > 0)); then
+    while IFS= read -r job_id; do
+      [[ -n "$job_id" ]] || continue
+      state_job_ids+=("$job_id")
+    done < <(printf '%s\n' "${!SCHEDULE_LAST_COMPLETED_WINDOW[@]}")
+  fi
+
+  if ((${#state_job_ids[@]} == 0)); then
+    return 0
+  fi
+
+  for job_id in "${state_job_ids[@]}"; do
+    [[ "$job_id" =~ ^[a-f0-9]{12}$ ]] || continue
+    [[ -n "${known_jobs[$job_id]:-}" ]] && continue
+    unset "SCHEDULE_LAST_COMPLETED_WINDOW[$job_id]"
+    log "Pruned send schedule state for job id ${job_id}; it is no longer in SEND_JOBS."
+    removed=1
+  done
+
+  if (( removed == 1 )); then
+    write_schedule_state
+  fi
 }
 
 last_completed_schedule_window_key() {

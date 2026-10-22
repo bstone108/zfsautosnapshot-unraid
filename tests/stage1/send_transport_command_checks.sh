@@ -485,4 +485,76 @@ if send_failure_text_needs_full_resend "destination pool is busy"; then
   fail "unrelated pipeline failures must keep the normal retry path"
 fi
 
+# Schedule-state pruning runs only after SEND_JOBS is read from a real config
+# file. A missing config must leave the state file untouched.
+(
+  schedule_root="$(mktemp -d)"
+  trap 'rm -rf "$schedule_root"' EXIT
+  CONFIG_DIR="${schedule_root}/config"
+  SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
+  SEND_SCHEDULE_STATE_FILE="${CONFIG_DIR}/send_schedule_state.state"
+  mkdir -p "$CONFIG_DIR"
+
+  reset_schedule_case() {
+    local jobs_line="$1"
+    printf '%s\n' 'abcdef012345|100' 'deadbeefdead|50' > "$SEND_SCHEDULE_STATE_FILE"
+    if [[ -n "$jobs_line" ]]; then
+      printf '%s\n' "$jobs_line" > "$SEND_CONFIG_FILE"
+    else
+      rm -f "$SEND_CONFIG_FILE"
+    fi
+    SEND_JOBS=""
+    SEND_JOBS_PARSED=0
+    SCHEDULE_JOB_IDS=()
+    SCHEDULE_LAST_COMPLETED_WINDOW=()
+  }
+
+  reset_schedule_case 'SEND_JOBS="abcdef012345|tank/data|backup/data|1d|1G|0|local"'
+  load_send_config
+  worker_prune_log="${schedule_root}/worker-prune.log"
+  {
+    load_schedule_state
+    parse_send_jobs_config
+  } >"$worker_prune_log"
+  grep -q '^abcdef012345|100$' "$SEND_SCHEDULE_STATE_FILE" || fail "kept send job must stay in schedule state"
+  if grep -q 'deadbeefdead' "$SEND_SCHEDULE_STATE_FILE"; then
+    fail "removed send job must be pruned when the worker loads state before parsing SEND_JOBS"
+  fi
+  assert_contains "$(cat "$worker_prune_log")" "Pruned send schedule state for job id deadbeefdead; it is no longer in SEND_JOBS." "schedule prune must name the removed job id"
+  [[ " ${SCHEDULE_JOB_IDS[*]} " == *" abcdef012345 "* ]] || fail "schedule parser must still accept the remaining send job"
+
+  reset_schedule_case 'SEND_JOBS="abcdef012345|tank/data|backup/data|1d|1G|0|local"'
+  load_send_config
+  parse_send_jobs_config
+  if grep -q 'deadbeefdead' "$SEND_SCHEDULE_STATE_FILE"; then
+    :
+  else
+    fail "parsing before the state file is loaded must not rewrite schedule state from an empty map"
+  fi
+  kicker_prune_log="${schedule_root}/kicker-prune.log"
+  load_schedule_state >"$kicker_prune_log"
+  if grep -q 'deadbeefdead' "$SEND_SCHEDULE_STATE_FILE"; then
+    fail "removed send job must be pruned when schedule state is loaded after SEND_JOBS is parsed"
+  fi
+  grep -q '^abcdef012345|100$' "$SEND_SCHEDULE_STATE_FILE" || fail "kept send job must survive a post-parse schedule load"
+  assert_contains "$(cat "$kicker_prune_log")" "no longer in SEND_JOBS." "post-parse schedule load must log the pruned job"
+
+  reset_schedule_case 'SEND_JOBS=""'
+  load_send_config
+  load_schedule_state
+  parse_send_jobs_config
+  if grep -Eq 'abcdef012345|deadbeefdead' "$SEND_SCHEDULE_STATE_FILE"; then
+    fail "an empty SEND_JOBS config must drop every saved schedule-state job id"
+  fi
+
+  reset_schedule_case ""
+  before_missing="$(cat "$SEND_SCHEDULE_STATE_FILE")"
+  load_send_config
+  load_schedule_state
+  parse_send_jobs_config
+  after_missing="$(cat "$SEND_SCHEDULE_STATE_FILE")"
+  [[ "$before_missing" == "$after_missing" ]] || fail "a missing send config must not wipe schedule state"
+  [[ "${SEND_JOBS_PARSED}" == "0" ]] || fail "a missing send config must not mark SEND_JOBS as parsed"
+)
+
 printf '%s\n' "PASS: send transport command checks"
