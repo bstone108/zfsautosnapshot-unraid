@@ -317,6 +317,30 @@ function zfsas_send_normalize_rate_limit($value)
     return $value;
 }
 
+function zfsas_send_normalize_remote_attempts($value)
+{
+    $value = (int) $value;
+    if ($value < 1) {
+        $value = 5;
+    }
+    if ($value > 20) {
+        $value = 20;
+    }
+    return (string) $value;
+}
+
+function zfsas_send_normalize_remote_retry_delay($value)
+{
+    $value = (int) $value;
+    if ($value < 0) {
+        $value = 300;
+    }
+    if ($value > 86400) {
+        $value = 86400;
+    }
+    return (string) $value;
+}
+
 function zfsas_send_normalize_prep_extra_workers($value)
 {
     $value = (int) $value;
@@ -347,6 +371,8 @@ function zfsas_send_defaults()
         'SEND_SNAPSHOT_PREFIX' => 'zfs-send-',
         'SEND_MAX_PARALLEL' => '1',
         'SEND_RATE_LIMIT' => '0',
+        'SEND_REMOTE_MAX_ATTEMPTS' => '5',
+        'SEND_REMOTE_RETRY_DELAY_SECONDS' => '300',
         'SEND_PREP_EXTRA_WORKERS' => '16',
         'SEND_KEEP_ALL_FOR_DAYS' => '14',
         'SEND_KEEP_DAILY_UNTIL_DAYS' => '30',
@@ -753,6 +779,10 @@ function zfsas_send_render_config($config)
     $lines[] = '';
     $lines[] = '# Maximum outbound ZFS stream rate through mbuffer; 0 disables throttling.';
     $lines[] = 'SEND_RATE_LIMIT=' . zfsas_send_quote_config_string(zfsas_send_normalize_rate_limit($config['SEND_RATE_LIMIT'] ?? '0') ?? '0');
+    $lines[] = '';
+    $lines[] = '# Failed ZFS send steps are retried this many times. The delay is only after a failure, before that same step is tried again.';
+    $lines[] = 'SEND_REMOTE_MAX_ATTEMPTS=' . zfsas_send_normalize_remote_attempts($config['SEND_REMOTE_MAX_ATTEMPTS'] ?? '5');
+    $lines[] = 'SEND_REMOTE_RETRY_DELAY_SECONDS=' . zfsas_send_normalize_remote_retry_delay($config['SEND_REMOTE_RETRY_DELAY_SECONDS'] ?? '300');
     $lines[] = '';
     $lines[] = '# Extra queue worker processes allowed to prepare snapshots, estimate space, and wait before transfer slots open.';
     $lines[] = 'SEND_PREP_EXTRA_WORKERS=' . zfsas_send_normalize_prep_extra_workers($config['SEND_PREP_EXTRA_WORKERS'] ?? '16');

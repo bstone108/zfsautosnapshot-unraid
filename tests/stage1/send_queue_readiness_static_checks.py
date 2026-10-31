@@ -348,9 +348,19 @@ def main() -> int:
     )
 
     scheduled_no_common_body = worker.split(
-        'if (( destination_exists == 1 )) && destination_has_any_snapshots_for_transport "$destination"; then',
+        'if send_common_base_missing_proven "$latest_common" "$basename"; then',
         1,
     )[1].split('      description="Full send ${snapshot} -> ${destination}"', 1)[0]
+    assert_contains(
+        worker,
+        "The snapshot listing did not succeed, so this is not a missing send checkpoint.",
+        "a failed snapshot listing must not be described as a missing common checkpoint",
+    )
+    assert_contains(
+        worker,
+        "so automatic purge/reseed was not considered.",
+        "full resend must not suggest a purge when the destination listing was not confirmed",
+    )
     assert_contains(
         scheduled_no_common_body,
         'if [[ "$send_transport" == "ssh" ]]; then',

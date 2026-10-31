@@ -20,6 +20,15 @@ SEND_MAX_PARALLEL=1
 # on an Internet-constrained link.
 SEND_RATE_LIMIT=0
 
+# SEND_REMOTE_MAX_ATTEMPTS / SEND_REMOTE_RETRY_DELAY_SECONDS
+# A failed ZFS send step (remote snapshot listing, base lookup, resume check,
+# or the send/receive itself) is retried up to this many attempts in total.
+# The delay is applied only after a step fails, before that same step is tried
+# again. Successful steps continue immediately. Defaults are 5 attempts and
+# 300 seconds.
+SEND_REMOTE_MAX_ATTEMPTS=5
+SEND_REMOTE_RETRY_DELAY_SECONDS=300
+
 # SEND_PREP_EXTRA_WORKERS
 # Extra queue worker processes allowed to prepare snapshots, estimate needed
 # destination space, and wait before real send transfer slots open.
