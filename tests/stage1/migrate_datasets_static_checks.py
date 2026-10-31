@@ -32,9 +32,32 @@ require(
     "Preview button must be wired in JavaScript.",
 )
 require(
-    r'previewButton\.addEventListener\(\'click\'\s*,\s*function\s*\(\)\s*{.*?refreshStatus\(\);.*?}\s*\);',
-    "Preview button must trigger a non-destructive status/preview refresh.",
+    r'previewButton\.addEventListener\(\'click\'\s*,\s*function\s*\(\)\s*{.*?requestFolderScan\(\'Previewing top-level folders\.\.\.\'\);.*?}\s*\);',
+    "Preview button must trigger a non-destructive folder scan.",
     re.S,
+)
+require(
+    r'function\s+refreshStatus\s*\(\s*\)\s*{.*?if\s*\(\s*pollInFlight\s*\)',
+    "Automatic status polling must not start a second request while one is in flight.",
+    re.S,
+)
+require(
+    r'mode=status',
+    "Automatic status polling must request the cheap status mode.",
+)
+require(
+    r'mode=scan',
+    "Refresh and preview must request an explicit folder scan.",
+)
+require(
+    r'pollDelayMs\s*=\s*Math\.min\(Math\.max\(pollDelayMs,\s*5000\)\s*\*\s*2,\s*60000\)',
+    "A timed-out status poll must back off before the next attempt.",
+)
+if re.search(r'setInterval\(\s*refreshStatus', text):
+    raise AssertionError("Dataset migrator must not use setInterval(refreshStatus); overlapping polls pile up du processes.")
+require(
+    r'updateMigrationControls\(status,\s*hasSelectedDataset\)',
+    "Buttons must be updated from the status payload so they enable when the cheap status returns.",
 )
 require(
     r'renderPageStatus\(\'Previewing top-level folders\.\.\.\'\s*,\s*false\)',
@@ -86,9 +109,19 @@ require(
     re.S,
 )
 require_status_endpoint(
-    r'\$statusIsLive\s*=\s*\(bool\)\s*\(\(\$status\[\'isActive\'\].*?\|\|.*?\$status\[\'isStale\'\].*?\)\);.*?\$selectedDataset\s*!==\s*\'\'\s*&&\s*\(\s*!\$statusIsLive.*?zfsas_migrate_preview_dataset\(\$selectedDataset',
-    "Status refresh must rebuild selected-dataset preview after terminal completion instead of treating old complete rows as live state.",
+    r"if\s*\(\s*\$mode\s*!==\s*'scan'\s*\)\s*\{\s*\$mode\s*=\s*'status';\s*\}",
+    "Status endpoint must default to the cheap live-status mode.",
     re.S,
+)
+require_status_endpoint(
+    r"if\s*\(\s*\$mode\s*===\s*'scan'\s*\)",
+    "Folder scanning must be limited to an explicit scan request.",
+)
+if "zfsas_migrate_preview_dataset(" in status_endpoint_text:
+    raise AssertionError("The status endpoint must not scan folders itself. Scanning belongs in the locked helper so periodic polls stay cheap.")
+require_status_endpoint(
+    r"scan in progress",
+    "A second scan while one is running must report that a scan is in progress.",
 )
 require(
     r'var\s+useStatusRows\s*=\s*statusMatchesSelectedDataset\(status\)\s*&&\s*\(status\.isActive\s*\|\|\s*status\.isStale\)\s*&&\s*Array\.isArray\(status\.folders\);',
@@ -269,6 +302,14 @@ if not re.search(r'function zfsas_migrate_original_name_from_temp\s*\(', helpers
     raise AssertionError("Dataset Migrator preview must be able to recover the original folder name from a temp directory.")
 if "Leftover temporary directory for" not in helpers_text:
     raise AssertionError("Dataset Migrator preview must identify the original folder for an incomplete migration temp directory.")
+if "timeout -k 5" not in helpers_text or "du -skx" not in helpers_text:
+    raise AssertionError("Folder size calculation must put a per-command timeout on du.")
+if "zfs get -Hp used" not in helpers_text:
+    raise AssertionError("Folders that are their own ZFS dataset must be sized with zfs get -Hp used instead of du.")
+if "function zfsas_migrate_run_scan" not in helpers_text or "LOCK_EX | LOCK_NB" not in helpers_text:
+    raise AssertionError("Folder scans must take a non-blocking lock so only one scan runs at a time.")
+if "scan-cache.json" not in helpers_text or "scannedAtDisplay" not in helpers_text:
+    raise AssertionError("Folder scans must be cached with a timestamp so periodic status does not rescan.")
 
 EVENT = ROOT / "source/usr/local/emhttp/plugins/zfs.autosnapshot/event/disks_mounted"
 event_text = EVENT.read_text(encoding="utf-8")

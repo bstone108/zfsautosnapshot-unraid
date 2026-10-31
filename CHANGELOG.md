@@ -5,6 +5,15 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.10.31.01 (2026-10-31)
+
+- A ZFS send no longer treats a failed, timed-out, or empty remote snapshot list as a missing checkpoint. The list has to succeed before the plugin decides there is no shared snapshot.
+- A failed ZFS send step is retried up to 5 times, waiting 5 minutes only after a failure before that same step is tried again. A step that succeeds continues immediately.
+- When a confirmed snapshot list shows no shared checkpoint, or a finished incremental receive says the destination does not match, the plugin deletes that destination dataset and sends a full backup. The log says why. A failed or unverified list does not delete anything. Set `SEND_AUTO_RESEED=0` to turn this rebuild off.
+- Dataset Migrator status checks no longer measure folder sizes on every poll. Sizes are calculated when you press Refresh, and once in the background the first time a dataset is shown.
+- A scheduled send no longer queues the same child send twice when preparation runs again. Saved schedule progress is dropped for send jobs that were removed. Startup removes leftover delete-queue temp files older than one hour.
+- Removed testing-only ZFS send debug log markers from the public package so send logs stay focused on real send progress and errors.
+
 ### 2026.10.01.01 (2026-10-01)
 
 - If a dataset migration is interrupted, Unraid raises an alert that the migration was interrupted, apps may not function properly until it finishes, the migration will resume in about 15 minutes, and non-functioning apps should be ignored until then.

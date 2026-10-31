@@ -1,6 +1,17 @@
 #!/bin/bash
 set -Eeuo pipefail
 
+# Keep Unraid sbin tools visible when cron PATH is /usr/bin:/bin.
+PATH="${PATH:-/usr/bin:/bin}"
+for _zfsas_path_dir in /usr/local/sbin /usr/local/bin /usr/sbin /sbin; do
+  case ":${PATH}:" in
+    *":${_zfsas_path_dir}:"*) ;;
+    *) PATH="${PATH}:${_zfsas_path_dir}" ;;
+  esac
+done
+unset _zfsas_path_dir
+export PATH
+
 # shellcheck source=/dev/null
 source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
 
@@ -116,7 +127,7 @@ main() {
   fi
 
   if ! unraid_array_actionable; then
-    log "$(unraid_array_action_message). Queue workers remain paused until the array is actionable."
+    log_paused_for_unraid_array "Queue workers remain paused until the array is actionable."
     exit 0
   fi
 

@@ -769,7 +769,7 @@ if ($isPostRequest) {
                   <?php elseif ((string) ($queueJob['STATE'] ?? '') === 'failed') : ?>
                     <a class="btn" href="<?php echo zfsas_send_h($queueLogDownloadApiUrl . '?job_id=' . rawurlencode((string) ($queueJob['JOB_ID'] ?? ''))); ?>">Download Log</a>
                     <?php if ((string) ($queueJob['CANCELLED_BY_USER'] ?? '0') !== '1') : ?>
-                    <button type="button" class="btn zfsas-send-retry-job" data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">Retry</button>
+                    <button type="button" class="btn zfsas-send-retry-job" data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>"><?php echo ((string) ($queueJob['NEEDS_FULL_RESEND'] ?? '0') === '1') ? 'Full resend' : 'Retry'; ?></button>
                     <?php endif; ?>
                     <button type="button" class="btn zfsas-send-clear-job" data-job-id="<?php echo zfsas_send_h($queueJob['JOB_ID'] ?? ''); ?>">Confirm Clear</button>
                   <?php else : ?>
@@ -1023,7 +1023,7 @@ if ($isPostRequest) {
         html += '<a class="btn" href="' + escapeHtml(job.logDownloadUrl || buildQueueLogDownloadUrl(job.id || '')) + '">Download Log</a>';
       } else if (job.canRetry) {
         html += '<a class="btn" href="' + escapeHtml(job.logDownloadUrl || buildQueueLogDownloadUrl(job.id || '')) + '">Download Log</a>';
-        html += '<button type="button" class="btn zfsas-send-retry-job" data-job-id="' + escapeHtml(job.id || '') + '">Retry</button>';
+        html += '<button type="button" class="btn zfsas-send-retry-job" data-job-id="' + escapeHtml(job.id || '') + '">' + (job.needsFullResend ? 'Full resend' : 'Retry') + '</button>';
         if (job.canClear) {
           html += ' <button type="button" class="btn zfsas-send-clear-job" data-job-id="' + escapeHtml(job.id || '') + '">Confirm Clear</button>';
         }

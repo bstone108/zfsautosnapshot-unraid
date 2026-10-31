@@ -9,6 +9,19 @@ else
   zfsas_log_prepare_for_append() { return 0; }
 fi
 
+# Keep Unraid sbin tools visible when cron PATH is /usr/bin:/bin.
+zfsas_extend_command_path() {
+  local dir
+  for dir in /usr/local/sbin /usr/local/bin /usr/sbin /sbin; do
+    case ":${PATH:-}:" in
+      *":${dir}:"*) ;;
+      *) PATH="${PATH:+${PATH}:}${dir}" ;;
+    esac
+  done
+  export PATH
+}
+zfsas_extend_command_path
+
 PLUGIN_NAME="zfs.autosnapshot"
 CONFIG_DIR="/boot/config/plugins/${PLUGIN_NAME}"
 SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
@@ -55,10 +68,32 @@ DEFAULT_SEND_SPIPED_LISTEN_HOST="0.0.0.0"
 DEFAULT_SEND_SPIPED_PORT="8023"
 DEFAULT_SEND_SPIPED_REMOTE_PORT="8023"
 DEFAULT_RETRY_DELAYS=(60 300 900)
+# Send-path remote steps. A failed step is retried up to this many attempts in
+# total. The delay is applied only after that step fails, before the same step
+# is tried again. A step that succeeds continues immediately.
+DEFAULT_SEND_REMOTE_MAX_ATTEMPTS=5
+DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS=300
+# When a snapshot listing is confirmed and there is no common base, or a
+# completed incremental receive reports a genuine destination mismatch, purge
+# the destination and send a full backup. 0 disables that rebuild.
+DEFAULT_SEND_AUTO_RESEED=1
+SEND_REMOTE_MAX_ATTEMPTS="$DEFAULT_SEND_REMOTE_MAX_ATTEMPTS"
+SEND_REMOTE_RETRY_DELAY_SECONDS="$DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS"
+SEND_AUTO_RESEED="$DEFAULT_SEND_AUTO_RESEED"
+# The send worker turns this on. Queue kicks stay single-attempt so a down
+# receiver cannot block the once-a-minute scheduler for the full retry window.
+SEND_REMOTE_RETRIES_ENABLED=0
+SEND_REMOTE_RETRY_DEPTH=0
+SEND_REMOTE_STEP_EXHAUSTED=0
+SEND_COMMON_BASE_LISTING=""
+SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT=0
+SEND_COMMON_LISTING_UNVERIFIED=0
+SEND_PIPELINE_PERMANENT_FAILURE=0
 POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS:-3}"
 POST_DELETE_RECHECK_INTERVAL_SECONDS="${POST_DELETE_RECHECK_INTERVAL_SECONDS:-1}"
 JOB_SUCCESS_TTL_SECONDS="${JOB_SUCCESS_TTL_SECONDS:-5}"
 DELETE_QUEUE_IDLE_TIMEOUT_SECONDS="${DELETE_QUEUE_IDLE_TIMEOUT_SECONDS:-30}"
+PERSIST_TMP_MAX_AGE_MINUTES="${PERSIST_TMP_MAX_AGE_MINUTES:-60}"
 
 SEND_SNAPSHOT_PREFIX="$DEFAULT_SEND_SNAPSHOT_PREFIX"
 SEND_MAX_PARALLEL="$DEFAULT_SEND_MAX_PARALLEL"
@@ -77,6 +112,7 @@ SEND_SPIPED_REMOTE_HOST=""
 SEND_SPIPED_REMOTE_PORT="$DEFAULT_SEND_SPIPED_REMOTE_PORT"
 SEND_SPIPED_KEY_PATH=""
 SEND_JOBS=""
+SEND_JOBS_PARSED=0
 
 SCHEDULE_JOB_IDS=()
 declare -A SCHEDULE_SOURCE_ROOT=()
@@ -117,12 +153,74 @@ log() {
   printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$(zfsas_log_sanitize_text "$*")"
 }
 
-# shellcheck source=/dev/null
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/unraid-array-status-lib.sh"
+find_mdcmd() {
+  local candidate candidates_raw
+  local -a candidates=()
+
+  if command -v mdcmd >/dev/null 2>&1; then
+    command -v mdcmd
+    return 0
+  fi
+
+  # mdcmd is installed in /usr/local/sbin on Unraid. /root/mdcmd is not always there.
+  if [[ -n "${ZFSAS_MDCMD_CANDIDATES+x}" ]]; then
+    candidates_raw="${ZFSAS_MDCMD_CANDIDATES}"
+  else
+    candidates_raw="/usr/local/sbin/mdcmd:/usr/sbin/mdcmd:/root/mdcmd"
+  fi
+
+  IFS=':' read -r -a candidates <<< "$candidates_raw"
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
 
 extract_status_value() {
   local key="$1"
   awk -F= -v key="$key" '$1 == key { print $2; exit }'
+}
+
+unraid_status_text_usable() {
+  local text="${1-}"
+  [[ -n "$text" ]] || return 1
+  if printf '%s\n' "$text" | grep -Eq '^[[:space:]]*(mdState|fsState|sbState|started)='; then
+    return 0
+  fi
+  return 1
+}
+
+read_unraid_status_command() {
+  local output=""
+  output="$("$@" 2>/dev/null)" || return 1
+  unraid_status_text_usable "$output" || return 1
+  printf '%s\n' "$output"
+}
+
+get_unraid_array_status() {
+  local mdcmd_bin
+  local proc_mdcmd="${ZFSAS_PROC_MDCMD:-/proc/mdcmd}"
+  local var_ini="${ZFSAS_UNRAID_VAR_INI:-/var/local/emhttp/var.ini}"
+
+  if mdcmd_bin="$(find_mdcmd 2>/dev/null)"; then
+    if read_unraid_status_command "$mdcmd_bin" status; then
+      return 0
+    fi
+  fi
+
+  # -r /proc/mdcmd can be true for root while cat returns "Input/output error"
+  # and no text. Accept a source only when it exits 0 with a state key.
+  if read_unraid_status_command cat "$proc_mdcmd"; then
+    return 0
+  fi
+
+  if read_unraid_status_command cat "$var_ini"; then
+    return 0
+  fi
+
+  return 1
 }
 
 normalize_unraid_state_value() {
@@ -202,8 +300,10 @@ unraid_array_actionable() {
   return 1
 }
 
+UNRAID_ARRAY_STATUS_UNREADABLE_MESSAGE="Could not read Unraid array state from mdcmd, /proc/mdcmd or var.ini"
+
 unraid_array_action_message() {
-  local md_state fs_state sb_state started
+  local md_state fs_state sb_state started status_text=""
 
   md_state="$(unraid_actionable_state_value "mdState" || true)"
   fs_state="$(unraid_actionable_state_value "fsState" || true)"
@@ -230,7 +330,57 @@ unraid_array_action_message() {
     return 0
   fi
 
+  status_text="$(get_unraid_array_status 2>/dev/null || true)"
+  if [[ -z "$status_text" ]]; then
+    printf '%s' "$UNRAID_ARRAY_STATUS_UNREADABLE_MESSAGE"
+    return 0
+  fi
+
   printf 'Waiting for Unraid to report an actionable array state'
+}
+
+unraid_unreadable_status_stamp_file() {
+  printf '%s\n' "${ZFSAS_UNRAID_STATUS_UNREADABLE_STAMP:-${RUNTIME_DIR}/unraid-array-status-unreadable.stamp}"
+}
+
+unraid_unreadable_status_should_log() {
+  local stamp now last interval
+  interval="${ZFSAS_UNRAID_STATUS_UNREADABLE_LOG_INTERVAL:-3600}"
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=3600
+  if (( interval == 0 )); then
+    return 0
+  fi
+  stamp="$(unraid_unreadable_status_stamp_file)"
+  [[ -f "$stamp" ]] || return 0
+  last="$(tr -cd '0-9' < "$stamp" 2>/dev/null || true)"
+  [[ "$last" =~ ^[0-9]+$ ]] || return 0
+  now="$(date +%s)"
+  if (( now - last >= interval )); then
+    return 0
+  fi
+  return 1
+}
+
+unraid_unreadable_status_mark_logged() {
+  local stamp dir
+  stamp="$(unraid_unreadable_status_stamp_file)"
+  dir="$(dirname "$stamp")"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  date +%s > "$stamp" 2>/dev/null || return 0
+}
+
+log_paused_for_unraid_array() {
+  local detail="$1"
+  local message=""
+
+  message="$(unraid_array_action_message)"
+  if [[ "$message" == "$UNRAID_ARRAY_STATUS_UNREADABLE_MESSAGE" ]]; then
+    if ! unraid_unreadable_status_should_log; then
+      return 0
+    fi
+    unraid_unreadable_status_mark_logged || true
+  fi
+  log "${message}. ${detail}"
 }
 
 trim() {
@@ -351,6 +501,9 @@ ensure_runtime_layout() {
   # Only reap clearly stale temp files. Removing every *.tmp.* file at worker startup can
   # delete another process's in-flight job write and corrupt queue items.
   find "$OPS_JOBS_DIR" -maxdepth 1 -type f -name '*.tmp.*' -mmin +60 -exec rm -f {} \; >/dev/null 2>&1 || true
+  # Same age gate as job temp files. Delete-queue snapshots use
+  # runtime_queue/*.persist.tmp.* while they are written and must be left alone.
+  find "$PERSISTED_QUEUE_DIR" -maxdepth 1 -type f -name '*.persist.tmp.*' -mmin +"${PERSIST_TMP_MAX_AGE_MINUTES}" -exec rm -f {} \; >/dev/null 2>&1 || true
   return 0
 }
 
@@ -716,6 +869,9 @@ load_send_config() {
   SEND_SPIPED_REMOTE_HOST=""
   SEND_SPIPED_REMOTE_PORT="$DEFAULT_SEND_SPIPED_REMOTE_PORT"
   SEND_SPIPED_KEY_PATH=""
+  SEND_REMOTE_MAX_ATTEMPTS="$DEFAULT_SEND_REMOTE_MAX_ATTEMPTS"
+  SEND_REMOTE_RETRY_DELAY_SECONDS="$DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS"
+  SEND_AUTO_RESEED="$DEFAULT_SEND_AUTO_RESEED"
   SEND_JOBS=""
 
   [[ -f "$SEND_CONFIG_FILE" ]] || return 0
@@ -729,7 +885,7 @@ load_send_config() {
       raw="${BASH_REMATCH[2]}"
       value="$(parse_config_value "$raw")"
       case "$key" in
-        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_RATE_LIMIT|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_SSH_HOST|SEND_SSH_PORT|SEND_SSH_USER|SEND_SSH_KEY_PATH|SEND_SPIPED_LISTEN_HOST|SEND_SPIPED_PORT|SEND_SPIPED_REMOTE_HOST|SEND_SPIPED_REMOTE_PORT|SEND_SPIPED_KEY_PATH|SEND_JOBS)
+        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_RATE_LIMIT|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_SSH_HOST|SEND_SSH_PORT|SEND_SSH_USER|SEND_SSH_KEY_PATH|SEND_SPIPED_LISTEN_HOST|SEND_SPIPED_PORT|SEND_SPIPED_REMOTE_HOST|SEND_SPIPED_REMOTE_PORT|SEND_SPIPED_KEY_PATH|SEND_REMOTE_MAX_ATTEMPTS|SEND_REMOTE_RETRY_DELAY_SECONDS|SEND_AUTO_RESEED|SEND_JOBS)
           printf -v "$key" '%s' "$value"
           ;;
       esac
@@ -948,6 +1104,14 @@ parse_send_jobs_config() {
     SCHEDULE_TRANSPORT["$job_id"]="$transport"
     SCHEDULE_PREFIX["$job_id"]="${SEND_SNAPSHOT_PREFIX}${job_id}-"
   done
+
+  # A missing config must not look like "the user removed every send job".
+  if [[ -f "$SEND_CONFIG_FILE" ]]; then
+    SEND_JOBS_PARSED=1
+  else
+    SEND_JOBS_PARSED=0
+  fi
+  prune_schedule_state_for_removed_jobs
 }
 
 kv_escape() {
@@ -1118,6 +1282,8 @@ load_schedule_state() {
     [[ "$window_key" =~ ^[0-9]+$ ]] || continue
     SCHEDULE_LAST_COMPLETED_WINDOW["$job_id"]="$window_key"
   done < "$SEND_SCHEDULE_STATE_FILE"
+
+  prune_schedule_state_for_removed_jobs
 }
 
 write_schedule_state() {
@@ -1125,9 +1291,12 @@ write_schedule_state() {
   ops_ensure_dir "$CONFIG_DIR" || return 1
   tmp="$(mktemp "${SEND_SCHEDULE_STATE_FILE}.tmp.XXXXXX")" || return 1
 
-  while IFS= read -r job_id; do
-    printf '%s|%s\n' "$job_id" "${SCHEDULE_LAST_COMPLETED_WINDOW[$job_id]}" >> "$tmp"
-  done < <(printf '%s\n' "${!SCHEDULE_LAST_COMPLETED_WINDOW[@]}" | sort)
+  if ((${#SCHEDULE_LAST_COMPLETED_WINDOW[@]} > 0)); then
+    while IFS= read -r job_id; do
+      [[ -n "$job_id" ]] || continue
+      printf '%s|%s\n' "$job_id" "${SCHEDULE_LAST_COMPLETED_WINDOW[$job_id]}" >> "$tmp"
+    done < <(printf '%s\n' "${!SCHEDULE_LAST_COMPLETED_WINDOW[@]}" | sort)
+  fi
 
   mv "$tmp" "$SEND_SCHEDULE_STATE_FILE" || {
     rm -f "$tmp" >/dev/null 2>&1 || true
@@ -1135,6 +1304,44 @@ write_schedule_state() {
   }
   chmod 0640 "$SEND_SCHEDULE_STATE_FILE" >/dev/null 2>&1 || true
   ops_apply_owner "$SEND_SCHEDULE_STATE_FILE"
+}
+
+prune_schedule_state_for_removed_jobs() {
+  local job_id removed=0
+  local -A known_jobs=()
+  local -a state_job_ids=()
+
+  [[ "${SEND_JOBS_PARSED:-0}" == "1" ]] || return 0
+
+  if ((${#SCHEDULE_JOB_IDS[@]} > 0)); then
+    for job_id in "${SCHEDULE_JOB_IDS[@]}"; do
+      [[ -n "$job_id" ]] || continue
+      known_jobs["$job_id"]=1
+    done
+  fi
+
+  if ((${#SCHEDULE_LAST_COMPLETED_WINDOW[@]} > 0)); then
+    while IFS= read -r job_id; do
+      [[ -n "$job_id" ]] || continue
+      state_job_ids+=("$job_id")
+    done < <(printf '%s\n' "${!SCHEDULE_LAST_COMPLETED_WINDOW[@]}")
+  fi
+
+  if ((${#state_job_ids[@]} == 0)); then
+    return 0
+  fi
+
+  for job_id in "${state_job_ids[@]}"; do
+    [[ "$job_id" =~ ^[a-f0-9]{12}$ ]] || continue
+    [[ -n "${known_jobs[$job_id]:-}" ]] && continue
+    unset "SCHEDULE_LAST_COMPLETED_WINDOW[$job_id]"
+    log "Pruned send schedule state for job id ${job_id}; it is no longer in SEND_JOBS."
+    removed=1
+  done
+
+  if (( removed == 1 )); then
+    write_schedule_state
+  fi
 }
 
 last_completed_schedule_window_key() {
@@ -2255,6 +2462,7 @@ clear_send_cleanup_caches() {
   SEND_DESTINATION_DATASETS_BY_POOL=()
   SEND_EPOCH_DAY_KEY_CACHE=()
   SEND_EPOCH_WEEK_KEY_CACHE=()
+  SEND_COMMON_LISTING_UNVERIFIED=0
   reset_send_protected_basename_cache
   delete_queue_reset_index
 }
@@ -2974,12 +3182,257 @@ build_spipe_send_command() {
   printf -v "$result_var" '%s' "$built_command"
 }
 
+send_remote_max_attempts() {
+  local value
+  if [[ "${SEND_REMOTE_RETRIES_ENABLED:-0}" != "1" ]]; then
+    printf '1'
+    return 0
+  fi
+  value="${SEND_REMOTE_MAX_ATTEMPTS:-$DEFAULT_SEND_REMOTE_MAX_ATTEMPTS}"
+  if [[ ! "$value" =~ ^[0-9]+$ ]] || (( value < 1 )); then
+    value="$DEFAULT_SEND_REMOTE_MAX_ATTEMPTS"
+  fi
+  printf '%s' "$value"
+}
+
+send_remote_retry_delay_seconds() {
+  local value="${SEND_REMOTE_RETRY_DELAY_SECONDS:-$DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS}"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    value="$DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS"
+  fi
+  printf '%s' "$value"
+}
+
+# Tests replace this with a recorder. Production sleeps only when the delay is
+# positive, and only after a failed attempt of the same step.
+send_remote_retry_sleep() {
+  local seconds="$1"
+  if declare -F send_remote_retry_sleep_hook >/dev/null 2>&1; then
+    send_remote_retry_sleep_hook "$seconds"
+    return 0
+  fi
+  if [[ "$seconds" =~ ^[0-9]+$ ]] && (( seconds > 0 )); then
+    sleep "$seconds"
+  fi
+}
+
+send_remote_retry_before_sleep() {
+  local description="$1"
+  # The send worker refreshes the existing job claim. Retries must not queue a
+  # second job or drop the lock that keeps the queue from launching a duplicate.
+  if declare -F send_remote_retry_hold_job >/dev/null 2>&1; then
+    send_remote_retry_hold_job "$description"
+  fi
+}
+
+ssh_output_proves_dataset_absent() {
+  local text="$1"
+  local lower
+  lower="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
+  [[ "$lower" == *"dataset does not exist"* ]]
+}
+
+# Run one remote SSH command.
+# Returns 0 when the remote command exits 0. Empty stdout is a verified empty
+# result only in that case.
+# Returns 10 when the remote command proves the dataset does not exist. That is
+# not retried.
+# Any other non-zero status is transient: when send retries are enabled, the
+# same command is retried up to SEND_REMOTE_MAX_ATTEMPTS with
+# SEND_REMOTE_RETRY_DELAY_SECONDS of delay only between those failures.
+run_ssh_send_command_once() {
+  local description="$1"
+  local command="$2"
+  local result_var="$3"
+  # Keep this buffer name off the caller's result variable. printf -v follows
+  # the caller's local when this function does not shadow that name.
+  local ssh_stdout_buf="" err_file rc=0 err_text=""
+
+  printf -v "$result_var" ''
+  err_file="$(mktemp /tmp/zfsas-ssh-err.XXXXXX 2>/dev/null || true)"
+  if [[ -z "$err_file" ]]; then
+    err_file="/tmp/zfsas-ssh-err.$$"
+    : > "$err_file" || return 1
+  fi
+  ssh_stdout_buf="$(eval "$command" 2>"$err_file")" || rc=$?
+  err_text="$(cat "$err_file" 2>/dev/null || true)"
+  rm -f "$err_file" >/dev/null 2>&1 || true
+  if (( rc == 0 )); then
+    printf -v "$result_var" '%s' "$ssh_stdout_buf"
+    return 0
+  fi
+  if ssh_output_proves_dataset_absent "${err_text}"$'\n'"${ssh_stdout_buf}"; then
+    printf -v "$result_var" '%s' "$ssh_stdout_buf"
+    return 10
+  fi
+  printf -v "$result_var" '%s' "$ssh_stdout_buf"
+  return "$rc"
+}
+
+run_ssh_send_command() {
+  local description="$1"
+  local command="$2"
+  local result_var="$3"
+  local attempt=1 max delay rc=0
+
+  SEND_REMOTE_STEP_EXHAUSTED=0
+  if (( ${SEND_REMOTE_RETRY_DEPTH:-0} > 0 )) || [[ "${SEND_REMOTE_RETRIES_ENABLED:-0}" != "1" ]]; then
+    run_ssh_send_command_once "$description" "$command" "$result_var"
+    return $?
+  fi
+
+  max="$(send_remote_max_attempts)"
+  delay="$(send_remote_retry_delay_seconds)"
+  SEND_REMOTE_RETRY_DEPTH=$((SEND_REMOTE_RETRY_DEPTH + 1))
+  while (( attempt <= max )); do
+    # An if/then without else reports status 0 when the command is non-zero,
+    # so capture the status directly.
+    rc=0
+    run_ssh_send_command_once "$description" "$command" "$result_var" || rc=$?
+    if (( rc == 0 || rc == 10 )); then
+      SEND_REMOTE_RETRY_DEPTH=$((SEND_REMOTE_RETRY_DEPTH - 1))
+      return "$rc"
+    fi
+    if (( attempt >= max )); then
+      SEND_REMOTE_STEP_EXHAUSTED=1
+      log "Send step failed after ${attempt} of ${max} attempt(s): ${description} (exit ${rc})."
+      SEND_REMOTE_RETRY_DEPTH=$((SEND_REMOTE_RETRY_DEPTH - 1))
+      return "$rc"
+    fi
+    log "Send step failed (attempt ${attempt} of ${max}, exit ${rc}): ${description}. Retrying the same step in ${delay}s."
+    send_remote_retry_before_sleep "$description"
+    send_remote_retry_sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+  SEND_REMOTE_RETRY_DEPTH=$((SEND_REMOTE_RETRY_DEPTH - 1))
+  SEND_REMOTE_STEP_EXHAUSTED=1
+  return 1
+}
+
+# Print how many name/creation snapshot rows were confirmed.
+# Empty text is a confirmed empty list. Non-empty text that is not a snapshot
+# list is unverified and returns 1.
+snapshot_inventory_row_count() {
+  local raw="$1"
+  local snap_name="" snap_epoch="" count=0 saw_payload=0
+
+  # A here-string supplies the trailing newline, so read does not need an EOF
+  # fallback that can loop when bash leaves the previous fields in place.
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "${snap_name//[[:space:]]/}" || -n "${snap_epoch//[[:space:]]/}" ]] || continue
+    saw_payload=1
+    if [[ "$snap_name" == *"@"* && "$snap_epoch" =~ ^[0-9]+$ ]]; then
+      count=$((count + 1))
+      continue
+    fi
+    return 1
+  done <<< "$raw"
+
+  if (( saw_payload == 0 )); then
+    printf '0'
+    return 0
+  fi
+  printf '%s' "$count"
+  return 0
+}
+
+# Read one dataset's snapshot name/creation list.
+# Returns 0 with the raw listing (possibly empty) only when the command exits 0.
+# Returns 10 when the dataset is proven absent.
+# Any other non-zero status means the listing was not confirmed.
+read_member_snapshot_inventory() {
+  local dataset="$1"
+  local transport="${2:-local}"
+  local result_var="$3"
+  local command="" output="" rc=0
+
+  printf -v "$result_var" ''
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  is_valid_dataset_name "$dataset" || return 1
+  if [[ "$transport" == "ssh" ]]; then
+    build_ssh_zfs_command "zfs list -H -p -s creation -t snapshot -o name,creation -d 1 -- $(shell_quote_word "$dataset")" command || return 1
+    run_ssh_send_command "list remote snapshots ${dataset}" "$command" output || return $?
+    printf -v "$result_var" '%s' "$output"
+    return 0
+  fi
+  if [[ "$transport" == "local" ]]; then
+    output="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$dataset" 2>/dev/null)" || rc=$?
+    if (( rc != 0 )); then
+      return "$rc"
+    fi
+    printf -v "$result_var" '%s' "$output"
+    return 0
+  fi
+  return 1
+}
+
+confirmed_destination_snapshot_count() {
+  local dataset="$1"
+  local transport="$2"
+  local result_var="$3"
+  local raw="" rc=0 count_text=""
+
+  printf -v "$result_var" '0'
+  rc=0
+  read_member_snapshot_inventory "$dataset" "$transport" raw || rc=$?
+  if (( rc == 10 )); then
+    return 0
+  fi
+  if (( rc != 0 )); then
+    return 1
+  fi
+  if ! count_text="$(snapshot_inventory_row_count "$raw")"; then
+    return 1
+  fi
+  printf -v "$result_var" '%s' "$count_text"
+  return 0
+}
+
+send_auto_reseed_enabled() {
+  [[ "${SEND_AUTO_RESEED:-${DEFAULT_SEND_AUTO_RESEED:-1}}" != "0" ]]
+}
+
+# A rebuild is allowed only when reseed is enabled and the destination snapshot
+# list was confirmed: the list command exited 0 and the rows parsed. A failed,
+# empty-unverified, or timed-out listing must not reach this.
+send_reseed_permitted() {
+  send_auto_reseed_enabled || return 1
+  [[ "${SEND_COMMON_BASE_LISTING:-}" == "ok" ]] || return 1
+  [[ "${SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT:-0}" =~ ^[0-9]+$ ]] || return 1
+  return 0
+}
+
+# True only after a confirmed listing showed destination snapshots and no
+# usable common basename. A failed or unverified listing never allows the
+# purge/reseed path.
+send_common_base_missing_proven() {
+  local latest_common="${1:-}"
+  local requested_basename="${2:-}"
+
+  [[ "${SEND_COMMON_BASE_LISTING:-}" == "ok" ]] || return 1
+  [[ "${SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT:-0}" =~ ^[0-9]+$ ]] || return 1
+  (( SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT > 0 )) || return 1
+  if [[ -n "$latest_common" && "$latest_common" != "$requested_basename" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 ssh_dataset_exists() {
   local dataset="$1"
-  local command
+  local command output="" rc=0
   is_valid_dataset_name "$dataset" || return 1
-  build_ssh_zfs_command "zfs list -H -o name -- $(shell_quote_word "$dataset") >/dev/null" command || return 1
-  eval "$command" >/dev/null 2>&1
+  build_ssh_zfs_command "zfs list -H -o name -- $(shell_quote_word "$dataset")" command || return 1
+  # One attempt. Retention and ancestor walks call this often; the send step
+  # retries live in the listing, snapshot check, and transfer helpers instead.
+  # A failed probe is still a failure, not proof the dataset is absent.
+  if run_ssh_send_command_once "check remote dataset ${dataset}" "$command" output; then
+    return 0
+  fi
+  rc=$?
+  (( rc == 10 )) && return 1
+  return 1
 }
 
 # Return 0 with a saved token, 1 when no partial receive exists, and 2 when
@@ -2998,9 +3451,10 @@ ssh_receive_resume_token() {
   # zfs receive -F must never be allowed after an ambiguous SSH/ZFS failure.
   remote_probe="probe_error=\$(zfs list -H -o name -- $(shell_quote_word "$dataset") 2>&1); probe_rc=\$?; if [ \"\$probe_rc\" -eq 0 ]; then zfs get -H -o value receive_resume_token -- $(shell_quote_word "$dataset"); else case \"\$probe_error\" in *\"dataset does not exist\"*) printf '%s\\n' $(shell_quote_word "$absent_marker");; *) printf '%s\\n' \"\$probe_error\" >&2; exit \"\$probe_rc\";; esac; fi"
   build_ssh_zfs_command "$remote_probe" command || return 2
-  output="$(eval "$command" 2>/dev/null)"
-  rc=$?
-  (( rc == 0 )) || return 2
+  if ! run_ssh_send_command "query receive resume token for ${dataset}" "$command" output; then
+    return 2
+  fi
+  rc=0
   output="$(trim "$output")"
   [[ "$output" != "$absent_marker" ]] || return 1
   [[ -n "$output" && "$output" != "-" && "$output" != "none" ]] || return 1
@@ -3031,29 +3485,66 @@ resume_token_target_snapshot() {
   return 0
 }
 
-ssh_snapshot_exists() {
+# 0 exists, 10 proven absent, 2 listing/check was not confirmed.
+ssh_snapshot_status() {
   local snapshot="$1"
-  local command
-  is_valid_snapshot_name "$snapshot" || return 1
-  build_ssh_zfs_command "zfs list -H -o name -t snapshot -- $(shell_quote_word "$snapshot") >/dev/null" command || return 1
-  eval "$command" >/dev/null 2>&1
+  local command output="" rc=0
+  is_valid_snapshot_name "$snapshot" || return 2
+  build_ssh_zfs_command "zfs list -H -o name -t snapshot -- $(shell_quote_word "$snapshot")" command || return 2
+  rc=0
+  run_ssh_send_command "check remote snapshot ${snapshot}" "$command" output || rc=$?
+  if (( rc == 0 )); then
+    [[ -n "$output" ]] || return 2
+    return 0
+  fi
+  if (( rc == 10 )); then
+    return 10
+  fi
+  return 2
 }
 
+ssh_snapshot_exists() {
+  local rc=0
+  ssh_snapshot_status "$1" || rc=$?
+  (( rc == 0 ))
+}
+
+# 0 when a confirmed listing shows a snapshot, 1 when the confirmed listing is
+# empty or the dataset is proven absent, 2 when the listing was not confirmed.
+# Callers must not treat 2 as "no snapshots".
 ssh_dataset_has_any_snapshots() {
   local dataset="$1"
-  local output command
-  is_valid_dataset_name "$dataset" || return 1
-  build_ssh_zfs_command "zfs list -H -t snapshot -o name -r -- $(shell_quote_word "$dataset") 2>/dev/null" command || return 1
-  output="$(eval "$command" 2>/dev/null || true)"
-  [[ -n "$output" ]]
+  local raw="" rc=0 count_text=""
+  is_valid_dataset_name "$dataset" || return 2
+  rc=0
+  read_member_snapshot_inventory "$dataset" ssh raw || rc=$?
+  if (( rc == 10 )); then
+    return 1
+  fi
+  if (( rc != 0 )); then
+    return 2
+  fi
+  if ! count_text="$(snapshot_inventory_row_count "$raw")"; then
+    return 2
+  fi
+  if [[ "$count_text" =~ ^[0-9]+$ ]] && (( count_text > 0 )); then
+    return 0
+  fi
+  return 1
 }
 
 ssh_snapshot_inventory() {
   local dataset="$1"
-  local command
-  is_valid_dataset_name "$dataset" || return 1
-  build_ssh_zfs_command "zfs list -H -p -s creation -t snapshot -o name,creation -d 1 -- $(shell_quote_word "$dataset") 2>/dev/null" command || return 1
-  eval "$command" 2>/dev/null || true
+  local raw="" rc=0
+  raw=""
+  read_member_snapshot_inventory "$dataset" ssh raw || rc=$?
+  if (( rc != 0 )); then
+    return "$rc"
+  fi
+  if [[ -n "$raw" ]]; then
+    printf '%s\n' "$raw"
+  fi
+  return 0
 }
 
 ssh_dataset_tree_inventory() {
@@ -3069,7 +3560,106 @@ ssh_dataset_tree_inventory() {
   eval "$command" 2>/dev/null || true
 }
 
+send_failure_text_needs_full_resend() {
+  local text="$1"
+  local lower
+  lower="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lower" == *"most recent snapshot"* && "$lower" == *"does not match"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"incremental source"* && "$lower" == *"does not exist"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"could not find incremental source"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"missing incremental base"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+send_pipeline_reset_full_resend_state() {
+  SEND_PIPELINE_NEEDS_FULL_RESEND=0
+  SEND_PIPELINE_FAILURE_DETAIL=""
+  SEND_PIPELINE_STDERR_FILE=""
+}
+
+send_pipeline_capture_begin() {
+  SEND_PIPELINE_STDERR_FILE="$(mktemp /tmp/zfsas-send-pipeline.XXXXXX 2>/dev/null || true)"
+  if [[ -z "${SEND_PIPELINE_STDERR_FILE:-}" ]]; then
+    SEND_PIPELINE_STDERR_FILE="/tmp/zfsas-send-pipeline.$$"
+    : > "$SEND_PIPELINE_STDERR_FILE" || SEND_PIPELINE_STDERR_FILE="/dev/null"
+  fi
+}
+
+send_pipeline_capture_text() {
+  local text=""
+  if [[ -n "${SEND_PIPELINE_STDERR_FILE:-}" && -f "$SEND_PIPELINE_STDERR_FILE" && "$SEND_PIPELINE_STDERR_FILE" != "/dev/null" ]]; then
+    text="$(tail -c 4000 "$SEND_PIPELINE_STDERR_FILE" 2>/dev/null || true)"
+    rm -f "$SEND_PIPELINE_STDERR_FILE" >/dev/null 2>&1 || true
+  fi
+  SEND_PIPELINE_STDERR_FILE=""
+  printf '%s' "$text"
+}
+
+send_pipeline_note_incremental_failure() {
+  local detail="$1"
+  local flat=""
+  [[ -n "$detail" ]] || return 1
+  flat="$(printf '%s' "$detail" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+  log "Send pipeline stderr: ${flat}"
+  send_failure_text_needs_full_resend "$detail" || return 1
+  SEND_PIPELINE_NEEDS_FULL_RESEND=1
+  SEND_PIPELINE_FAILURE_DETAIL="$flat"
+  log "Incremental receive needs a full resend instead of another incremental retry."
+  return 0
+}
+
 run_pipeline_with_status() {
+  local attempt=1 max delay rc=0
+  local snapshot="${3:-snapshot}"
+  local destination="${4:-destination}"
+  local description="ZFS send/receive ${snapshot} -> ${destination}"
+
+  # Queue kicks and other single-attempt callers keep the historical one-try
+  # behavior. The send worker enables retries for the transfer itself.
+  if [[ "${SEND_REMOTE_RETRIES_ENABLED:-0}" != "1" ]]; then
+    run_pipeline_with_status_once "$@"
+    return $?
+  fi
+
+  max="$(send_remote_max_attempts)"
+  delay="$(send_remote_retry_delay_seconds)"
+  SEND_REMOTE_STEP_EXHAUSTED=0
+  while (( attempt <= max )); do
+    SEND_PIPELINE_PERMANENT_FAILURE=0
+    SEND_PIPELINE_NEEDS_FULL_RESEND=0
+    SEND_REMOTE_RETRY_DEPTH=$(( ${SEND_REMOTE_RETRY_DEPTH:-0} + 1 ))
+    rc=0
+    run_pipeline_with_status_once "$@" || rc=$?
+    SEND_REMOTE_RETRY_DEPTH=$((SEND_REMOTE_RETRY_DEPTH - 1))
+    if (( rc == 0 )); then
+      return 0
+    fi
+    if [[ "${SEND_PIPELINE_NEEDS_FULL_RESEND:-0}" == "1" || "${SEND_PIPELINE_PERMANENT_FAILURE:-0}" == "1" ]]; then
+      return "$rc"
+    fi
+    if (( attempt >= max )); then
+      SEND_REMOTE_STEP_EXHAUSTED=1
+      log "Send step failed after ${attempt} of ${max} attempt(s): ${description} (exit ${rc})."
+      return "$rc"
+    fi
+    log "Send step failed (attempt ${attempt} of ${max}, exit ${rc}): ${description}. Retrying the same step in ${delay}s."
+    send_remote_retry_before_sleep "$description"
+    send_remote_retry_sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+  SEND_REMOTE_STEP_EXHAUSTED=1
+  return "${rc:-1}"
+}
+
+run_pipeline_with_status_once() {
   local description="$1"
   local base_snapshot="$2"
   local snapshot="$3"
@@ -3091,6 +3681,10 @@ run_pipeline_with_status() {
   local resume_snapshot=""
   local resume_query_rc=0
   local -a pipeline_status=()
+  local pipeline_detail=""
+
+  SEND_PIPELINE_PERMANENT_FAILURE=1
+  send_pipeline_reset_full_resend_state
 
   is_valid_snapshot_name "$snapshot" || {
     log "Refusing pipeline for invalid snapshot name: $snapshot"
@@ -3120,12 +3714,17 @@ run_pipeline_with_status() {
       log "Unsupported ZFS send transport '$send_transport' requested for $description; SSH receiver settings are incomplete or invalid."
       return 1
     fi
+    # Resume-token lookup and the stream that follows are one send step when
+    # the worker is retrying. A mismatch is permanent; a connection failure is not.
+    SEND_PIPELINE_PERMANENT_FAILURE=0
     if ssh_receive_resume_token "$destination" resume_token; then
       if ! resume_token_target_snapshot "$resume_token" resume_snapshot; then
+        SEND_PIPELINE_PERMANENT_FAILURE=1
         log "Refusing SSH send for ${destination}: receiver has an unreadable receive_resume_token; inspect or explicitly abort the interrupted receive on the receiver."
         return 1
       fi
       if [[ "$resume_snapshot" != "$snapshot" ]]; then
+        SEND_PIPELINE_PERMANENT_FAILURE=1
         log "Refusing SSH send for ${destination}: receiver resume token targets ${resume_snapshot}, but this job targets ${snapshot}. Resolve the saved receive before starting another stream."
         return 1
       fi
@@ -3171,22 +3770,26 @@ run_pipeline_with_status() {
     receive_command="zfs receive -uF -- $(shell_quote_word "$destination")"
   fi
 
+  # The stream itself is retriable. Validation and spiped fail-closed returns
+  # above stay permanent because SEND_PIPELINE_PERMANENT_FAILURE is still 1.
+  SEND_PIPELINE_PERMANENT_FAILURE=0
   log "$description (transport=$send_transport)"
   if [[ "$progress_total_bytes" =~ ^[0-9]+$ ]] && (( progress_total_bytes > 0 )) && dd_status_progress_supported; then
     progress_supported=1
   fi
 
   if [[ -n "$base_snapshot" ]]; then
+    send_pipeline_capture_begin
     if (( progress_supported == 1 )); then
       if [[ -n "$rate_limiter_command" ]]; then
-        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$rate_limiter_command" | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$rate_limiter_command" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         meter_rc=${pipeline_status[1]:-0}
         rate_rc=${pipeline_status[2]:-0}
         receive_rc=${pipeline_status[3]:-0}
       else
-        zfs send -I "$base_snapshot" "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         meter_rc=${pipeline_status[1]:-0}
@@ -3194,13 +3797,13 @@ run_pipeline_with_status() {
       fi
     else
       if [[ -n "$rate_limiter_command" ]]; then
-        zfs send -I "$base_snapshot" "$snapshot" | eval "$rate_limiter_command" | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | eval "$rate_limiter_command" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         rate_rc=${pipeline_status[1]:-0}
         receive_rc=${pipeline_status[2]:-0}
       else
-        zfs send -I "$base_snapshot" "$snapshot" | eval "$receive_command"
+        zfs send -I "$base_snapshot" "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         receive_rc=${pipeline_status[1]:-0}
@@ -3211,8 +3814,10 @@ run_pipeline_with_status() {
     (( meter_rc != 0 )) && pipeline_rc=$meter_rc
     (( rate_rc != 0 )) && pipeline_rc=$rate_rc
     (( receive_rc != 0 )) && pipeline_rc=$receive_rc
+    pipeline_detail="$(send_pipeline_capture_text)"
     if (( pipeline_rc != 0 )); then
       log "Send pipeline failed: mode=incremental base=${base_snapshot} snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
+      send_pipeline_note_incremental_failure "$pipeline_detail" || true
       return 1
     fi
   else
@@ -3400,7 +4005,7 @@ send_destination_pool_actionable_for_schedule_transport() {
   local pool="$1"
   local transport="${2:-local}"
   local message_var="${3:-}"
-  local command
+  local command ssh_output=""
 
   [[ -n "$message_var" ]] && printf -v "$message_var" ''
   transport="${transport,,}"
@@ -3423,7 +4028,7 @@ send_destination_pool_actionable_for_schedule_transport() {
         [[ -n "$message_var" ]] && printf -v "$message_var" "SSH receiver settings are incomplete or invalid"
         return 1
       }
-      eval "$command" >/dev/null 2>&1 || {
+      run_ssh_send_command "check remote destination pool ${pool}" "$command" ssh_output || {
         [[ -n "$message_var" ]] && printf -v "$message_var" "remote destination pool '${pool}' is not ready over SSH"
         return 1
       }
@@ -3469,7 +4074,7 @@ send_destination_actionable_for_schedule_transport() {
   local destination="$1"
   local transport="${2:-local}"
   local message_var="${3:-}"
-  local pool parent command
+  local pool parent command ssh_output=""
 
   [[ -n "$message_var" ]] && printf -v "$message_var" ''
   transport="${transport,,}"
@@ -3497,7 +4102,7 @@ send_destination_actionable_for_schedule_transport() {
           return 1
         }
       fi
-      eval "$command" >/dev/null 2>&1 || {
+      run_ssh_send_command "check remote destination parent ${parent}" "$command" ssh_output || {
         [[ -n "$message_var" ]] && printf -v "$message_var" "remote destination pool/parent '${parent}' is not ready over SSH"
         return 1
       }
@@ -3594,35 +4199,75 @@ ensure_destination_path_exists() {
   dataset_exists "$dest" || zfs create -p "$dest"
 }
 
+# Load confirmed source and destination snapshot listings for one member.
+# Sets SEND_COMMON_BASE_LISTING to ok, absent, or failed.
+# Sets SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT from the confirmed destination list.
+# Returns 0 for ok and absent. Returns non-zero when the listing was not confirmed.
+# An empty destination list is "ok" only when the list command exited 0.
+load_common_base_snapshot_sides() {
+  local source_dataset="$1"
+  local dest_dataset="$2"
+  local transport="$3"
+  local source_var="$4"
+  local dest_var="$5"
+  # Do not name these like the caller's result variables. printf -v writes the
+  # nearest scope that already has that name.
+  local loaded_source="" loaded_dest="" rc=0 count_text="" source_rc=0
+
+  printf -v "$source_var" ''
+  printf -v "$dest_var" ''
+  SEND_COMMON_BASE_LISTING="failed"
+  SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT=0
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+
+  if [[ "$transport" == "local" ]] && ! dataset_exists "$dest_dataset"; then
+    SEND_COMMON_BASE_LISTING="absent"
+    return 0
+  fi
+
+  rc=0
+  read_member_snapshot_inventory "$dest_dataset" "$transport" loaded_dest || rc=$?
+  if (( rc == 10 )); then
+    SEND_COMMON_BASE_LISTING="absent"
+    return 0
+  fi
+  if (( rc != 0 )); then
+    log "Snapshot listing for ${dest_dataset} failed (exit ${rc}); not treating an unverified listing as a missing send checkpoint."
+    SEND_COMMON_BASE_LISTING="failed"
+    return 1
+  fi
+  if ! count_text="$(snapshot_inventory_row_count "$loaded_dest")"; then
+    log "Snapshot listing for ${dest_dataset} did not return a confirmed snapshot list; not treating it as a missing send checkpoint."
+    SEND_COMMON_BASE_LISTING="failed"
+    return 1
+  fi
+  SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT="$count_text"
+
+  loaded_source="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null)" || source_rc=$?
+  if (( source_rc != 0 )); then
+    log "Source snapshot listing for ${source_dataset} failed (exit ${source_rc}); not treating that as a missing send checkpoint."
+    SEND_COMMON_BASE_LISTING="failed"
+    return 1
+  fi
+  if ! snapshot_inventory_row_count "$loaded_source" >/dev/null; then
+    log "Source snapshot listing for ${source_dataset} did not return a confirmed snapshot list; not treating that as a missing send checkpoint."
+    SEND_COMMON_BASE_LISTING="failed"
+    return 1
+  fi
+
+  SEND_COMMON_BASE_LISTING="ok"
+  printf -v "$source_var" '%s' "$loaded_source"
+  printf -v "$dest_var" '%s' "$loaded_dest"
+  return 0
+}
+
 find_latest_common_basename_for_member() {
   local source_dataset="$1"
   local dest_dataset="$2"
   local prefix="$3"
   local result_name_var="$4"
-  local source_inventory dest_inventory snap_name snap_epoch snap_base
-  local source_count dest_count
-  local -A dest_basenames=()
-
-  printf -v "$result_name_var" ''
-  dataset_exists "$dest_dataset" || return 0
-
-  source_inventory="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null | grep -F "@${prefix}" | sort -t $'\t' -k2,2n || true)"
-  dest_inventory="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$dest_dataset" 2>/dev/null | grep -F "@${prefix}" | sort -t $'\t' -k2,2n || true)"
-  source_count="$(printf '%s\n' "$source_inventory" | awk 'NF { c++ } END { print c+0 }')"
-  dest_count="$(printf '%s\n' "$dest_inventory" | awk 'NF { c++ } END { print c+0 }')"
-
-  while IFS=$'\t' read -r snap_name snap_epoch; do
-    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
-    dest_basenames["${snap_name##*@}"]="$snap_epoch"
-  done <<< "$dest_inventory"
-
-  while IFS=$'\t' read -r snap_name snap_epoch; do
-    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
-    snap_base="${snap_name##*@}"
-    if [[ -n "${dest_basenames[$snap_base]:-}" ]]; then
-      printf -v "$result_name_var" '%s' "$snap_base"
-    fi
-  done <<< "$source_inventory"
+  find_latest_common_basename_for_member_transport "$source_dataset" "$dest_dataset" "$prefix" "$result_name_var" local
 }
 
 find_latest_common_snapshot_for_target() {
@@ -3630,29 +4275,7 @@ find_latest_common_snapshot_for_target() {
   local dest_dataset="$2"
   local target_basename="$3"
   local result_var="$4"
-  local snap_name snap_epoch snap_base latest_common=""
-  local -A dest_map=()
-
-  printf -v "$result_var" ''
-  dataset_exists "$dest_dataset" || return 0
-
-  while IFS=$'\t' read -r snap_name snap_epoch; do
-    [[ -n "$snap_name" ]] || continue
-    dest_map["${snap_name##*@}"]=1
-  done < <(zfs list -H -p -s creation -t snapshot -o name,creation -d 1 "$dest_dataset" 2>/dev/null || true)
-
-  while IFS=$'\t' read -r snap_name snap_epoch; do
-    [[ -n "$snap_name" ]] || continue
-    snap_base="${snap_name##*@}"
-    if [[ -n "${dest_map[$snap_base]:-}" ]]; then
-      latest_common="$snap_base"
-    fi
-    if [[ "$snap_base" == "$target_basename" ]]; then
-      break
-    fi
-  done < <(zfs list -H -p -s creation -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null || true)
-
-  printf -v "$result_var" '%s' "$latest_common"
+  find_latest_common_snapshot_for_target_transport "$source_dataset" "$dest_dataset" "$target_basename" "$result_var" local
 }
 
 find_latest_common_basename_for_member_transport() {
@@ -3661,34 +4284,37 @@ find_latest_common_basename_for_member_transport() {
   local prefix="$3"
   local result_name_var="$4"
   local transport="${5:-local}"
-  local source_inventory dest_inventory snap_name snap_epoch snap_base
-  local source_count dest_count
+  local source_raw="" dest_raw="" source_inventory="" dest_inventory=""
+  local snap_name="" snap_epoch="" snap_base=""
+  local source_count=0 dest_count=0
   local -A dest_basenames=()
 
   printf -v "$result_name_var" ''
-  if [[ "$transport" == "ssh" ]]; then
-    ssh_dataset_exists "$dest_dataset" || return 0
-    dest_inventory="$(ssh_snapshot_inventory "$dest_dataset" | grep -F "@${prefix}" || true)"
-  else
-    dataset_exists "$dest_dataset" || return 0
-    dest_inventory="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$dest_dataset" 2>/dev/null | grep -F "@${prefix}" | sort -t $'\t' -k2,2n || true)"
+  if ! load_common_base_snapshot_sides "$source_dataset" "$dest_dataset" "$transport" source_raw dest_raw; then
+    return 1
   fi
-  source_inventory="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null | grep -F "@${prefix}" | sort -t $'\t' -k2,2n || true)"
+  if [[ "${SEND_COMMON_BASE_LISTING:-}" != "ok" ]]; then
+    return 0
+  fi
+
+  dest_inventory="$(printf '%s\n' "$dest_raw" | grep -F "@${prefix}" || true)"
+  source_inventory="$(printf '%s\n' "$source_raw" | grep -F "@${prefix}" | sort -t $'\t' -k2,2n || true)"
   source_count="$(printf '%s\n' "$source_inventory" | awk 'NF { c++ } END { print c+0 }')"
   dest_count="$(printf '%s\n' "$dest_inventory" | awk 'NF { c++ } END { print c+0 }')"
 
   while IFS=$'\t' read -r snap_name snap_epoch; do
-    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+    [[ -n "$snap_name" && "$snap_epoch" =~ ^[0-9]+$ ]] || continue
     dest_basenames["${snap_name##*@}"]="$snap_epoch"
   done <<< "$dest_inventory"
 
   while IFS=$'\t' read -r snap_name snap_epoch; do
-    [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
+    [[ -n "$snap_name" && "$snap_epoch" =~ ^[0-9]+$ ]] || continue
     snap_base="${snap_name##*@}"
     if [[ -n "${dest_basenames[$snap_base]:-}" ]]; then
       printf -v "$result_name_var" '%s' "$snap_base"
     fi
   done <<< "$source_inventory"
+  return 0
 }
 
 find_latest_common_snapshot_for_target_transport() {
@@ -3697,26 +4323,25 @@ find_latest_common_snapshot_for_target_transport() {
   local target_basename="$3"
   local result_var="$4"
   local transport="${5:-local}"
-  local snap_name snap_epoch snap_base latest_common=""
+  local source_raw="" dest_raw=""
+  local snap_name="" snap_epoch="" snap_base="" latest_common=""
   local -A dest_map=()
 
   printf -v "$result_var" ''
-  if [[ "$transport" == "ssh" ]]; then
-    ssh_dataset_exists "$dest_dataset" || return 0
-    while IFS=$'\t' read -r snap_name snap_epoch; do
-      [[ -n "$snap_name" ]] || continue
-      dest_map["${snap_name##*@}"]=1
-    done < <(ssh_snapshot_inventory "$dest_dataset")
-  else
-    dataset_exists "$dest_dataset" || return 0
-    while IFS=$'\t' read -r snap_name snap_epoch; do
-      [[ -n "$snap_name" ]] || continue
-      dest_map["${snap_name##*@}"]=1
-    done < <(zfs list -H -p -s creation -t snapshot -o name,creation -d 1 "$dest_dataset" 2>/dev/null || true)
+  if ! load_common_base_snapshot_sides "$source_dataset" "$dest_dataset" "$transport" source_raw dest_raw; then
+    return 1
+  fi
+  if [[ "${SEND_COMMON_BASE_LISTING:-}" != "ok" ]]; then
+    return 0
   fi
 
   while IFS=$'\t' read -r snap_name snap_epoch; do
-    [[ -n "$snap_name" ]] || continue
+    [[ -n "$snap_name" && "$snap_name" == *"@"* && "$snap_epoch" =~ ^[0-9]+$ ]] || continue
+    dest_map["${snap_name##*@}"]=1
+  done <<< "$dest_raw"
+
+  while IFS=$'\t' read -r snap_name snap_epoch; do
+    [[ -n "$snap_name" && "$snap_name" == *"@"* && "$snap_epoch" =~ ^[0-9]+$ ]] || continue
     snap_base="${snap_name##*@}"
     if [[ -n "${dest_map[$snap_base]:-}" ]]; then
       latest_common="$snap_base"
@@ -3724,9 +4349,10 @@ find_latest_common_snapshot_for_target_transport() {
     if [[ "$snap_base" == "$target_basename" ]]; then
       break
     fi
-  done < <(zfs list -H -p -s creation -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null || true)
+  done <<< "$source_raw"
 
   printf -v "$result_var" '%s' "$latest_common"
+  return 0
 }
 
 job_list_basenames_for_root() {
@@ -3807,7 +4433,12 @@ collect_latest_common_checkpoint_basenames_for_schedule() {
     fi
 
     latest_common=""
-    find_latest_common_basename_for_member_transport "$source_dataset" "$dest_dataset" "$prefix" latest_common "$transport" || true
+    if ! find_latest_common_basename_for_member_transport "$source_dataset" "$dest_dataset" "$prefix" latest_common "$transport"; then
+      result_ref=()
+      SEND_COMMON_LISTING_UNVERIFIED=1
+      log "Common-checkpoint listing failed for ${source_dataset} -> ${dest_dataset}; not treating that as a proven missing base."
+      return 1
+    fi
     [[ -n "$latest_common" ]] && result_ref["$latest_common"]=1
   done < <(list_tree_datasets "$source_root" "$include_children")
 }
@@ -3818,7 +4449,10 @@ checkpoint_basename_is_latest_common_for_schedule() {
   local -A common=()
 
   [[ -n "$schedule_job_id" && -n "$basename" ]] || return 1
-  collect_latest_common_checkpoint_basenames_for_schedule "$schedule_job_id" common
+  if ! collect_latest_common_checkpoint_basenames_for_schedule "$schedule_job_id" common; then
+    log "Refusing to treat ${basename} as disposable; the snapshot listing did not succeed."
+    return 0
+  fi
   [[ -n "${common[$basename]:-}" ]]
 }
 
@@ -3830,6 +4464,7 @@ all_scheduled_job_protected_basenames() {
   local -A protected=()
 
   result_ref=()
+  SEND_COMMON_LISTING_UNVERIFIED=0
 
   for schedule_job_id in "${SCHEDULE_JOB_IDS[@]}"; do
     protected=()
@@ -4768,6 +5403,11 @@ queue_snapshot_delete_job() {
   QUEUE_DELETE_LAST_ADDED=0
   QUEUE_DELETE_LAST_ESTIMATED_RECLAIM=0
 
+  if [[ "${SEND_COMMON_LISTING_UNVERIFIED:-0}" == "1" ]]; then
+    log "Skipping snapshot delete queue for ${snapshot}; a snapshot listing did not succeed, so no checkpoint is treated as proven missing."
+    return 0
+  fi
+
   snapshot_name="${snapshot##*@}"
   pool="${dataset%%/*}"
   requested_epoch="$(date +%s)"
@@ -4889,7 +5529,10 @@ latest_checkpoint_basename_for_schedule() {
   prefix="$(job_prefix_for_schedule "$schedule_job_id")"
   source_root="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}"
   dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
-  collect_latest_common_checkpoint_basenames_for_schedule "$schedule_job_id" common
+  if ! collect_latest_common_checkpoint_basenames_for_schedule "$schedule_job_id" common; then
+    printf -v "$result_var" ''
+    return 0
+  fi
 
   ((${#common[@]} > 0)) || return 0
 
