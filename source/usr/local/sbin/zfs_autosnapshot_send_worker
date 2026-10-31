@@ -2,6 +2,17 @@
 set -Eeuo pipefail
 # shellcheck disable=SC2034
 
+# Keep Unraid sbin tools visible when cron PATH is /usr/bin:/bin.
+PATH="${PATH:-/usr/bin:/bin}"
+for _zfsas_path_dir in /usr/local/sbin /usr/local/bin /usr/sbin /sbin; do
+  case ":${PATH}:" in
+    *":${_zfsas_path_dir}:"*) ;;
+    *) PATH="${PATH}:${_zfsas_path_dir}" ;;
+  esac
+done
+unset _zfsas_path_dir
+export PATH
+
 # shellcheck source=/dev/null
 source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
 
@@ -116,6 +127,22 @@ fail_current_job_final() {
   job[LAST_MESSAGE]="$message"
   preserve_failed_send_log_for_job job || true
   persist_job || true
+}
+
+# Keep this job claimed while a send step waits to retry. Do not queue another
+# copy of the job and do not drop the lock the queue uses to avoid duplicates.
+send_remote_retry_hold_job() {
+  local description="$1"
+  local lock_dir
+  [[ -n "${CURRENT_JOB_ID:-}" ]] || return 0
+  job[STATE]="running"
+  job[WORKER_PID]="$$"
+  job[LAST_MESSAGE]="Retrying ${description}."
+  persist_job || true
+  lock_dir="$(job_lock_dir_for_id "$CURRENT_JOB_ID")"
+  if [[ -d "$lock_dir" ]]; then
+    printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
+  fi
 }
 
 defer_current_job() {
@@ -234,6 +261,20 @@ destination_snapshot_exists_for_transport() {
   esac
 }
 
+# 0 exists, 10 proven absent, 2 the remote check was not confirmed.
+destination_snapshot_status_for_transport() {
+  local snapshot="$1"
+  case "$(current_send_transport)" in
+    ssh) ssh_snapshot_status "$snapshot" ;;
+    *)
+      if snapshot_exists "$snapshot"; then
+        return 0
+      fi
+      return 10
+      ;;
+  esac
+}
+
 destination_has_any_snapshots_for_transport() {
   local dataset="$1"
   case "$(current_send_transport)" in
@@ -245,7 +286,7 @@ destination_has_any_snapshots_for_transport() {
 send_destination_actionable_for_transport() {
   local destination="$1"
   local message_var="${2:-}"
-  local pool parent command spipe_command
+  local pool parent command spipe_command ssh_output=""
 
   [[ -n "$message_var" ]] && printf -v "$message_var" ''
   case "$(current_send_transport)" in
@@ -267,7 +308,7 @@ send_destination_actionable_for_transport() {
           return 1
         }
       fi
-      eval "$command" >/dev/null 2>&1 || {
+      run_ssh_send_command "check remote destination parent ${parent}" "$command" ssh_output || {
         [[ -n "$message_var" ]] && printf -v "$message_var" "remote destination pool/parent '${parent}' is not ready over SSH"
         return 1
       }
@@ -292,7 +333,7 @@ send_destination_actionable_for_transport() {
 
 ensure_destination_parent_exists_for_transport() {
   local destination="$1"
-  local pool parent command
+  local pool parent command ssh_output=""
   case "$(current_send_transport)" in
     ssh)
       is_valid_dataset_name "$destination" || return 1
@@ -303,7 +344,7 @@ ensure_destination_parent_exists_for_transport() {
       else
         build_ssh_zfs_command "zfs list -H -o name -- $(shell_quote_word "$pool") >/dev/null && { zfs list -H -o name -- $(shell_quote_word "$parent") >/dev/null || zfs create -p -- $(shell_quote_word "$parent"); }" command || return 1
       fi
-      eval "$command" >/dev/null 2>&1
+      run_ssh_send_command "ensure remote destination parent ${destination}" "$command" ssh_output
       ;;
     *)
       ensure_destination_parent_exists "$destination"
@@ -540,12 +581,42 @@ run_pipeline_with_space_reservation() {
   if [[ -n "$send_progress" ]]; then
     set_job_progress "sending" "0" "Sending."
   fi
+  SEND_PIPELINE_NEEDS_FULL_RESEND=0
   if run_pipeline_with_status "$description" "$base_snapshot" "$snapshot" "$destination" "$required_bytes" 0 99; then
     rc=0
   else
     rc=$?
   fi
+  if (( rc != 0 )) && [[ "${SEND_PIPELINE_NEEDS_FULL_RESEND:-0}" == "1" ]]; then
+    mark_current_job_needs_full_resend "${SEND_PIPELINE_FAILURE_DETAIL:-}"
+    if [[ "${SEND_RESEED_IN_PROGRESS:-0}" == "1" ]]; then
+      fail_current_job_final "Full reseed of '${destination}' did not complete after the incremental destination mismatch."
+      return 1
+    fi
+    reseed_confirmed_destination_and_full_send \
+      "zfs receive reported that the incremental destination does not match, and that mismatch was kept after incremental retries were stopped" \
+      "$destination" "$snapshot" "$send_progress" 1
+    return $?
+  fi
   return "$rc"
+}
+
+mark_current_job_needs_full_resend() {
+  local detail="${1:-}"
+  local message="Incremental receive failed: the destination snapshot does not match the incremental base. Incremental retries were stopped so the destination can be rebuilt from scratch."
+
+  log "$message"
+  if [[ -n "$detail" ]]; then
+    log "Full resend detail: ${detail}"
+  fi
+  job[NEEDS_FULL_RESEND]="1"
+  job[SEND_PLAN_DESCRIPTION]=""
+  job[SEND_PLAN_BASE_SNAPSHOT]=""
+  job[SEND_PLAN_SNAPSHOT]=""
+  job[SEND_PLAN_DESTINATION]=""
+  job[SPACE_ESTIMATE_KEY]=""
+  job[SPACE_REQUIRED_BYTES]=""
+  persist_job || true
 }
 
 schedule_run_base_sort() {
@@ -665,6 +736,10 @@ prepare_scheduled_job_snapshot() {
 
   send_destination_actionable_for_transport "$destination_root" readiness_message || {
     log "Destination is not ready for scheduled send prepare ${destination_root}: ${readiness_message}"
+    if [[ "${SEND_REMOTE_STEP_EXHAUSTED:-0}" == "1" ]]; then
+      fail_current_job_final "Destination is not ready for scheduled send after $(send_remote_max_attempts) attempts: ${readiness_message}"
+      return 1
+    fi
     defer_current_job "Destination is not ready for scheduled send; waiting for ZFS import/mount." 15
     return 2
   }
@@ -775,11 +850,65 @@ build_resume_members_for_current_job() {
   return 0
 }
 
+child_fanout_lock_dir_for_id() {
+  local run_root_id="$1"
+  printf '%s/child-fanout-%s.lockdir' "$JOB_LOCKS_DIR" "$(queue_safe_token "$run_root_id")"
+}
+
+acquire_child_fanout_lock() {
+  local run_root_id="$1"
+  local lock_dir pid
+
+  mkdir -p "$JOB_LOCKS_DIR" >/dev/null 2>&1 || return 1
+  lock_dir="$(child_fanout_lock_dir_for_id "$run_root_id")"
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
+    printf '%s' "$lock_dir"
+    return 0
+  fi
+
+  pid="$(sed -n '1p' "${lock_dir}/pid" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && process_alive "$pid"; then
+    return 1
+  fi
+
+  rm -rf "$lock_dir" >/dev/null 2>&1 || true
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
+    printf '%s' "$lock_dir"
+    return 0
+  fi
+  return 1
+}
+
+release_child_fanout_lock() {
+  local lock_dir="$1"
+  local pid
+
+  [[ -n "$lock_dir" && -d "$lock_dir" ]] || return 0
+  pid="$(sed -n '1p' "${lock_dir}/pid" 2>/dev/null || true)"
+  [[ -z "$pid" || "$pid" == "$$" ]] || return 0
+  rm -rf "$lock_dir" >/dev/null 2>&1 || true
+}
+
+send_job_id_already_queued() {
+  local job_id="$1"
+  local found=""
+
+  [[ -n "$job_id" ]] || return 1
+  case "$job_id" in
+    *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  found="$(find "$OPS_JOBS_DIR" -maxdepth 1 -type f -name "*-${job_id}.job" -print -quit 2>/dev/null || true)"
+  [[ -n "$found" ]]
+}
+
 queue_child_send_jobs() {
   local member_count requested_epoch base_sort snapshot_basename schedule_job_id prefix previous_basename run_root_id
   local requested_at window_key frequency threshold threshold_bytes snapshot_prefix_base source_root destination_root completes_schedule_window
   local run_group_id prep_job_id prep_dest_pool send_transport
   local index source_dataset destination_dataset snapshot sort_key child_job_id finalize_job_id fanout_started fanout_elapsed
+  local lock_dir="" created=0 already=0
   # shellcheck disable=SC2034
   local -A queued_job=()
   local resume_only=0
@@ -815,6 +944,12 @@ queue_child_send_jobs() {
   prep_dest_pool="$(job_get job PREP_DEST_POOL)"
   send_transport="$(job_get job SEND_TRANSPORT local)"
 
+  if ! lock_dir="$(acquire_child_fanout_lock "$run_root_id")"; then
+    log "Child send fan-out for ${run_root_id} is already in progress; not queueing duplicate child jobs."
+    defer_current_job "Child send jobs are already being queued." 5
+    return 2
+  fi
+
   for ((index = 0; index < member_count; index++)); do
     source_dataset="$(job_get job MEMBER_${index}_SOURCE)"
     destination_dataset="$(job_get job MEMBER_${index}_DESTINATION)"
@@ -823,6 +958,10 @@ queue_child_send_jobs() {
 
     sort_key="$(send_member_sort_key "$base_sort" "$index")"
     child_job_id="send-child-${run_root_id}-${index}"
+    if send_job_id_already_queued "$child_job_id"; then
+      already=$((already + 1))
+      continue
+    fi
     queued_job=()
     queued_job[JOB_ID]="$child_job_id"
     queued_job[JOB_TYPE]="send"
@@ -867,45 +1006,62 @@ queue_child_send_jobs() {
     queued_job[MEMBER_0_DESTINATION]="$destination_dataset"
     queued_job[MEMBER_0_SNAPSHOT]="$snapshot"
     queued_job[COMPLETES_SCHEDULE_WINDOW]="0"
-    ensure_send_job_file queued_job "$requested_epoch" || return 1
+    if ! ensure_send_job_file queued_job "$requested_epoch"; then
+      release_child_fanout_lock "$lock_dir"
+      return 1
+    fi
+    created=$((created + 1))
   done
 
   finalize_job_id="finalize-${run_root_id}"
-  queued_job=()
-  queued_job[JOB_ID]="$finalize_job_id"
-  queued_job[JOB_TYPE]="send"
-  queued_job[JOB_MODE]="scheduled"
-  queued_job[JOB_ACTION]="finalize"
-  queued_job[STATE]="queued"
-  queued_job[PHASE]="queued"
-  queued_job[REQUESTED_EPOCH]="$requested_epoch"
-  queued_job[REQUESTED_AT]="$requested_at"
-  queued_job[QUEUE_SORT]="$(finalize_sort_key "$base_sort")"
-  queued_job[WINDOW_KEY]="$window_key"
-  queued_job[SCHEDULE_JOB_ID]="$schedule_job_id"
-  queued_job[PARENT_RUN_ID]="$run_root_id"
-  queued_job[SOURCE_ROOT]="$source_root"
-  queued_job[DESTINATION_ROOT]="$destination_root"
-  queued_job[SNAPSHOT_PREFIX]="$prefix"
-  queued_job[SOURCE_SNAPSHOT_NAME]="$snapshot_basename"
-  queued_job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
-  queued_job[SEND_TRANSPORT]="$send_transport"
-  queued_job[ATTEMPT_COUNT]="0"
-  queued_job[RETRY_AT]="0"
-  queued_job[LAST_ERROR]=""
-  if (( resume_only == 1 )); then
-    queued_job[LAST_MESSAGE]="Waiting for children."
+  if send_job_id_already_queued "$finalize_job_id"; then
+    already=$((already + 1))
   else
-    queued_job[LAST_MESSAGE]="Waiting for children."
+    queued_job=()
+    queued_job[JOB_ID]="$finalize_job_id"
+    queued_job[JOB_TYPE]="send"
+    queued_job[JOB_MODE]="scheduled"
+    queued_job[JOB_ACTION]="finalize"
+    queued_job[STATE]="queued"
+    queued_job[PHASE]="queued"
+    queued_job[REQUESTED_EPOCH]="$requested_epoch"
+    queued_job[REQUESTED_AT]="$requested_at"
+    queued_job[QUEUE_SORT]="$(finalize_sort_key "$base_sort")"
+    queued_job[WINDOW_KEY]="$window_key"
+    queued_job[SCHEDULE_JOB_ID]="$schedule_job_id"
+    queued_job[PARENT_RUN_ID]="$run_root_id"
+    queued_job[SOURCE_ROOT]="$source_root"
+    queued_job[DESTINATION_ROOT]="$destination_root"
+    queued_job[SNAPSHOT_PREFIX]="$prefix"
+    queued_job[SOURCE_SNAPSHOT_NAME]="$snapshot_basename"
+    queued_job[PREVIOUS_SNAPSHOT_NAME]="$previous_basename"
+    queued_job[SEND_TRANSPORT]="$send_transport"
+    queued_job[ATTEMPT_COUNT]="0"
+    queued_job[RETRY_AT]="0"
+    queued_job[LAST_ERROR]=""
+    if (( resume_only == 1 )); then
+      queued_job[LAST_MESSAGE]="Waiting for children."
+    else
+      queued_job[LAST_MESSAGE]="Waiting for children."
+    fi
+    queued_job[WORKER_PID]=""
+    queued_job[PROGRESS_PERCENT]="5"
+    # shellcheck disable=SC2034
+    queued_job[COMPLETES_SCHEDULE_WINDOW]="$completes_schedule_window"
+    if ! ensure_send_job_file queued_job "$requested_epoch"; then
+      release_child_fanout_lock "$lock_dir"
+      return 1
+    fi
+    created=$((created + 1))
   fi
-  queued_job[WORKER_PID]=""
-  queued_job[PROGRESS_PERCENT]="5"
-  # shellcheck disable=SC2034
-  queued_job[COMPLETES_SCHEDULE_WINDOW]="$completes_schedule_window"
-  ensure_send_job_file queued_job "$requested_epoch" || return 1
 
+  release_child_fanout_lock "$lock_dir"
   fanout_elapsed=$(( $(date +%s) - fanout_started ))
-  log "Queued ${member_count} child send job(s) for ${run_root_id} in ${fanout_elapsed}s"
+  if (( created == 0 )); then
+    log "Child send jobs for ${run_root_id} were already queued (${already} existing); not queueing duplicates."
+  else
+    log "Queued ${created} child send job(s) for ${run_root_id} in ${fanout_elapsed}s (${already} already present)"
+  fi
   return 0
 }
 
@@ -914,7 +1070,7 @@ send_member_snapshot() {
   local member_count="$2"
   local source_dataset destination snapshot basename latest_common description progress failure_message base_snapshot send_transport
   local destination_parent source_exists=0 destination_exists=0 parent_exists=0 readiness_message
-  local source_type="" destination_type=""
+  local source_type="" destination_type="" dest_snap_rc=0 verified_dest_snapshots=0
 
   source_dataset="$(job_get job MEMBER_"${member_index}"_SOURCE)"
   destination="$(job_get job MEMBER_"${member_index}"_DESTINATION)"
@@ -956,6 +1112,10 @@ send_member_snapshot() {
 
   send_destination_actionable_for_transport "$destination" readiness_message || {
     log "Destination is not ready for ${destination}; deferring send member: ${readiness_message}"
+    if [[ "${SEND_REMOTE_STEP_EXHAUSTED:-0}" == "1" ]]; then
+      fail_current_job_final "Destination is not ready for ${destination} after $(send_remote_max_attempts) attempts: ${readiness_message}"
+      return 1
+    fi
     defer_current_job "Destination dataset is not ready for scheduled send; waiting for ZFS import/mount." 15
     return 2
   }
@@ -981,12 +1141,30 @@ send_member_snapshot() {
     return 1
   fi
 
-  if destination_snapshot_exists_for_transport "${destination}@${basename}"; then
+  dest_snap_rc=0
+  destination_snapshot_status_for_transport "${destination}@${basename}" || dest_snap_rc=$?
+  if (( dest_snap_rc == 0 )); then
     log "Destination already has ${destination}@${basename}; skipping receive for this member."
     return 0
   fi
+  if (( dest_snap_rc != 10 )); then
+    failure_message="Unable to verify whether '${destination}@${basename}' already exists. The remote snapshot check did not succeed, so this is not treated as a missing snapshot."
+    log "$failure_message"
+    fail_current_job_final "$failure_message"
+    return 1
+  fi
 
   progress=$((30 + (member_index * 40 / (member_count == 0 ? 1 : member_count))))
+  if [[ "$(job_get job NEEDS_FULL_RESEND 0)" == "1" ]]; then
+    log "Full resend selected for job $(job_get job JOB_ID): source=${source_dataset} destination=${destination} snapshot=${snapshot}"
+    reseed_confirmed_destination_and_full_send \
+      "a previous attempt confirmed that '${destination}' does not match an incremental send of '${snapshot}'" \
+      "$destination" "$snapshot" "$progress" 1 || return $?
+    set_job_progress "verifying" "$((progress + 15))" "Verifying receive."
+    destination_snapshot_exists_for_transport "${destination}@${basename}"
+    return $?
+  fi
+
   if ! preflight_only_worker && current_send_plan_matches "$snapshot" "$destination"; then
     base_snapshot="$(job_get job SEND_PLAN_BASE_SNAPSHOT)"
     description="$(job_get job SEND_PLAN_DESCRIPTION)"
@@ -1008,8 +1186,13 @@ send_member_snapshot() {
 
   if [[ "$(job_get job JOB_MODE)" == "scheduled" ]]; then
     latest_common=""
-    find_latest_common_basename_for_member_transport "$source_dataset" "$destination" "$(job_get job SNAPSHOT_PREFIX)" latest_common "$send_transport"
-    log "Scheduled send base selection: source=${source_dataset} destination=${destination} requested_snapshot=${basename} latest_common=${latest_common:-none}"
+    if ! find_latest_common_basename_for_member_transport "$source_dataset" "$destination" "$(job_get job SNAPSHOT_PREFIX)" latest_common "$send_transport"; then
+      failure_message="Unable to verify snapshots between '${source_dataset}' and '${destination}'. The snapshot listing did not succeed, so this is not a missing send checkpoint. Automatic purge/reseed was not considered."
+      log "$failure_message"
+      fail_current_job_final "$failure_message"
+      return 1
+    fi
+    log "Scheduled send base selection: source=${source_dataset} destination=${destination} requested_snapshot=${basename} latest_common=${latest_common:-none} listing=${SEND_COMMON_BASE_LISTING:-unknown} destination_snapshots=${SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT:-0}"
     if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
       is_valid_snapshot_basename "$latest_common" || {
         fail_current_job_final "Base snapshot '${latest_common}' is invalid."
@@ -1018,32 +1201,26 @@ send_member_snapshot() {
       description="Incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
       run_pipeline_with_space_reservation "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" "$progress" || return $?
     else
-      if (( destination_exists == 1 )) && destination_has_any_snapshots_for_transport "$destination"; then
-        if [[ "$send_transport" == "ssh" ]]; then
-          failure_message="No common send checkpoint remains between '${source_dataset}' and remote '${destination}'. Automatic remote destination purge/reseed is not enabled; re-seed or clean up the remote destination manually."
-          log "$failure_message"
-          fail_current_job_final "$failure_message"
-          return 1
-        fi
-        failure_message="No common send checkpoint remains between '${source_dataset}' and '${destination}'. The destination dataset was purged so the next retry can reseed this backup from scratch. Review the preserved send log for diagnostics."
-        log "$failure_message"
-        if purge_destination_for_reseed "$destination"; then
-          job[LAST_ERROR]="$failure_message"
-          job[LAST_MESSAGE]="$failure_message"
-          preserve_failed_send_log_for_job job || true
-          fail_current_job "$failure_message"
-          return 1
-        fi
-        fail_current_job_final "No common send checkpoint remains between '${source_dataset}' and '${destination}', and automatic destination purge for reseed failed."
-        return 1
+      if send_common_base_missing_proven "$latest_common" "$basename"; then
+        reseed_confirmed_destination_and_full_send \
+          "confirmed snapshot listing found no common send checkpoint between '${source_dataset}' and '${destination}'" \
+          "$destination" "$snapshot" "$progress" 0 || return $?
+        set_job_progress "verifying" "$((progress + 15))" "Verifying receive."
+        destination_snapshot_exists_for_transport "${destination}@${basename}"
+        return $?
       fi
       description="Full send ${snapshot} -> ${destination}"
       run_pipeline_with_space_reservation "$description" "" "$snapshot" "$destination" "$progress" || return $?
     fi
   else
     latest_common=""
-    find_latest_common_snapshot_for_target_transport "$source_dataset" "$destination" "$basename" latest_common "$send_transport"
-    log "Manual send base selection: source=${source_dataset} destination=${destination} requested_snapshot=${basename} latest_common=${latest_common:-none}"
+    if ! find_latest_common_snapshot_for_target_transport "$source_dataset" "$destination" "$basename" latest_common "$send_transport"; then
+      failure_message="Unable to verify snapshots between '${source_dataset}' and '${destination}'. The snapshot listing did not succeed, so this is not a missing send checkpoint. Automatic purge/reseed was not considered."
+      log "$failure_message"
+      fail_current_job_final "$failure_message"
+      return 1
+    fi
+    log "Manual send base selection: source=${source_dataset} destination=${destination} requested_snapshot=${basename} latest_common=${latest_common:-none} listing=${SEND_COMMON_BASE_LISTING:-unknown} destination_snapshots=${SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT:-0}"
     if [[ -n "$latest_common" && "$latest_common" != "$basename" ]]; then
       is_valid_snapshot_basename "$latest_common" || {
         fail_current_job_final "Base snapshot '${latest_common}' is invalid."
@@ -1052,10 +1229,13 @@ send_member_snapshot() {
       description="Manual incremental send ${source_dataset}@${latest_common} -> ${source_dataset}@${basename} -> ${destination}"
       run_pipeline_with_space_reservation "$description" "${source_dataset}@${latest_common}" "$snapshot" "$destination" "$progress" || return $?
     else
-      if (( destination_exists == 1 )) && destination_has_any_snapshots_for_transport "$destination"; then
-        failure_message="No common snapshot remains between '${source_dataset}' and '${destination}', and a destructive automatic reseed is not available for this manual send. Review the send log and re-seed the destination manually."
-        fail_current_job_final "$failure_message"
-        return 1
+      if send_common_base_missing_proven "$latest_common" "$basename"; then
+        reseed_confirmed_destination_and_full_send \
+          "confirmed snapshot listing found no common snapshot between '${source_dataset}' and '${destination}'" \
+          "$destination" "$snapshot" "$progress" 0 || return $?
+        set_job_progress "verifying" "$((progress + 15))" "Verifying receive."
+        destination_snapshot_exists_for_transport "${destination}@${basename}"
+        return $?
       fi
       description="Manual full send ${snapshot} -> ${destination}"
       run_pipeline_with_space_reservation "$description" "" "$snapshot" "$destination" "$progress" || return $?
@@ -1137,12 +1317,102 @@ cleanup_source_checkpoints_for_verified_member() {
 
 purge_destination_for_reseed() {
   local destination="$1"
+  local transport command="" output="" rc=0
 
   is_valid_dataset_name "$destination" || return 1
+  transport="$(current_send_transport)"
+  log "Purging destination dataset for automatic reseed: ${destination} (transport=${transport})"
+  if [[ "$transport" == "ssh" ]]; then
+    build_ssh_zfs_command "zfs destroy -r -- $(shell_quote_word "$destination")" command || return 1
+    run_ssh_send_command "purge remote destination ${destination} for reseed" "$command" output || rc=$?
+    if (( rc == 0 || rc == 10 )); then
+      log "Purged remote destination ${destination} for reseed."
+      return 0
+    fi
+    log "Remote purge failed for ${destination} (exit ${rc}). The destination was not rebuilt."
+    return 1
+  fi
+  if [[ "$transport" != "local" ]]; then
+    log "Refusing to purge ${destination} for reseed on transport ${transport}."
+    return 1
+  fi
   dataset_exists "$destination" || return 0
-
-  log "Purging destination dataset for automatic reseed: ${destination}"
   zfs destroy -r "$destination"
+}
+
+# Purge a confirmed destination and send the snapshot as a full backup.
+# refresh_listing=1 re-checks the destination after an incremental mismatch.
+# The list itself is retried; a failed or unverified list never purges.
+reseed_confirmed_destination_and_full_send() {
+  local reason="$1"
+  local destination="$2"
+  local snapshot="$3"
+  local progress="${4:-}"
+  local refresh_listing="${5:-0}"
+  local transport count=0 description failure_message
+
+  if [[ "${SEND_RESEED_IN_PROGRESS:-0}" == "1" ]]; then
+    fail_current_job_final "Full reseed of '${destination}' did not complete."
+    return 1
+  fi
+
+  transport="$(current_send_transport)"
+  if [[ "$refresh_listing" == "1" || "${SEND_COMMON_BASE_LISTING:-}" != "ok" ]]; then
+    count=0
+    if ! confirmed_destination_snapshot_count "$destination" "$transport" count; then
+      failure_message="Not reseeding '${destination}'. The snapshot listing did not succeed after retries, so this is not a confirmed missing base or destination mismatch. ${reason}"
+      log "$failure_message"
+      fail_current_job_final "$failure_message"
+      return 1
+    fi
+    SEND_COMMON_BASE_LISTING="ok"
+    SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT="$count"
+  fi
+
+  if ! send_reseed_permitted; then
+    failure_message="Automatic remote destination purge/reseed is not enabled (SEND_AUTO_RESEED=0). ${reason}"
+    log "$failure_message"
+    fail_current_job_final "$failure_message"
+    return 1
+  fi
+
+  count="${SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT:-0}"
+  if [[ "$refresh_listing" == "1" ]]; then
+    log "Reseed triggered for ${destination}: ${reason}. The destination snapshot list was confirmed after retries and parsed successfully with ${count} destination snapshot(s). The destination will be rebuilt with a full send of ${snapshot}."
+  else
+    log "Reseed triggered for ${destination}: ${reason}. Confirmed snapshot listing parsed successfully with ${count} destination snapshot(s). The destination will be rebuilt with a full send of ${snapshot}."
+  fi
+  job[NEEDS_FULL_RESEND]="1"
+  job[LAST_MESSAGE]="Reseeding ${destination}."
+  persist_job || true
+
+  if [[ "$count" =~ ^[0-9]+$ ]] && (( count > 0 )); then
+    if ! purge_destination_for_reseed "$destination"; then
+      fail_current_job_final "Reseed of '${destination}' failed because the destination could not be purged. ${reason}"
+      return 1
+    fi
+  else
+    log "Confirmed listing shows ${destination} has no snapshots. Starting a full send of ${snapshot} without a purge."
+  fi
+
+  SEND_RESEED_IN_PROGRESS=1
+  job[SEND_PLAN_DESCRIPTION]=""
+  job[SEND_PLAN_BASE_SNAPSHOT]=""
+  job[SEND_PLAN_SNAPSHOT]=""
+  job[SEND_PLAN_DESTINATION]=""
+  job[SPACE_ESTIMATE_KEY]=""
+  job[SPACE_REQUIRED_BYTES]=""
+  release_current_space_reservation
+  description="Full reseed ${snapshot} -> ${destination}"
+  set_job_progress "sending" "0" "Reseeding."
+  if run_pipeline_with_space_reservation "$description" "" "$snapshot" "$destination" "$progress"; then
+    job[NEEDS_FULL_RESEND]="0"
+    persist_job || true
+    SEND_RESEED_IN_PROGRESS=0
+    return 0
+  fi
+  SEND_RESEED_IN_PROGRESS=0
+  return 1
 }
 
 run_child_jobs_have_failed() {
@@ -1270,6 +1540,10 @@ process_pool_prep_job() {
 
   send_destination_pool_actionable_for_schedule_transport "$dest_pool" "$send_transport" readiness_message || {
     log "Destination pool is not ready for pool prep ${dest_pool} (${send_transport}): ${readiness_message}"
+    if [[ "${SEND_REMOTE_STEP_EXHAUSTED:-0}" == "1" ]]; then
+      fail_current_job_final "Destination pool is not ready for pool prep ${dest_pool} after $(send_remote_max_attempts) attempts: ${readiness_message}"
+      return 1
+    fi
     defer_current_job "Destination pool is not ready; waiting for ZFS import/mount or remote receiver readiness." 15
     return 2
   }
@@ -1346,14 +1620,14 @@ process_send_job() {
           return 1
         }
         set_job_progress "snapshot_created" "28" "Queueing missing sends."
-        queue_child_send_jobs || return 1
+        queue_child_send_jobs || return $?
         job[COMPLETES_SCHEDULE_WINDOW]="0"
         complete_job "Queued missing sends."
         return 0
       fi
       prepare_scheduled_job_snapshot || return 1
       set_job_progress "snapshot_created" "28" "Queueing child sends."
-      queue_child_send_jobs || return 1
+      queue_child_send_jobs || return $?
       job[COMPLETES_SCHEDULE_WINDOW]="0"
       complete_job "Queued child sends."
       release_current_prep_pool_lock
@@ -1437,6 +1711,14 @@ main() {
   require_numeric_in_range "SEND_KEEP_ALL_FOR_DAYS" "$SEND_KEEP_ALL_FOR_DAYS" 1 36500 || SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
   require_numeric_in_range "SEND_KEEP_DAILY_UNTIL_DAYS" "$SEND_KEEP_DAILY_UNTIL_DAYS" 2 36500 || SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
   require_numeric_in_range "SEND_KEEP_WEEKLY_UNTIL_DAYS" "$SEND_KEEP_WEEKLY_UNTIL_DAYS" 3 36500 || SEND_KEEP_WEEKLY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_WEEKLY_UNTIL_DAYS"
+  require_numeric_in_range "SEND_REMOTE_MAX_ATTEMPTS" "${SEND_REMOTE_MAX_ATTEMPTS:-$DEFAULT_SEND_REMOTE_MAX_ATTEMPTS}" 1 20 || SEND_REMOTE_MAX_ATTEMPTS="$DEFAULT_SEND_REMOTE_MAX_ATTEMPTS"
+  require_numeric_in_range "SEND_REMOTE_RETRY_DELAY_SECONDS" "${SEND_REMOTE_RETRY_DELAY_SECONDS:-$DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS}" 0 86400 || SEND_REMOTE_RETRY_DELAY_SECONDS="$DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS"
+  case "${SEND_AUTO_RESEED:-1}" in
+    0|1) ;;
+    *) SEND_AUTO_RESEED="$DEFAULT_SEND_AUTO_RESEED" ;;
+  esac
+  # Retries stay inside this worker, on the job it already claimed.
+  SEND_REMOTE_RETRIES_ENABLED=1
   if (( SEND_KEEP_ALL_FOR_DAYS >= SEND_KEEP_DAILY_UNTIL_DAYS || SEND_KEEP_DAILY_UNTIL_DAYS >= SEND_KEEP_WEEKLY_UNTIL_DAYS )); then
     SEND_KEEP_ALL_FOR_DAYS="$DEFAULT_SEND_KEEP_ALL_FOR_DAYS"
     SEND_KEEP_DAILY_UNTIL_DAYS="$DEFAULT_SEND_KEEP_DAILY_UNTIL_DAYS"
@@ -1532,7 +1814,11 @@ main() {
     else
       result="$?"
       if (( result != 2 )) && [[ "$(job_get job STATE)" == "running" ]]; then
-        fail_current_job "Send failed during $(job_get job PHASE)."
+        if [[ "${SEND_REMOTE_STEP_EXHAUSTED:-0}" == "1" ]]; then
+          fail_current_job_final "Send failed after $(send_remote_max_attempts) attempts during $(job_get job PHASE)."
+        else
+          fail_current_job "Send failed during $(job_get job PHASE)."
+        fi
       fi
     fi
 

@@ -188,6 +188,97 @@ def main() -> int:
     ):
         raise AssertionError("scheduled spiped fail-closed guard must run before source checkpoint creation")
 
+    assert_contains(
+        worker,
+        "mark_current_job_needs_full_resend()",
+        "send worker must mark an incremental snapshot mismatch as needing a full resend instead of retrying it",
+    )
+    assert_contains(
+        worker,
+        'job[NEEDS_FULL_RESEND]="1"',
+        "full-resend jobs must keep a durable flag so the next attempt does not repeat the incremental",
+    )
+    assert_contains(
+        ops_lib,
+        "send_failure_text_needs_full_resend()",
+        "send pipeline must recognize a destination snapshot mismatch and a missing incremental base",
+    )
+    assert_contains(
+        ops_lib,
+        "most recent snapshot",
+        "snapshot-mismatch detection must look for the zfs receive 'most recent snapshot' error",
+    )
+    assert_contains(
+        worker,
+        "acquire_child_fanout_lock()",
+        "child send fan-out must take a per-parent lock so a second prepare cannot queue the same children",
+    )
+    assert_contains(
+        worker,
+        "send_job_id_already_queued()",
+        "child send fan-out must skip job ids that already have a queue file",
+    )
+    assert_contains(
+        worker,
+        "not queueing duplicates",
+        "a repeated child fan-out must say the jobs were already queued instead of logging a second queue",
+    )
+    assert_contains(
+        worker,
+        "SEND_REMOTE_RETRIES_ENABLED=1",
+        "the send worker must enable in-job retries for remote send steps",
+    )
+    assert_contains(
+        worker,
+        "send_remote_retry_hold_job()",
+        "a send retry must keep the existing job claim instead of queueing another job",
+    )
+    assert_contains(
+        ops_lib,
+        "DEFAULT_SEND_REMOTE_MAX_ATTEMPTS=5",
+        "send remote retries must default to 5 attempts",
+    )
+    assert_contains(
+        ops_lib,
+        "DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS=300",
+        "send remote retry delay must default to 300 seconds",
+    )
+    assert_contains(
+        ops_lib,
+        "Retrying the same step in",
+        "a failed send step must log that the same step is being retried",
+    )
+    assert_contains(
+        ops_lib,
+        "send_common_base_missing_proven()",
+        "purge/reseed must be gated by a confirmed common-base listing",
+    )
+    assert_contains(
+        worker,
+        'if send_common_base_missing_proven "$latest_common" "$basename"; then',
+        "scheduled no-common handling must run only after a confirmed listing",
+    )
+    assert_contains(
+        ops_lib,
+        "DEFAULT_SEND_AUTO_RESEED=1",
+        "a confirmed missing base or destination mismatch must reseed by default",
+    )
+    assert_contains(
+        worker,
+        "reseed_confirmed_destination_and_full_send()",
+        "confirmed mismatch and missing-base cases must purge and full-send",
+    )
+    assert_contains(
+        worker,
+        "Reseed triggered for ${destination}:",
+        "a reseed must log the confirmed reason before destroying the destination",
+    )
+    assert_contains(
+        worker,
+        "queue_child_send_jobs || return $?",
+        "a locked child fan-out must defer the parent instead of failing the scheduled prepare",
+    )
+
     print("PASS: send worker helper static contracts")
     return 0
 

@@ -304,14 +304,231 @@ function zfsas_migrate_list_datasets(&$error = null)
     return $rows;
 }
 
-function zfsas_migrate_directory_size_bytes($path)
+function zfsas_migrate_scan_cache_file()
 {
-    $command = 'du -skx ' . escapeshellarg($path) . ' | awk \'{print $1 * 1024}\'';
-    $lines = zfsas_migrate_exec_lines($command, $exitCode);
-    if ($exitCode !== 0 || !isset($lines[0]) || !preg_match('/^[0-9]+$/', trim((string) $lines[0]))) {
+    return zfsas_migrate_plugin_dir() . '/scan-cache.json';
+}
+
+function zfsas_migrate_scan_lock_file()
+{
+    return zfsas_migrate_plugin_dir() . '/scan.lock';
+}
+
+function zfsas_migrate_du_timeout_seconds()
+{
+    return 30;
+}
+
+function zfsas_migrate_timeout_command($seconds, $command)
+{
+    $seconds = max(1, (int) $seconds);
+    return 'timeout -k 5 ' . $seconds . ' ' . $command;
+}
+
+function zfsas_migrate_dataset_used_bytes($dataset)
+{
+    $dataset = zfsas_migrate_trim($dataset);
+    if ($dataset === '' || !zfsas_migrate_is_valid_dataset_name($dataset)) {
         return null;
     }
-    return (int) trim((string) $lines[0]);
+
+    // A folder that is already its own dataset can be sized from ZFS metadata.
+    // `zfs get -Hp used` stays cheap when `du` on the mount would walk the tree.
+    $command = zfsas_migrate_timeout_command(15, 'zfs get -Hp used ' . escapeshellarg($dataset));
+    $lines = zfsas_migrate_exec_lines($command, $exitCode);
+    if ($exitCode !== 0 || !isset($lines[0])) {
+        return null;
+    }
+
+    $parts = preg_split("/\t+/", trim((string) $lines[0]));
+    if (!is_array($parts) || !isset($parts[2]) || preg_match('/^[0-9]+$/', (string) $parts[2]) !== 1) {
+        return null;
+    }
+
+    return (int) $parts[2];
+}
+
+function zfsas_migrate_directory_size_bytes($path)
+{
+    $path = zfsas_migrate_trim($path);
+    if ($path === '') {
+        return null;
+    }
+
+    $command = zfsas_migrate_timeout_command(
+        zfsas_migrate_du_timeout_seconds(),
+        'du -skx ' . escapeshellarg($path)
+    );
+    $lines = zfsas_migrate_exec_lines($command, $exitCode);
+    if ($exitCode !== 0 || !isset($lines[0]) || preg_match('/^([0-9]+)/', trim((string) $lines[0]), $match) !== 1) {
+        return null;
+    }
+
+    return (int) $match[1] * 1024;
+}
+
+function zfsas_migrate_read_scan_cache()
+{
+    $path = zfsas_migrate_scan_cache_file();
+    if (!is_file($path)) {
+        return [];
+    }
+
+    $raw = @file_get_contents($path);
+    if (!is_string($raw) || $raw === '') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+function zfsas_migrate_write_scan_cache($cache)
+{
+    if (!zfsas_migrate_ensure_storage()) {
+        return false;
+    }
+
+    $path = zfsas_migrate_scan_cache_file();
+    $json = json_encode($cache);
+    if (!is_string($json)) {
+        return false;
+    }
+
+    $tmp = $path . '.tmp.' . getmypid();
+    if (@file_put_contents($tmp, $json) === false) {
+        return false;
+    }
+
+    @chmod($tmp, 0664);
+    zfsas_migrate_apply_owner($tmp);
+    if (!@rename($tmp, $path)) {
+        @unlink($tmp);
+        return false;
+    }
+
+    @chmod($path, 0664);
+    zfsas_migrate_apply_owner($path);
+    return true;
+}
+
+function zfsas_migrate_cached_scan($dataset)
+{
+    $dataset = zfsas_migrate_trim($dataset);
+    if ($dataset === '') {
+        return null;
+    }
+
+    $cache = zfsas_migrate_read_scan_cache();
+    $row = $cache['datasets'][$dataset] ?? null;
+    if (!is_array($row) || !isset($row['preview']) || !is_array($row['preview'])) {
+        return null;
+    }
+
+    return $row;
+}
+
+function zfsas_migrate_store_scan($dataset, $preview)
+{
+    $dataset = zfsas_migrate_trim($dataset);
+    if ($dataset === '' || !is_array($preview)) {
+        return false;
+    }
+
+    $cache = zfsas_migrate_read_scan_cache();
+    if (!isset($cache['datasets']) || !is_array($cache['datasets'])) {
+        $cache['datasets'] = [];
+    }
+
+    $cache['datasets'][$dataset] = [
+        'scannedAt' => time(),
+        'scannedAtDisplay' => date('Y-m-d H:i:s'),
+        'preview' => $preview,
+    ];
+
+    return zfsas_migrate_write_scan_cache($cache);
+}
+
+function zfsas_migrate_scan_lock_handle()
+{
+    if (!zfsas_migrate_ensure_storage()) {
+        return null;
+    }
+
+    $handle = @fopen(zfsas_migrate_scan_lock_file(), 'c');
+    if (!is_resource($handle)) {
+        return null;
+    }
+
+    return $handle;
+}
+
+function zfsas_migrate_scan_in_progress()
+{
+    $handle = zfsas_migrate_scan_lock_handle();
+    if ($handle === null) {
+        return false;
+    }
+
+    $busy = !flock($handle, LOCK_EX | LOCK_NB);
+    if (!$busy) {
+        flock($handle, LOCK_UN);
+    }
+    fclose($handle);
+
+    return $busy;
+}
+
+function zfsas_migrate_run_scan($dataset, &$error = null)
+{
+    $error = null;
+    $dataset = zfsas_migrate_trim($dataset);
+    if ($dataset === '' || !zfsas_migrate_is_valid_dataset_name($dataset)) {
+        $error = 'Dataset is invalid.';
+        return null;
+    }
+
+    $handle = zfsas_migrate_scan_lock_handle();
+    if ($handle === null) {
+        $error = 'Dataset migrator storage is unavailable.';
+        return null;
+    }
+
+    if (!flock($handle, LOCK_EX | LOCK_NB)) {
+        fclose($handle);
+        $error = 'scan in progress';
+        return null;
+    }
+
+    $previewError = null;
+    $preview = zfsas_migrate_preview_dataset($dataset, $previewError, true);
+    if ($previewError !== null) {
+        $error = $previewError;
+        flock($handle, LOCK_UN);
+        fclose($handle);
+        return null;
+    }
+
+    zfsas_migrate_store_scan($dataset, $preview);
+    flock($handle, LOCK_UN);
+    fclose($handle);
+
+    return $preview;
+}
+
+function zfsas_migrate_preview_with_cache_stamp($dataset, $preview)
+{
+    if (!is_array($preview)) {
+        return null;
+    }
+
+    $cached = zfsas_migrate_cached_scan($dataset);
+    if (is_array($cached)) {
+        $preview['scannedAt'] = (int) ($cached['scannedAt'] ?? 0);
+        $preview['scannedAtDisplay'] = (string) ($cached['scannedAtDisplay'] ?? '');
+    }
+
+    return $preview;
 }
 
 function zfsas_migrate_preview_dataset($dataset, &$error = null, $includeSizes = true)
@@ -381,7 +598,15 @@ function zfsas_migrate_preview_dataset($dataset, &$error = null, $includeSizes =
         $name = $entry->getFilename();
         $path = $entry->getPathname();
         $targetDataset = $dataset . '/' . $name;
-        $sizeBytes = $includeSizes ? zfsas_migrate_directory_size_bytes($path) : null;
+        $sizeDataset = (!empty($mountMap[$path])) ? $mountMap[$path] : '';
+        $sizeBytes = null;
+        if ($includeSizes) {
+            if ($sizeDataset !== '') {
+                $sizeBytes = zfsas_migrate_dataset_used_bytes($sizeDataset);
+            } else {
+                $sizeBytes = zfsas_migrate_directory_size_bytes($path);
+            }
+        }
         $state = 'eligible';
         $message = 'Will be migrated into its own child dataset.';
         $eligible = true;

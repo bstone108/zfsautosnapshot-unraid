@@ -799,13 +799,15 @@ main() {
   python3 "${ROOT_DIR}/tests/stage1/snapshot_manager_ui_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/log_helpers_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/send_worker_static_checks.py"
+  python3 "${ROOT_DIR}/tests/stage1/send_queue_readiness_static_checks.py"
   bash "${ROOT_DIR}/tests/stage1/send_transport_command_checks.sh"
-  bash "${ROOT_DIR}/tests/stage1/unraid_array_status_checks.sh"
+  bash "${ROOT_DIR}/tests/stage1/send_remote_retry_and_listing_checks.sh"
   php "${ROOT_DIR}/tests/stage1/send_queue_status_contract.php"
   php "${ROOT_DIR}/tests/stage1/send_transport_submission_contract.php"
   python3 "${ROOT_DIR}/tests/stage1/send_queue_preflight_status_static_checks.py"
   php "${ROOT_DIR}/tests/stage1/prefix_overlap_contract.php"
   bash "${ROOT_DIR}/tests/stage1/zero_change_common_harness.sh"
+  bash "${ROOT_DIR}/tests/stage1/unraid_array_status_checks.sh"
 
   echo "All Stage 1 tests passed."
 }

@@ -282,8 +282,8 @@ def main() -> int:
     )
     assert_contains(
         approve_body,
-        'launch_job[LAST_MESSAGE]="Destination space approval not required."',
-        "zero-byte space bypass must mark the job approved without waiting on destination capacity",
+        "Destination space approval not required.",
+        "zero-byte coordinator/finalizer jobs must record that destination space approval was skipped",
     )
     if approve_body.find("if (( required_bytes == 0 )); then") > approve_body.find("acquire_send_space_reservation_for_transport"):
         raise AssertionError(
@@ -348,39 +348,41 @@ def main() -> int:
     )
 
     scheduled_no_common_body = worker.split(
-        'if (( destination_exists == 1 )) && destination_has_any_snapshots_for_transport "$destination"; then',
+        'if send_common_base_missing_proven "$latest_common" "$basename"; then',
         1,
     )[1].split('      description="Full send ${snapshot} -> ${destination}"', 1)[0]
     assert_contains(
-        scheduled_no_common_body,
-        'if [[ "$send_transport" == "ssh" ]]; then',
-        "scheduled SSH sends with destination snapshots but no common checkpoint must have an explicit fail-closed branch",
+        worker,
+        "The snapshot listing did not succeed, so this is not a missing send checkpoint.",
+        "a failed snapshot listing must not be described as a missing common checkpoint",
+    )
+    assert_contains(
+        worker,
+        "The snapshot listing did not succeed after retries, so this is not a confirmed missing base or destination mismatch.",
+        "a failed listing after retries must not become a reseed",
     )
     assert_contains(
         scheduled_no_common_body,
+        "reseed_confirmed_destination_and_full_send",
+        "a confirmed missing common checkpoint must rebuild the destination instead of stopping",
+    )
+    assert_contains(
+        worker,
+        "Reseed triggered for ${destination}:",
+        "a reseed must log why the destination is being rebuilt",
+    )
+    assert_contains(
+        worker,
+        'zfs destroy -r -- $(shell_quote_word "$destination")',
+        "a confirmed remote reseed must destroy the destination dataset over SSH",
+    )
+    assert_contains(
+        worker,
         "Automatic remote destination purge/reseed is not enabled",
-        "scheduled SSH no-common handling must tell the operator that remote purge/reseed is intentionally disabled",
+        "SEND_AUTO_RESEED=0 must still explain that automatic purge/reseed is disabled",
     )
-    pre_ssh_no_common_body = scheduled_no_common_body.split('if [[ "$send_transport" == "ssh" ]]; then', 1)[0]
-    if "destination dataset was purged" in pre_ssh_no_common_body:
-        raise AssertionError(
-            "scheduled no-common handling must not log that the destination was purged before transport-specific handling decides whether purge is allowed"
-        )
-    if "action=purge_destination_for_reseed" in pre_ssh_no_common_body:
-        raise AssertionError(
-            "scheduled no-common handling must not claim purge_destination_for_reseed before the SSH fail-closed branch"
-        )
-    ssh_no_common_body = scheduled_no_common_body.split('if [[ "$send_transport" == "ssh" ]]; then', 1)[1].split("        fi", 1)[0]
-    if "purge_destination_for_reseed" in ssh_no_common_body or "action=purge_destination_for_reseed" in ssh_no_common_body:
-        raise AssertionError(
-            "scheduled SSH no-common handling must not log/debug an automatic purge action when it actually fails closed"
-        )
-    local_no_common_body = scheduled_no_common_body.split('if [[ "$send_transport" == "ssh" ]]; then', 1)[1]
-    assert_contains(
-        local_no_common_body,
-        'purge_destination_for_reseed "$destination"',
-        "local scheduled no-common handling should still retain its existing automatic reseed purge path",
-    )
+    if "reseed_confirmed_destination_and_full_send" not in scheduled_no_common_body:
+        raise AssertionError("confirmed no-common handling must call the reseed helper before a plain full send")
 
     print("PASS: send queue readiness static contracts")
     return 0
