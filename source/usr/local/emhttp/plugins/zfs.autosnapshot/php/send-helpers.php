@@ -341,6 +341,15 @@ function zfsas_send_normalize_remote_retry_delay($value)
     return (string) $value;
 }
 
+function zfsas_send_normalize_auto_reseed($value)
+{
+    $value = strtolower(trim((string) $value));
+    if ($value === '0' || $value === 'off' || $value === 'no' || $value === 'false') {
+        return '0';
+    }
+    return '1';
+}
+
 function zfsas_send_normalize_prep_extra_workers($value)
 {
     $value = (int) $value;
@@ -373,6 +382,7 @@ function zfsas_send_defaults()
         'SEND_RATE_LIMIT' => '0',
         'SEND_REMOTE_MAX_ATTEMPTS' => '5',
         'SEND_REMOTE_RETRY_DELAY_SECONDS' => '300',
+        'SEND_AUTO_RESEED' => '1',
         'SEND_PREP_EXTRA_WORKERS' => '16',
         'SEND_KEEP_ALL_FOR_DAYS' => '14',
         'SEND_KEEP_DAILY_UNTIL_DAYS' => '30',
@@ -783,6 +793,8 @@ function zfsas_send_render_config($config)
     $lines[] = '# Failed ZFS send steps are retried this many times. The delay is only after a failure, before that same step is tried again.';
     $lines[] = 'SEND_REMOTE_MAX_ATTEMPTS=' . zfsas_send_normalize_remote_attempts($config['SEND_REMOTE_MAX_ATTEMPTS'] ?? '5');
     $lines[] = 'SEND_REMOTE_RETRY_DELAY_SECONDS=' . zfsas_send_normalize_remote_retry_delay($config['SEND_REMOTE_RETRY_DELAY_SECONDS'] ?? '300');
+    $lines[] = '# 1 rebuilds a destination from scratch after a confirmed missing base or incremental mismatch. 0 leaves that destination unchanged.';
+    $lines[] = 'SEND_AUTO_RESEED=' . zfsas_send_normalize_auto_reseed($config['SEND_AUTO_RESEED'] ?? '1');
     $lines[] = '';
     $lines[] = '# Extra queue worker processes allowed to prepare snapshots, estimate space, and wait before transfer slots open.';
     $lines[] = 'SEND_PREP_EXTRA_WORKERS=' . zfsas_send_normalize_prep_extra_workers($config['SEND_PREP_EXTRA_WORKERS'] ?? '16');

@@ -259,6 +259,21 @@ def main() -> int:
         "scheduled no-common handling must run only after a confirmed listing",
     )
     assert_contains(
+        ops_lib,
+        "DEFAULT_SEND_AUTO_RESEED=1",
+        "a confirmed missing base or destination mismatch must reseed by default",
+    )
+    assert_contains(
+        worker,
+        "reseed_confirmed_destination_and_full_send()",
+        "confirmed mismatch and missing-base cases must purge and full-send",
+    )
+    assert_contains(
+        worker,
+        "Reseed triggered for ${destination}:",
+        "a reseed must log the confirmed reason before destroying the destination",
+    )
+    assert_contains(
         worker,
         "queue_child_send_jobs || return $?",
         "a locked child fan-out must defer the parent instead of failing the scheduled prepare",

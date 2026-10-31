@@ -76,8 +76,13 @@ DEFAULT_RETRY_DELAYS=(60 300 900)
 # is tried again. A step that succeeds continues immediately.
 DEFAULT_SEND_REMOTE_MAX_ATTEMPTS=5
 DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS=300
+# When a snapshot listing is confirmed and there is no common base, or a
+# completed incremental receive reports a genuine destination mismatch, purge
+# the destination and send a full backup. 0 disables that rebuild.
+DEFAULT_SEND_AUTO_RESEED=1
 SEND_REMOTE_MAX_ATTEMPTS="$DEFAULT_SEND_REMOTE_MAX_ATTEMPTS"
 SEND_REMOTE_RETRY_DELAY_SECONDS="$DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS"
+SEND_AUTO_RESEED="$DEFAULT_SEND_AUTO_RESEED"
 # The send worker turns this on. Queue kicks stay single-attempt so a down
 # receiver cannot block the once-a-minute scheduler for the full retry window.
 SEND_REMOTE_RETRIES_ENABLED=0
@@ -875,6 +880,7 @@ load_send_config() {
   SEND_SPIPED_KEY_PATH=""
   SEND_REMOTE_MAX_ATTEMPTS="$DEFAULT_SEND_REMOTE_MAX_ATTEMPTS"
   SEND_REMOTE_RETRY_DELAY_SECONDS="$DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS"
+  SEND_AUTO_RESEED="$DEFAULT_SEND_AUTO_RESEED"
   SEND_JOBS=""
 
   [[ -f "$SEND_CONFIG_FILE" ]] || return 0
@@ -888,7 +894,7 @@ load_send_config() {
       raw="${BASH_REMATCH[2]}"
       value="$(parse_config_value "$raw")"
       case "$key" in
-        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_RATE_LIMIT|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_SSH_HOST|SEND_SSH_PORT|SEND_SSH_USER|SEND_SSH_KEY_PATH|SEND_SPIPED_LISTEN_HOST|SEND_SPIPED_PORT|SEND_SPIPED_REMOTE_HOST|SEND_SPIPED_REMOTE_PORT|SEND_SPIPED_KEY_PATH|SEND_REMOTE_MAX_ATTEMPTS|SEND_REMOTE_RETRY_DELAY_SECONDS|SEND_JOBS)
+        SEND_SNAPSHOT_PREFIX|SEND_MAX_PARALLEL|SEND_RATE_LIMIT|SEND_PREP_EXTRA_WORKERS|SEND_KEEP_ALL_FOR_DAYS|SEND_KEEP_DAILY_UNTIL_DAYS|SEND_KEEP_WEEKLY_UNTIL_DAYS|SEND_SSH_HOST|SEND_SSH_PORT|SEND_SSH_USER|SEND_SSH_KEY_PATH|SEND_SPIPED_LISTEN_HOST|SEND_SPIPED_PORT|SEND_SPIPED_REMOTE_HOST|SEND_SPIPED_REMOTE_PORT|SEND_SPIPED_KEY_PATH|SEND_REMOTE_MAX_ATTEMPTS|SEND_REMOTE_RETRY_DELAY_SECONDS|SEND_AUTO_RESEED|SEND_JOBS)
           printf -v "$key" '%s' "$value"
           ;;
       esac
@@ -3397,6 +3403,20 @@ confirmed_destination_snapshot_count() {
     return 1
   fi
   printf -v "$result_var" '%s' "$count_text"
+  return 0
+}
+
+send_auto_reseed_enabled() {
+  [[ "${SEND_AUTO_RESEED:-${DEFAULT_SEND_AUTO_RESEED:-1}}" != "0" ]]
+}
+
+# A rebuild is allowed only when reseed is enabled and the destination snapshot
+# list was confirmed: the list command exited 0 and the rows parsed. A failed,
+# empty-unverified, or timed-out listing must not reach this.
+send_reseed_permitted() {
+  send_auto_reseed_enabled || return 1
+  [[ "${SEND_COMMON_BASE_LISTING:-}" == "ok" ]] || return 1
+  [[ "${SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT:-0}" =~ ^[0-9]+$ ]] || return 1
   return 0
 }
 

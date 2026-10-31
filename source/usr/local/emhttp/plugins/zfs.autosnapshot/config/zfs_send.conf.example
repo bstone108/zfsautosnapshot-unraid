@@ -29,6 +29,14 @@ SEND_RATE_LIMIT=0
 SEND_REMOTE_MAX_ATTEMPTS=5
 SEND_REMOTE_RETRY_DELAY_SECONDS=300
 
+# SEND_AUTO_RESEED
+# After a confirmed snapshot listing (the remote list exited 0 and parsed) shows
+# no common checkpoint, or a completed incremental receive reports a genuine
+# destination mismatch, purge that destination and send a full backup.
+# Failed, empty-unverified, or timed-out listings are never treated as a reason
+# to purge. Set to 0 to keep the old fail-closed behavior.
+SEND_AUTO_RESEED=1
+
 # SEND_PREP_EXTRA_WORKERS
 # Extra queue worker processes allowed to prepare snapshots, estimate needed
 # destination space, and wait before real send transfer slots open.

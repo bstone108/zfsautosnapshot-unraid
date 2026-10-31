@@ -286,4 +286,21 @@ read -r sleeps sends < <(run_send_case fail)
 [[ "$sends" == "5" ]] || fail "a failing send must be attempted 5 times, saw ${sends}"
 [[ "$sleeps" == "4" ]] || fail "a failing send must wait only between attempts, saw ${sleeps}"
 
+SEND_AUTO_RESEED=1
+SEND_COMMON_BASE_LISTING="ok"
+SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT=2
+send_reseed_permitted || fail "a confirmed listing must allow reseed by default"
+SEND_COMMON_BASE_LISTING="failed"
+if send_reseed_permitted; then
+  fail "a failed listing must not allow reseed"
+fi
+SEND_COMMON_BASE_LISTING="ok"
+SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT=0
+send_reseed_permitted || fail "a confirmed empty listing may rebuild with a full send and no purge"
+SEND_AUTO_RESEED=0
+if send_reseed_permitted; then
+  fail "SEND_AUTO_RESEED=0 must disable the rebuild"
+fi
+SEND_AUTO_RESEED=1
+
 printf '%s\n' "PASS: send remote retry and confirmed listing checks"
