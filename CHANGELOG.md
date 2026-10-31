@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.10.31.t01 (Testing Branch Only)
+
+- A scheduled or manual ZFS send no longer reports "No common send checkpoint remains" when the remote snapshot list fails, times out, or comes back empty without a successful exit status. That situation is a connection problem, not a missing checkpoint, and the plugin does not suggest deleting or reseeding the remote dataset unless the listing actually succeeded.
+- A failed ZFS send step is retried up to 5 times, waiting 5 minutes only after a failure before that same step is tried again. A step that succeeds continues at once. The send, resume, and remote snapshot checks use this. The retry stays on the same queued job.
+- When a snapshot listing succeeds and shows there is no shared checkpoint, or a finished incremental receive reports that the destination does not match, the plugin purges that destination and sends a full backup. The log says why the reseed started. A failed, empty, or timed-out listing is still not a reason to delete anything. Set `SEND_AUTO_RESEED=0` to turn this rebuild off.
+
 ### 2026.10.22.t01 (Testing Branch Only)
 
 - Dataset Migrator no longer measures folder sizes on every automatic status check. Those checks only follow a migration that is already running, so the page buttons become usable even when a size scan is slow. Folder sizes are calculated when you press Refresh, and once in the background the first time a dataset is shown. The page shows when that scan last finished. A second Refresh while a scan is running says "scan in progress" instead of starting another one. A folder that is its own ZFS dataset uses the dataset's used space instead of walking every file, and a size walk cannot run forever.

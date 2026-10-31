@@ -225,6 +225,56 @@ def main() -> int:
     )
     assert_contains(
         worker,
+        "SEND_REMOTE_RETRIES_ENABLED=1",
+        "the send worker must enable in-job retries for remote send steps",
+    )
+    assert_contains(
+        worker,
+        "send_remote_retry_hold_job()",
+        "a send retry must keep the existing job claim instead of queueing another job",
+    )
+    assert_contains(
+        ops_lib,
+        "DEFAULT_SEND_REMOTE_MAX_ATTEMPTS=5",
+        "send remote retries must default to 5 attempts",
+    )
+    assert_contains(
+        ops_lib,
+        "DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS=300",
+        "send remote retry delay must default to 300 seconds",
+    )
+    assert_contains(
+        ops_lib,
+        "Retrying the same step in",
+        "a failed send step must log that the same step is being retried",
+    )
+    assert_contains(
+        ops_lib,
+        "send_common_base_missing_proven()",
+        "purge/reseed must be gated by a confirmed common-base listing",
+    )
+    assert_contains(
+        worker,
+        'if send_common_base_missing_proven "$latest_common" "$basename"; then',
+        "scheduled no-common handling must run only after a confirmed listing",
+    )
+    assert_contains(
+        ops_lib,
+        "DEFAULT_SEND_AUTO_RESEED=1",
+        "a confirmed missing base or destination mismatch must reseed by default",
+    )
+    assert_contains(
+        worker,
+        "reseed_confirmed_destination_and_full_send()",
+        "confirmed mismatch and missing-base cases must purge and full-send",
+    )
+    assert_contains(
+        worker,
+        "Reseed triggered for ${destination}:",
+        "a reseed must log the confirmed reason before destroying the destination",
+    )
+    assert_contains(
+        worker,
         "queue_child_send_jobs || return $?",
         "a locked child fan-out must defer the parent instead of failing the scheduled prepare",
     )
