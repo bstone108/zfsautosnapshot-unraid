@@ -562,6 +562,13 @@ function zfsas_ops_purge_expired_jobs()
         }
 
         $state = (string) ($job['STATE'] ?? '');
+        $purgeAfter = (int) ($job['PURGE_AFTER_EPOCH'] ?? 0);
+        if ($state === 'failed') {
+            if ($purgeAfter > 0 && $purgeAfter <= $now) {
+                @unlink($path);
+            }
+            continue;
+        }
         if (!in_array($state, ['complete', 'skipped'], true)) {
             continue;
         }
@@ -575,7 +582,6 @@ function zfsas_ops_purge_expired_jobs()
             continue;
         }
 
-        $purgeAfter = (int) ($job['PURGE_AFTER_EPOCH'] ?? 0);
         if ($purgeAfter > 0 && $purgeAfter <= $now) {
             @unlink($path);
             continue;
@@ -1297,8 +1303,15 @@ function zfsas_ops_job_exists_for_window($scheduleJobId, $windowKey)
     return false;
 }
 
+function zfsas_ops_failed_job_ttl_seconds()
+{
+    // Matches FAILED_JOB_TTL_SECONDS in ops-queue-lib.sh.
+    return 86400;
+}
+
 function zfsas_ops_scheduled_job_blocked($scheduleJobId)
 {
+    // Failed jobs are terminal. They must not block the next window or a manual run.
     foreach (zfsas_ops_list_jobs(['send']) as $job) {
         if ((string) ($job['JOB_MODE'] ?? '') !== 'scheduled') {
             continue;
@@ -1306,7 +1319,7 @@ function zfsas_ops_scheduled_job_blocked($scheduleJobId)
         if ((string) ($job['SCHEDULE_JOB_ID'] ?? '') !== (string) $scheduleJobId) {
             continue;
         }
-        if (in_array((string) ($job['STATE'] ?? ''), ['queued', 'running', 'retry_wait', 'failed'], true)) {
+        if (in_array((string) ($job['STATE'] ?? ''), ['queued', 'running', 'retry_wait'], true)) {
             return true;
         }
     }
@@ -1379,6 +1392,7 @@ function zfsas_ops_retry_send_job($jobId, &$error = null)
         $job['STATE'] = 'queued';
         $job['PHASE'] = 'queued';
         $job['RETRY_AT'] = '0';
+        $job['PURGE_AFTER_EPOCH'] = '0';
         $job['LAST_ERROR'] = '';
         $job['LAST_MESSAGE'] = 'Queued retry.';
         $job['WORKER_PID'] = '';
@@ -1487,6 +1501,7 @@ function zfsas_ops_mark_send_job_canceled($job, &$error = null)
     $job['LAST_MESSAGE'] = 'Canceled.';
     $job['CANCELLED_BY_USER'] = '1';
     $job['ATTEMPT_COUNT'] = (string) max(3, (int) ($job['ATTEMPT_COUNT'] ?? 0));
+    $job['PURGE_AFTER_EPOCH'] = (string) (time() + zfsas_ops_failed_job_ttl_seconds());
 
     if (!zfsas_ops_write_job_file($job['__path'], $job)) {
         $error = 'Unable to update the canceled send job.';

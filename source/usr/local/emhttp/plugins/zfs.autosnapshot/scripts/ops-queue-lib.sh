@@ -95,6 +95,10 @@ SEND_PIPELINE_PERMANENT_FAILURE=0
 POST_DELETE_RECHECK_WAIT_SECONDS="${POST_DELETE_RECHECK_WAIT_SECONDS:-3}"
 POST_DELETE_RECHECK_INTERVAL_SECONDS="${POST_DELETE_RECHECK_INTERVAL_SECONDS:-1}"
 JOB_SUCCESS_TTL_SECONDS="${JOB_SUCCESS_TTL_SECONDS:-5}"
+# Failed send jobs stay visible long enough to clear or retry, then the queue
+# kicker removes the file. The preserved failure log is kept. A failed file is
+# terminal: it must not block the next scheduled window or a manual run.
+FAILED_JOB_TTL_SECONDS="${FAILED_JOB_TTL_SECONDS:-86400}"
 DELETE_QUEUE_IDLE_TIMEOUT_SECONDS="${DELETE_QUEUE_IDLE_TIMEOUT_SECONDS:-30}"
 PERSIST_TMP_MAX_AGE_MINUTES="${PERSIST_TMP_MAX_AGE_MINUTES:-60}"
 
@@ -978,6 +982,9 @@ frequency_window_key() {
   local frequency="$1"
   local now_epoch="$2"
   local seconds offset local_epoch
+  local local_date hour minute second sod
+  local day_span civil_day aligned_day aligned_date aligned_sod
+  local aligned_h aligned_m aligned_s window_epoch
 
   case "$frequency" in
     6h|12h|1d|7d) ;;
@@ -993,8 +1000,49 @@ frequency_window_key() {
     return 0
   }
 
+  # Floor the local civil clock, then convert that clock time back to UTC.
+  # Folding with the UTC offset at "now" and subtracting that same offset
+  # invents a second window during the repeated hour of a DST fall-back
+  # (for example 01:03 CST on the day clocks go back).
+  local_date="$(date_at_epoch "$now_epoch" '+%Y-%m-%d')"
+  hour="$(date_at_epoch "$now_epoch" '+%H')"
+  minute="$(date_at_epoch "$now_epoch" '+%M')"
+  second="$(date_at_epoch "$now_epoch" '+%S')"
+  if [[ "$local_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ \
+    && "$hour" =~ ^[0-9]{2}$ \
+    && "$minute" =~ ^[0-9]{2}$ \
+    && "$second" =~ ^[0-9]{2}$ ]]; then
+    sod=$((10#$hour * 3600 + 10#$minute * 60 + 10#$second))
+    aligned_date=""
+    aligned_sod=0
+    if (( seconds >= 86400 && seconds % 86400 == 0 )); then
+      day_span=$((seconds / 86400))
+      civil_day="$(date -u -d "${local_date} 00:00:00" +%s 2>/dev/null || true)"
+      if [[ "$civil_day" =~ ^[0-9]+$ ]]; then
+        civil_day=$((civil_day / 86400))
+        aligned_day=$((civil_day - (civil_day % day_span)))
+        aligned_date="$(date -u -d "@$((aligned_day * 86400))" +%Y-%m-%d 2>/dev/null || true)"
+        aligned_sod=0
+      fi
+    elif (( seconds < 86400 && 86400 % seconds == 0 )); then
+      aligned_date="$local_date"
+      aligned_sod=$((sod - (sod % seconds)))
+    fi
+
+    if [[ "$aligned_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+      aligned_h=$((aligned_sod / 3600))
+      aligned_m=$(((aligned_sod % 3600) / 60))
+      aligned_s=$((aligned_sod % 60))
+      window_epoch="$(date -d "$(printf '%s %02d:%02d:%02d' "$aligned_date" "$aligned_h" "$aligned_m" "$aligned_s")" +%s 2>/dev/null || true)"
+      if [[ "$window_epoch" =~ ^[0-9]+$ ]]; then
+        echo "$window_epoch"
+        return 0
+      fi
+    fi
+  fi
+
   offset="$(timezone_offset_seconds "$now_epoch")"
-  local_epoch=$(( now_epoch + offset ))
+  local_epoch=$((now_epoch + offset))
   echo $(( (local_epoch - (local_epoch % seconds)) - offset ))
 }
 
@@ -4842,15 +4890,19 @@ schedule_job_blocked() {
   local -A job=()
   local state
 
+  # Failed is terminal. A failed member left in the jobs directory, including
+  # one that survived a reboot or upgrade, must not stop later windows or
+  # --manual-now. Queued, running, and retry_wait still block so the same
+  # window is not started twice while it is in progress.
   while IFS= read -r file; do
     job_load "$file" job || continue
     [[ "$(job_get job JOB_TYPE)" == "send" ]] || continue
     [[ "$(job_get job JOB_MODE)" == "scheduled" ]] || continue
     [[ "$(job_get job SCHEDULE_JOB_ID)" == "$schedule_job_id" ]] || continue
     state="$(job_get job STATE)"
-    if [[ "$state" == "queued" || "$state" == "running" || "$state" == "retry_wait" || "$state" == "failed" ]]; then
-      return 0
-    fi
+    case "$state" in
+      queued|running|retry_wait) return 0 ;;
+    esac
   done < <(list_job_files)
 
   return 1
@@ -4964,6 +5016,146 @@ enqueue_scheduled_send_jobs_due() {
   return 0
 }
 
+set_job_failure_purge_after() {
+  local assoc_name="$1"
+  local now_epoch="${2:-}"
+  local ttl="${3:-$FAILED_JOB_TTL_SECONDS}"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+
+  [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=86400
+  [[ "$now_epoch" =~ ^[0-9]+$ ]] || now_epoch="$(date +%s)"
+  # shellcheck disable=SC2153
+  job_ref[PURGE_AFTER_EPOCH]="$((now_epoch + ttl))"
+}
+
+# Terminal failure. Retry waits stay on mark_job_failed_or_retry. A job that
+# completes its schedule window records that window so the next one can start.
+mark_job_terminal_failure() {
+  local assoc_name="$1"
+  local message="$2"
+  local now_epoch="${3:-}"
+  # shellcheck disable=SC2178
+  local -n job_ref="$assoc_name"
+
+  [[ "$now_epoch" =~ ^[0-9]+$ ]] || now_epoch="$(date +%s)"
+  # shellcheck disable=SC2153
+  job_ref[STATE]="failed"
+  # shellcheck disable=SC2153
+  job_ref[PHASE]="failed"
+  # shellcheck disable=SC2153
+  job_ref[RETRY_AT]="0"
+  # shellcheck disable=SC2153
+  job_ref[PROGRESS_PERCENT]="100"
+  # shellcheck disable=SC2153
+  job_ref[WORKER_PID]=""
+  # shellcheck disable=SC2153
+  job_ref[LAST_ERROR]="$message"
+  # shellcheck disable=SC2153
+  job_ref[LAST_MESSAGE]="$message"
+  set_job_failure_purge_after "$assoc_name" "$now_epoch"
+  preserve_failed_send_log_for_job "$assoc_name" || true
+  if [[ "${job_ref[JOB_MODE]:-}" == "scheduled" ]] && job_completes_schedule_window "$assoc_name"; then
+    record_completed_schedule_window "${job_ref[SCHEDULE_JOB_ID]:-}" "${job_ref[WINDOW_KEY]:-}" || true
+  fi
+}
+
+schedule_window_has_in_progress_job() {
+  local schedule_job_id="$1"
+  local window_key="$2"
+  local file state
+  # shellcheck disable=SC2034
+  local -A progress_job=()
+
+  [[ -n "$schedule_job_id" && "$window_key" =~ ^[0-9]+$ ]] || return 1
+  while IFS= read -r file; do
+    job_load "$file" progress_job || continue
+    [[ "$(job_get progress_job JOB_TYPE)" == "send" ]] || continue
+    [[ "$(job_get progress_job JOB_MODE)" == "scheduled" ]] || continue
+    [[ "$(job_get progress_job SCHEDULE_JOB_ID)" == "$schedule_job_id" ]] || continue
+    [[ "$(job_get progress_job WINDOW_KEY)" == "$window_key" ]] || continue
+    state="$(job_get progress_job STATE)"
+    case "$state" in
+      queued|running|retry_wait) return 0 ;;
+    esac
+  done < <(list_job_files)
+
+  return 1
+}
+
+# Upgrade and crash leftovers: a failed send file with no purge time used to
+# sit in the jobs directory forever and block every later window. Close a
+# window once nothing in it is still running, then drop expired failed files.
+# The preserved failure log is not removed.
+settle_terminal_failed_jobs() {
+  local now_epoch="${1:-}"
+  local file state purge mtime schedule_job_id window_key job_id job_type last_window stamped
+  # shellcheck disable=SC2034
+  local -A job=()
+  local -A closed_windows=()
+  local window_token
+
+  [[ "$now_epoch" =~ ^[0-9]+$ ]] || now_epoch="$(date +%s)"
+  [[ "$FAILED_JOB_TTL_SECONDS" =~ ^[0-9]+$ ]] || FAILED_JOB_TTL_SECONDS=86400
+  load_schedule_state
+
+  while IFS= read -r file; do
+    job_load "$file" job || continue
+    [[ "$(job_get job STATE)" == "failed" ]] || continue
+    [[ "$(job_get job JOB_TYPE)" == "send" ]] || continue
+    [[ "$(job_get job JOB_MODE)" == "scheduled" ]] || continue
+    schedule_job_id="$(job_get job SCHEDULE_JOB_ID)"
+    window_key="$(job_get job WINDOW_KEY)"
+    [[ -n "$schedule_job_id" && "$window_key" =~ ^[0-9]+$ ]] || continue
+    window_token="${schedule_job_id}|${window_key}"
+    [[ -n "${closed_windows[$window_token]:-}" ]] && continue
+    schedule_window_has_in_progress_job "$schedule_job_id" "$window_key" && continue
+    last_window="$(last_completed_schedule_window_key "$schedule_job_id")"
+    [[ "$last_window" =~ ^[0-9]+$ ]] || last_window=0
+    if (( last_window < window_key )); then
+      record_completed_schedule_window "$schedule_job_id" "$window_key" || true
+      log "Closed scheduled send window ${window_key} for ${schedule_job_id} after a failed job remained in the queue."
+    fi
+    closed_windows["$window_token"]=1
+  done < <(list_job_files)
+
+  while IFS= read -r file; do
+    [[ -f "$file" ]] || continue
+    job_load "$file" job || continue
+    state="$(job_get job STATE)"
+    [[ "$state" == "failed" ]] || continue
+    job_type="$(job_get job JOB_TYPE)"
+    [[ "$job_type" == "send" ]] || continue
+    schedule_job_id="$(job_get job SCHEDULE_JOB_ID)"
+    window_key="$(job_get job WINDOW_KEY)"
+    if [[ "$(job_get job JOB_MODE)" == "scheduled" && "$window_key" =~ ^[0-9]+$ ]] \
+      && schedule_window_has_in_progress_job "$schedule_job_id" "$window_key"; then
+      continue
+    fi
+
+    purge="$(job_get job PURGE_AFTER_EPOCH 0)"
+    [[ "$purge" =~ ^[0-9]+$ ]] || purge=0
+    stamped=0
+    if (( purge == 0 )); then
+      mtime="$(stat -c %Y "$file" 2>/dev/null || stat -f %m "$file" 2>/dev/null || echo 0)"
+      [[ "$mtime" =~ ^[0-9]+$ && "$mtime" != "0" ]] || mtime="$now_epoch"
+      purge=$((mtime + FAILED_JOB_TTL_SECONDS))
+      job[PURGE_AFTER_EPOCH]="$purge"
+      stamped=1
+    fi
+    job_id="$(job_get job JOB_ID)"
+    if (( purge <= now_epoch )); then
+      rm -f "$file" >/dev/null 2>&1 || true
+      log "Removed expired failed queue job ${job_id:-$file}."
+      continue
+    fi
+    if (( stamped == 1 )); then
+      job_write "$file" job || true
+      log "Failed queue job ${job_id:-$file} is terminal and will leave the queue at ${purge}."
+    fi
+  done < <(list_job_files)
+}
+
 prune_old_jobs() {
   local keep_completed=100
   local now_epoch purge_after state file_mtime action prep_job_id
@@ -4973,6 +5165,7 @@ prune_old_jobs() {
   local count=0
 
   now_epoch="$(date +%s)"
+  settle_terminal_failed_jobs "$now_epoch"
 
   while IFS= read -r file; do
     job_load "$file" job || continue
@@ -5076,15 +5269,7 @@ mark_job_failed_or_retry() {
     # shellcheck disable=SC2153
     job_ref[PROGRESS_PERCENT]="10"
   else
-    # shellcheck disable=SC2153
-    job_ref[STATE]="failed"
-    # shellcheck disable=SC2153
-    job_ref[PHASE]="failed"
-    # shellcheck disable=SC2153
-    job_ref[RETRY_AT]="0"
-    # shellcheck disable=SC2153
-    job_ref[PROGRESS_PERCENT]="100"
-    preserve_failed_send_log_for_job "$assoc_name" || true
+    mark_job_terminal_failure "$assoc_name" "$message" "$now_epoch"
   fi
 }
 

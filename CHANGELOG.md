@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.01.t01 (Testing Branch Only)
+
+- A failed dataset in a scheduled ZFS send no longer stops the rest of the schedule. That dataset stays failed, the window finishes as failed or partial, and the next scheduled window still runs for every dataset, including the one that failed. A failed job left in the queue after a reboot or upgrade is cleared on its own and cannot hold the schedule. The 5-try, 5-minute send retry and automatic reseed are unchanged.
+- A 6-hour, 12-hour, daily, or weekly send no longer starts an extra time during the repeated hour when clocks fall back for daylight saving time.
+
 ### 2026.10.31.t01 (Testing Branch Only)
 
 - A scheduled or manual ZFS send no longer reports "No common send checkpoint remains" when the remote snapshot list fails, times out, or comes back empty without a successful exit status. That situation is a connection problem, not a missing checkpoint, and the plugin does not suggest deleting or reseeding the remote dataset unless the listing actually succeeded.
