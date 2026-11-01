@@ -222,13 +222,19 @@ To reproduce a package locally:
 
 ## Running tests
 
-The stage 1 harness lives in `tests/stage1`. It stubs `zfs` and `ssh` and checks send, delete, and schedule behavior without a real pool. GitHub Actions runs it on every pull request as part of Verify Package.
+`tests/run_harness.py` is the repository harness. It was recovered from Kira's Hermes workspace (`/opt/data/workspace/Projects/zfsautosnapshot-unraid-harness`, 2026-05-15) and now lives in this repo. GitHub Actions runs it on every pull request as part of Verify Package, before the in-tree package build. A clean tree is required in CI (`--strict-clean`). A dirty tree is allowed when checking a patch locally.
 
 ```bash
-bash tests/stage1/run.sh
+python3 tests/run_harness.py
 ```
 
-A few migrator cases expect to run as root. On a developer machine, `sudo bash tests/stage1/run.sh` matches CI. PHP is required for the contract checks (`php-cli`).
+That run checks repository shape, `php -l`, `bash -n`, `shellcheck -S error`, the regression contracts, an isolated package build, and `tests/stage1`. The stage 1 scripts stub `zfs` and `ssh` and check send, delete, and schedule behavior without a real pool. A few migrator cases expect to run as root, so the harness uses `sudo` when it is not already root. PHP, shellcheck, shfmt, xmllint, and jq are required (`php-cli`, `shellcheck`, `shfmt`, `libxml2-utils`, `jq`).
+
+To run only stage 1:
+
+```bash
+sudo bash tests/stage1/run.sh
+```
 
 What that run covers:
 
