@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.01.01 (2026-11-01)
+
+- A failed dataset in a scheduled ZFS send no longer stops the rest of the schedule. That dataset stays failed, the window finishes as failed or partial, and the next scheduled window still runs for every dataset, including the one that failed. A failed job left in the queue after a reboot or upgrade is cleared on its own and cannot hold the schedule.
+- A 6-hour, 12-hour, daily, or weekly send no longer starts an extra time during the repeated hour when clocks fall back for daylight saving time.
+- The 5-try, 5-minute send retry and automatic reseed from 2026.10.31.01 are unchanged.
+
 ### 2026.10.31.01 (2026-10-31)
 
 - A ZFS send no longer treats a failed, timed-out, or empty remote snapshot list as a missing checkpoint. The list has to succeed before the plugin decides there is no shared snapshot.

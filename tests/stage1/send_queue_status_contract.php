@@ -74,6 +74,41 @@ try {
     assert_true(!in_array('finalize-feedfacecafe-manual-1000', $ids, true), 'routine waiting finalizer should not appear as an extra queue row beside the child send');
     assert_true(!in_array('send-pool-prep-backup-manual-1000', $ids, true), 'routine pool-prep coordinator should not appear as an extra queue row beside the send');
     assert_true(in_array('finalize-feedfacecafe-manual-1001', $ids, true), 'failed coordinator jobs should remain visible so users can clear or inspect them');
+
+    $failedOnly = [
+        'JOB_ID' => 'send-child-ef8948aa4533-old',
+        'JOB_TYPE' => 'send',
+        'JOB_MODE' => 'scheduled',
+        'JOB_ACTION' => 'send_member',
+        'STATE' => 'failed',
+        'PHASE' => 'failed',
+        'SCHEDULE_JOB_ID' => 'ef8948aa4533',
+        'RETRY_AT' => '0',
+        'WINDOW_KEY' => '1793422800',
+        'LAST_MESSAGE' => 'No common send checkpoint remains',
+    ];
+    $failedPath = zfsas_ops_job_path($failedOnly['JOB_ID'], 1793422800);
+    assert_true(zfsas_ops_write_job_file($failedPath, $failedOnly), 'unable to write stale failed member');
+    assert_true(!zfsas_ops_scheduled_job_blocked('ef8948aa4533'), 'a terminal failed member must not block its schedule');
+
+    $queued = $failedOnly;
+    $queued['JOB_ID'] = 'send-child-aabbccddeeff-active';
+    $queued['STATE'] = 'queued';
+    $queued['PHASE'] = 'queued';
+    $queued['SCHEDULE_JOB_ID'] = 'aabbccddeeff';
+    $queuedPath = zfsas_ops_job_path($queued['JOB_ID'], 1793422801);
+    assert_true(zfsas_ops_write_job_file($queuedPath, $queued), 'unable to write queued member');
+    assert_true(zfsas_ops_scheduled_job_blocked('aabbccddeeff'), 'a queued member must still block its schedule');
+
+    $expired = $failedOnly;
+    $expired['JOB_ID'] = 'send-child-expired-failed';
+    $expired['SCHEDULE_JOB_ID'] = '001122334455';
+    $expired['PURGE_AFTER_EPOCH'] = '1';
+    $expiredPath = zfsas_ops_job_path($expired['JOB_ID'], 10);
+    assert_true(zfsas_ops_write_job_file($expiredPath, $expired), 'unable to write expired failed member');
+    zfsas_ops_purge_expired_jobs();
+    assert_true(!is_file($expiredPath), 'expired failed jobs must be removed from the queue');
+    assert_true(is_file($failedPath), 'a failed job without a purge time must stay until the queue kicker stamps it');
 } finally {
     rrmdir($root);
     if ($backup !== null && is_dir($backup)) {

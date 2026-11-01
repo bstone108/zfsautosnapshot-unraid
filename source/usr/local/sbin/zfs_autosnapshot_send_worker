@@ -118,14 +118,7 @@ fail_current_job() {
 
 fail_current_job_final() {
   local message="$1"
-  job[STATE]="failed"
-  job[PHASE]="failed"
-  job[RETRY_AT]="0"
-  job[PROGRESS_PERCENT]="100"
-  job[WORKER_PID]=""
-  job[LAST_ERROR]="$message"
-  job[LAST_MESSAGE]="$message"
-  preserve_failed_send_log_for_job job || true
+  mark_job_terminal_failure job "$message"
   persist_job || true
 }
 
@@ -1046,6 +1039,7 @@ queue_child_send_jobs() {
     fi
     queued_job[WORKER_PID]=""
     queued_job[PROGRESS_PERCENT]="5"
+    queued_job[MEMBER_COUNT]="$member_count"
     # shellcheck disable=SC2034
     queued_job[COMPLETES_SCHEDULE_WINDOW]="$completes_schedule_window"
     if ! ensure_send_job_file queued_job "$requested_epoch"; then
@@ -1415,9 +1409,13 @@ reseed_confirmed_destination_and_full_send() {
   return 1
 }
 
-run_child_jobs_have_failed() {
+summarize_child_member_states() {
   local parent_run_id="$1"
+  local progress_var="$2"
+  local failed_var="$3"
+  local success_var="$4"
   local file state action
+  local progress=0 failed=0 success=0
   # shellcheck disable=SC2034
   local -A sibling_job=()
 
@@ -1426,39 +1424,21 @@ run_child_jobs_have_failed() {
     [[ "$(job_get sibling_job JOB_TYPE)" == "send" ]] || continue
     [[ "$(job_get sibling_job JOB_MODE)" == "scheduled" ]] || continue
     [[ "$(job_get sibling_job PARENT_RUN_ID)" == "$parent_run_id" ]] || continue
+    [[ "$(job_get sibling_job JOB_ID)" != "$CURRENT_JOB_ID" ]] || continue
     action="$(effective_job_action sibling_job)"
     [[ "$action" == "send_member" ]] || continue
     state="$(job_get sibling_job STATE)"
-    if [[ "$state" == "failed" ]]; then
-      return 0
-    fi
+    case "$state" in
+      queued|running|retry_wait) progress=$((progress + 1)) ;;
+      failed) failed=$((failed + 1)) ;;
+      complete|skipped) success=$((success + 1)) ;;
+      *) progress=$((progress + 1)) ;;
+    esac
   done < <(list_job_files)
 
-  return 1
-}
-
-run_child_jobs_still_active() {
-  local parent_run_id="$1"
-  local file state action job_id
-  # shellcheck disable=SC2034
-  local -A sibling_job=()
-
-  while IFS= read -r file; do
-    job_load "$file" sibling_job || continue
-    [[ "$(job_get sibling_job JOB_TYPE)" == "send" ]] || continue
-    [[ "$(job_get sibling_job JOB_MODE)" == "scheduled" ]] || continue
-    [[ "$(job_get sibling_job PARENT_RUN_ID)" == "$parent_run_id" ]] || continue
-    job_id="$(job_get sibling_job JOB_ID)"
-    [[ "$job_id" != "$CURRENT_JOB_ID" ]] || continue
-    action="$(effective_job_action sibling_job)"
-    [[ "$action" == "send_member" ]] || continue
-    state="$(job_get sibling_job STATE)"
-    if ! job_state_is_success "$state"; then
-      return 0
-    fi
-  done < <(list_job_files)
-
-  return 1
+  printf -v "$progress_var" '%s' "$progress"
+  printf -v "$failed_var" '%s' "$failed"
+  printf -v "$success_var" '%s' "$success"
 }
 
 linked_job_state() {
@@ -1507,17 +1487,35 @@ process_cleanup_member_job() {
 }
 
 process_finalize_job() {
-  local parent_run_id
+  local parent_run_id member_count in_progress=0 failed=0 success=0 message partial=0
   parent_run_id="$(job_get job PARENT_RUN_ID)"
+  member_count="$(job_get job MEMBER_COUNT 0)"
+  [[ "$member_count" =~ ^[0-9]+$ ]] || member_count=0
+  summarize_child_member_states "$parent_run_id" in_progress failed success
 
-  if run_child_jobs_have_failed "$parent_run_id"; then
-    skip_job "Skipped; child failed."
-    return 0
-  fi
-
-  if run_child_jobs_still_active "$parent_run_id"; then
+  if (( in_progress > 0 )); then
     defer_current_job "Waiting for children." 1
     return 2
+  fi
+
+  if (( failed > 0 )); then
+    if (( member_count > 0 && failed < member_count )); then
+      partial=1
+    elif (( success > 0 )); then
+      partial=1
+    fi
+    if (( partial == 1 )); then
+      if (( member_count > 0 )); then
+        message="Scheduled window finished partial: ${failed} of ${member_count} dataset send(s) failed."
+      else
+        message="Scheduled window finished partial: ${failed} dataset send(s) failed and ${success} finished."
+      fi
+    else
+      message="Scheduled window failed: ${failed} dataset send(s) failed."
+    fi
+    mark_job_terminal_failure job "$message"
+    persist_job || true
+    return 0
   fi
 
   complete_job "Scheduled window complete."
