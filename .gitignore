@@ -16,3 +16,7 @@ Icon?
 # Editor swap files
 *.swp
 *.swo
+
+# Local Python caches from tests/run_harness.py
+__pycache__/
+*.pyc

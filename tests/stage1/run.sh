@@ -803,6 +803,7 @@ main() {
   bash "${ROOT_DIR}/tests/stage1/send_transport_command_checks.sh"
   bash "${ROOT_DIR}/tests/stage1/send_remote_retry_and_listing_checks.sh"
   bash "${ROOT_DIR}/tests/stage1/send_schedule_failure_window_checks.sh"
+  bash "${ROOT_DIR}/tests/stage1/send_destination_transport_checks.sh"
   php "${ROOT_DIR}/tests/stage1/send_queue_status_contract.php"
   php "${ROOT_DIR}/tests/stage1/send_transport_submission_contract.php"
   python3 "${ROOT_DIR}/tests/stage1/send_queue_preflight_status_static_checks.py"

@@ -18,6 +18,19 @@ jobs:
       - name: Check out branch
         uses: actions/checkout@v4
 
+      - name: Install harness tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli shellcheck shfmt libxml2-utils jq xz-utils
+
+      - name: Run test harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/run_harness.py --strict-clean
+
       - name: Build verification package
         shell: bash
         run: |

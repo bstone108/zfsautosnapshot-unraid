@@ -13,7 +13,7 @@ unset _zfsas_path_dir
 export PATH
 
 # shellcheck source=/dev/null
-source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
+source "${ZFSAS_OPS_LIB:-/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh}"
 
 WORKER_LOCK_DIR="${DELETE_QUEUE_LOCK_DIR}"
 CURRENT_JOB_ID=""
@@ -51,6 +51,7 @@ declare -A QUEUE_ESTIMATED_RECLAIM_BYTES=()
 declare -A QUEUE_SEND_PROTECTED=()
 declare -A QUEUE_DELETE_SCOPE=()
 declare -A QUEUE_SEND_SCHEDULE_JOB_ID=()
+declare -A QUEUE_SEND_TRANSPORT=()
 declare -A QUEUE_WORKER_PID=()
 declare -A QUEUE_BY_SNAPSHOT=()
 declare -A QUEUE_BY_CHECKPOINT=()
@@ -162,6 +163,7 @@ queue_add_job() {
   QUEUE_SEND_PROTECTED["$job_id"]="${job_ref[SEND_PROTECTED]:-0}"
   QUEUE_DELETE_SCOPE["$job_id"]="${job_ref[DELETE_SCOPE]:-snapshot}"
   QUEUE_SEND_SCHEDULE_JOB_ID["$job_id"]="${job_ref[SEND_SCHEDULE_JOB_ID]:-}"
+  QUEUE_SEND_TRANSPORT["$job_id"]="${job_ref[SEND_TRANSPORT]:-}"
   QUEUE_WORKER_PID["$job_id"]="${job_ref[WORKER_PID]:-}"
   QUEUE_ACTIVE_COUNT=$((QUEUE_ACTIVE_COUNT + 1))
   queue_state_counter_increment "${QUEUE_STATE[$job_id]}"
@@ -236,7 +238,7 @@ queue_remove_job() {
   unset 'QUEUE_STATE[$job_id]' 'QUEUE_RETRY_AT[$job_id]' 'QUEUE_REQUESTED_EPOCH[$job_id]' 'QUEUE_QUEUE_SORT[$job_id]'
   unset 'QUEUE_DATASET[$job_id]' 'QUEUE_SNAPSHOT[$job_id]' 'QUEUE_SNAPSHOT_NAME[$job_id]' 'QUEUE_SNAPSHOT_EPOCH[$job_id]'
   unset 'QUEUE_SNAPSHOT_GUID[$job_id]' 'QUEUE_SNAPSHOT_CREATETXG[$job_id]' 'QUEUE_DELETE_POOL[$job_id]'
-  unset 'QUEUE_ESTIMATED_RECLAIM_BYTES[$job_id]' 'QUEUE_SEND_PROTECTED[$job_id]' 'QUEUE_DELETE_SCOPE[$job_id]'
+  unset 'QUEUE_ESTIMATED_RECLAIM_BYTES[$job_id]' 'QUEUE_SEND_PROTECTED[$job_id]' 'QUEUE_DELETE_SCOPE[$job_id]' 'QUEUE_SEND_TRANSPORT[$job_id]'
   unset 'QUEUE_SEND_SCHEDULE_JOB_ID[$job_id]' 'QUEUE_WORKER_PID[$job_id]'
   (( QUEUE_ACTIVE_COUNT > 0 )) && QUEUE_ACTIVE_COUNT=$((QUEUE_ACTIVE_COUNT - 1))
   queue_state_counter_decrement "$state"
@@ -275,6 +277,7 @@ queue_load_job_assoc() {
   job_ref[SEND_PROTECTED]="${QUEUE_SEND_PROTECTED[$job_id]}"
   job_ref[DELETE_SCOPE]="${QUEUE_DELETE_SCOPE[$job_id]}"
   job_ref[SEND_SCHEDULE_JOB_ID]="${QUEUE_SEND_SCHEDULE_JOB_ID[$job_id]}"
+  job_ref[SEND_TRANSPORT]="${QUEUE_SEND_TRANSPORT[$job_id]:-}"
   job_ref[WORKER_PID]="${QUEUE_WORKER_PID[$job_id]}"
   return 0
 }
@@ -303,6 +306,7 @@ queue_store_job_assoc() {
   QUEUE_SEND_PROTECTED["$job_id"]="${job_ref[SEND_PROTECTED]:-0}"
   QUEUE_DELETE_SCOPE["$job_id"]="${job_ref[DELETE_SCOPE]:-snapshot}"
   QUEUE_SEND_SCHEDULE_JOB_ID["$job_id"]="${job_ref[SEND_SCHEDULE_JOB_ID]:-}"
+  QUEUE_SEND_TRANSPORT["$job_id"]="${job_ref[SEND_TRANSPORT]:-}"
   QUEUE_WORKER_PID["$job_id"]="${job_ref[WORKER_PID]:-}"
   queue_record_state_transition "$previous_state" "${QUEUE_STATE[$job_id]}"
   daemon_mark_dirty
@@ -535,37 +539,32 @@ snapshot_delete_target_is_safe() {
 
 destroy_single_snapshot_with_retries() {
   local snapshot="$1"
-  local max_attempts=3
-  local attempt=1
-  local output=""
-
-  while (( attempt <= max_attempts )); do
-    if output="$(zfs destroy "$snapshot" 2>&1)"; then
-      return 0
-    fi
-
-    if (( attempt >= max_attempts )); then
-      log "Delete attempt ${attempt}/${max_attempts} failed for ${snapshot}: ${output}"
-      return 1
-    fi
-
-    log "Delete attempt ${attempt}/${max_attempts} failed for ${snapshot}; retrying: ${output}"
-    sleep "$attempt"
-    attempt=$((attempt + 1))
-  done
-
-  return 1
+  local transport="${2:-local}"
+  destroy_snapshot_for_transport "$transport" "$snapshot"
 }
 
 delete_single_snapshot() {
   local snapshot="$1"
+  local transport="${2:-local}"
 
   snapshot_delete_target_is_safe "$snapshot" || return 2
-  destroy_single_snapshot_with_retries "$snapshot"
+  destroy_single_snapshot_with_retries "$snapshot" "$transport"
+}
+
+delete_job_transport() {
+  local schedule_job_id="$1"
+  local from_job="${2:-}"
+  local transport="$from_job"
+  if [[ -z "$transport" ]]; then
+    transport="$(schedule_transport_for_id "$schedule_job_id")"
+  fi
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  printf '%s' "$transport"
 }
 
 process_send_checkpoint_delete() {
-  local snapshot basename schedule_job_id source_root dest_root prefix delete_scope
+  local snapshot basename schedule_job_id source_root dest_root prefix delete_scope transport
   local -A job=()
 
   queue_load_job_assoc "$CURRENT_JOB_ID" job || return 1
@@ -597,36 +596,40 @@ process_send_checkpoint_delete() {
   source_root="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]}"
   dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]}"
   prefix="$(job_prefix_for_schedule "$schedule_job_id")"
+  transport="$(delete_job_transport "$schedule_job_id" "$(job_get job SEND_TRANSPORT)")"
 
   if [[ "$delete_scope" == "checkpoint" ]]; then
     log "Deleting scheduled-send checkpoint ${basename} across its source and destination trees."
-    dataset_exists "$source_root" && delete_checkpoint_basename_across_tree "$source_root" "$basename" "$prefix" "source"
-    dataset_exists "$dest_root" && delete_checkpoint_basename_across_tree "$dest_root" "$basename" "$prefix" "destination"
+    dataset_exists "$source_root" && delete_checkpoint_basename_across_tree "$source_root" "$basename" "$prefix" "source" local
+    if [[ "$transport" == "ssh" ]]; then
+      delete_checkpoint_basename_across_tree "$dest_root" "$basename" "$prefix" "destination" ssh
+    elif [[ "$transport" == "local" ]] && dataset_exists "$dest_root"; then
+      delete_checkpoint_basename_across_tree "$dest_root" "$basename" "$prefix" "destination" local
+    fi
     complete_delete_job "Deleted scheduled-send checkpoint ${basename} across its source and destination trees."
     log "Deleted scheduled-send checkpoint ${basename} across its source and destination trees."
     return 0
   fi
 
   if [[ "$delete_scope" == "destination_checkpoint" ]]; then
-    if [[ "${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}" == "ssh" ]]; then
-      local command
+    if [[ "$transport" == "ssh" ]]; then
       log "Deleting remote SSH destination scheduled-send checkpoint snapshot ${snapshot}."
-      build_ssh_zfs_command "zfs destroy -- $(shell_quote_word "$snapshot")" command || {
-        fail_delete_job "Cannot delete remote SSH destination checkpoint ${snapshot}; SSH settings are incomplete or invalid."
-        return 0
-      }
-      eval "$command" || return $?
+      delete_single_snapshot "$snapshot" ssh || return $?
       complete_delete_job "Deleted remote SSH destination scheduled-send checkpoint snapshot ${snapshot}."
+      return 0
+    fi
+    if [[ "$transport" != "local" ]]; then
+      fail_delete_job "Cannot delete destination checkpoint ${snapshot} on transport ${transport}; there is no remote zfs path."
       return 0
     fi
 
     log "Deleting destination scheduled-send checkpoint snapshot ${snapshot}."
-    delete_single_snapshot "$snapshot" || return $?
+    delete_single_snapshot "$snapshot" local || return $?
     complete_delete_job "Deleted destination scheduled-send checkpoint snapshot ${snapshot}."
     return 0
   fi
 
-  delete_single_snapshot "$snapshot" || return $?
+  delete_single_snapshot "$snapshot" local || return $?
   complete_delete_job "Deleted snapshot ${snapshot}."
 }
 
@@ -778,4 +781,6 @@ main() {
   log "Delete daemon $$ finished after processing ${DELETE_SUCCESS_COUNT} snapshot delete(s)"
 }
 
-main "$@"
+if [[ "${ZFSAS_DELETE_WORKER_AS_LIBRARY:-0}" != "1" ]]; then
+  main "$@"
+fi

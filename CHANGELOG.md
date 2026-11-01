@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.01.t02 (Testing Branch Only)
+
+- Cleaning up an old snapshot on a remote ZFS send destination no longer runs `zfs destroy` on the machine that is sending. List, destroy, rollback, and a reseed `destroy -r` for that destination go over SSH. A local destination still uses the local `zfs` command.
+- The 5-try, 5-minute send retry and automatic reseed are unchanged. A failed or empty remote snapshot list is still not a reason to delete the destination.
+
 ### 2026.11.01.t01 (Testing Branch Only)
 
 - A failed dataset in a scheduled ZFS send no longer stops the rest of the schedule. That dataset stays failed, the window finishes as failed or partial, and the next scheduled window still runs for every dataset, including the one that failed. A failed job left in the queue after a reboot or upgrade is cleared on its own and cannot hold the schedule. The 5-try, 5-minute send retry and automatic reseed are unchanged.
