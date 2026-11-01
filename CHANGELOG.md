@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.01.t03 (Testing Branch Only)
+
+- The once-a-minute queue check no longer treats a started array as stopped when Unraid's status report is long. Reading that report used to stop early with a broken-pipe error, so sends and deletes could sit paused even though the array was already up.
+
 ### 2026.11.01.t02 (Testing Branch Only)
 
 - Cleaning up an old snapshot on a remote ZFS send destination no longer runs `zfs destroy` on the machine that is sending. List, destroy, rollback, and a reseed `destroy -r` for that destination go over SSH. A local destination still uses the local `zfs` command.

@@ -410,7 +410,7 @@ migration_host_ready() {
   status_text="$(get_unraid_array_status 2>/dev/null || true)"
   [[ -n "$status_text" ]] || return 0
   for key in mdState fsState sbState started; do
-    value="$(printf '%s\n' "$status_text" | extract_status_value "$key")"
+    value="$(extract_status_value "$key" <<< "$status_text" || true)"
     [[ -n "$value" ]] || continue
     if state_token_is_actionable "$value"; then
       return 0
@@ -677,8 +677,8 @@ parity_sync_in_progress() {
   local status_text mdresync mdaction mdstat_line
   status_text="$(get_unraid_array_status 2>/dev/null || true)"
   if [[ -n "$status_text" ]]; then
-    mdresync="$(printf '%s\n' "$status_text" | extract_status_value "mdResync")"
-    mdaction="$(printf '%s\n' "$status_text" | extract_status_value "mdResyncAction")"
+    mdresync="$(extract_status_value "mdResync" <<< "$status_text" || true)"
+    mdaction="$(extract_status_value "mdResyncAction" <<< "$status_text" || true)"
     if [[ "$mdresync" =~ ^[0-9]+$ ]] && (( mdresync > 0 )); then
       log "Detected array sync activity: mdResync=$mdresync mdResyncAction='${mdaction:-unknown}'"
       return 0
