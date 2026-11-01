@@ -220,6 +220,24 @@ To reproduce a package locally:
 ./scripts/build-release.sh <version> <base_url>
 ```
 
+## Running tests
+
+The stage 1 harness lives in `tests/stage1`. It stubs `zfs` and `ssh` and checks send, delete, and schedule behavior without a real pool. GitHub Actions runs it on every pull request as part of Verify Package.
+
+```bash
+bash tests/stage1/run.sh
+```
+
+A few migrator cases expect to run as root. On a developer machine, `sudo bash tests/stage1/run.sh` matches CI. PHP is required for the contract checks (`php-cli`).
+
+What that run covers:
+
+- Destination `list`, `destroy`, `rollback`, and reseed `destroy -r` go over SSH for a remote destination and stay local for a local one (`send_destination_transport_checks.sh`).
+- A failed or empty remote snapshot list is not a reseed, and a failed send step is retried 5 times with the wait only after a failure (`send_remote_retry_and_listing_checks.sh`).
+- A confirmed destination mismatch triggers a reseed (`send_remote_retry_and_listing_checks.sh`).
+- A failed member job does not block the next schedule window (`send_schedule_failure_window_checks.sh`).
+- A daylight-saving fall-back hour does not open a second window (`send_schedule_failure_window_checks.sh`).
+
 ## License
 
 MIT License.

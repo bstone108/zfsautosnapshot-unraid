@@ -14,7 +14,7 @@ unset _zfsas_path_dir
 export PATH
 
 # shellcheck source=/dev/null
-source /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh
+source "${ZFSAS_OPS_LIB:-/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/ops-queue-lib.sh}"
 
 WORKER_ROLE="send"
 CLAIM_SELECTOR="${ZFSAS_CLAIM_SELECTOR:-non_pool_prep}"
@@ -1351,7 +1351,7 @@ purge_destination_for_reseed() {
     return 1
   fi
   dataset_exists "$destination" || return 0
-  zfs destroy -r "$destination"
+  destroy_dataset_recursive_for_transport local "$destination"
 }
 
 # Purge a confirmed destination and send the snapshot as a full backup.
@@ -1860,4 +1860,6 @@ main() {
   log "Send worker $$ finished (${WORKER_ROLE}:${CLAIM_SELECTOR})"
 }
 
-main "$@"
+if [[ "${ZFSAS_SEND_WORKER_AS_LIBRARY:-0}" != "1" ]]; then
+  main "$@"
+fi

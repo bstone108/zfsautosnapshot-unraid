@@ -2,6 +2,7 @@
 <PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="__VERSION__" icon="zfs-autosnapshot.png" pluginURL="__BASE_URL__/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
 ### __VERSION__ (__BUILD_DATE__)
+- Cleaning up an old snapshot on a remote ZFS send destination no longer runs zfs destroy on the sender. List, destroy, rollback, and a reseed destroy -r for that destination go over SSH. A local destination still uses local zfs.
 - A failed dataset in a scheduled ZFS send no longer stops later sends. The failed dataset stays failed, that window finishes as failed or partial, and the next scheduled time still sends every dataset, including the one that failed. A failed job left in the queue is removed on its own and cannot hold the schedule.
 - A 6-hour, 12-hour, daily, or weekly send no longer starts an extra time during the repeated hour when clocks fall back for daylight saving time.
 - A ZFS send no longer treats a failed, timed-out, or empty remote snapshot list as a missing checkpoint. The list has to succeed before the plugin decides there is no shared snapshot.
