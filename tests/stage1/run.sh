@@ -810,6 +810,7 @@ main() {
   php "${ROOT_DIR}/tests/stage1/prefix_overlap_contract.php"
   bash "${ROOT_DIR}/tests/stage1/zero_change_common_harness.sh"
   bash "${ROOT_DIR}/tests/stage1/unraid_array_status_checks.sh"
+  bash "${ROOT_DIR}/tests/stage1/history_regression_checks.sh"
 
   echo "All Stage 1 tests passed."
 }

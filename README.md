@@ -243,6 +243,8 @@ What that run covers:
 - A confirmed destination mismatch triggers a reseed (`send_remote_retry_and_listing_checks.sh`).
 - A failed member job does not block the next schedule window (`send_schedule_failure_window_checks.sh`).
 - A daylight-saving fall-back hour does not open a second window (`send_schedule_failure_window_checks.sh`).
+- A long Unraid array-status report does not make a started array look stopped (`unraid_array_status_checks.sh`).
+- Low-space cleanup still picks the oldest snapshot when the list is long, and the cron file stays in Unraid's no-username format (`history_regression_checks.sh`).
 
 ## License
 

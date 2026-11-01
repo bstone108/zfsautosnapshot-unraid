@@ -2,10 +2,10 @@
 set -euo pipefail
 
 PLUGIN_NAME="zfs.autosnapshot"
-CONFIG_DIR="/boot/config/plugins/${PLUGIN_NAME}"
+CONFIG_DIR="${ZFSAS_CRON_CONFIG_DIR:-/boot/config/plugins/${PLUGIN_NAME}}"
 CONFIG_FILE="${CONFIG_DIR}/zfs_autosnapshot.conf"
 SEND_CONFIG_FILE="${CONFIG_DIR}/zfs_send.conf"
-CRON_FILE="/etc/cron.d/zfs_autosnapshot"
+CRON_FILE="${ZFSAS_CRON_FILE:-/etc/cron.d/zfs_autosnapshot}"
 RUN_CMD="/usr/local/sbin/zfs_autosnapshot"
 QUEUE_KICKER_CMD="/usr/local/sbin/zfs_autosnapshot_queue_kicker"
 

@@ -278,7 +278,9 @@ unraid_actionable_state_value() {
     printf ''
     return 1
   }
-  value="$(printf '%s\n' "$status_text" | extract_status_value "$key" | head -n 1)"
+  # A pipe into awk/head dies with SIGPIPE under set -o pipefail when mdcmd
+  # output is larger than the pipe buffer. That made a started array look stopped.
+  value="$(extract_status_value "$key" <<< "$status_text" || true)"
   normalize_unraid_state_value "$value"
 }
 
