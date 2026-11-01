@@ -1,12 +1,10 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.10.31.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.11.01.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.10.31.01 (2026-10-31)
-- A ZFS send no longer treats a failed, timed-out, or empty remote snapshot list as a missing checkpoint. The list has to succeed before the plugin decides there is no shared snapshot.
-- A failed ZFS send step is retried up to 5 times, waiting 5 minutes only after a failure before that same step is tried again. A step that succeeds continues immediately.
-- When a confirmed snapshot list shows no shared checkpoint, or a finished incremental receive says the destination does not match, the plugin deletes that destination dataset and sends a full backup. The log says why. A failed or unverified list does not delete anything. Set SEND_AUTO_RESEED=0 to turn this rebuild off.
-- Dataset Migrator status checks no longer measure folder sizes on every poll. Sizes are calculated when you press Refresh, and once in the background the first time a dataset is shown.
-- A scheduled send no longer queues the same child send twice. Removed send jobs drop their saved progress, and startup removes leftover delete-queue temp files older than one hour.
+### 2026.11.01.01 (2026-11-01)
+- A failed dataset in a scheduled ZFS send no longer stops later sends. The failed dataset stays failed, that window finishes as failed or partial, and the next scheduled time still sends every dataset, including the one that failed. A failed job left in the queue is removed on its own and cannot hold the schedule.
+- A 6-hour, 12-hour, daily, or weekly send no longer starts an extra time during the repeated hour when clocks fall back for daylight saving time.
+- A failed ZFS send step is still retried up to 5 times, waiting 5 minutes only after a failure. A confirmed missing checkpoint still rebuilds that destination unless SEND_AUTO_RESEED=0.
 
   </CHANGES>
 
@@ -16,9 +14,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.10.31.01-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.10.31.01-noarch-1.txz</URL>
-    <MD5>badd35e9235f019e76bc35c03cbc89f0</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.11.01.01-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.11.01.01-noarch-1.txz</URL>
+    <MD5>47becd22c87bdd9448993d1224401afe</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -26,10 +24,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.10.31.01-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.11.01.01-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="badd35e9235f019e76bc35c03cbc89f0"
+PKG_MD5="47becd22c87bdd9448993d1224401afe"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
