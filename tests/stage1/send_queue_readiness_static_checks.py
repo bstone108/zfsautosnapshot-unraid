@@ -283,7 +283,7 @@ def main() -> int:
     assert_contains(
         approve_body,
         "Destination space approval not required.",
-        "zero-byte coordinator/finalizer jobs must record that destination space approval was skipped",
+        "zero-byte coordinator jobs must record that destination space approval is not required",
     )
     if approve_body.find("if (( required_bytes == 0 )); then") > approve_body.find("acquire_send_space_reservation_for_transport"):
         raise AssertionError(
@@ -338,8 +338,18 @@ def main() -> int:
     )
     assert_contains(
         delete_worker,
-        'build_ssh_zfs_command "zfs destroy -- $(shell_quote_word "$snapshot")" command',
+        'delete_single_snapshot "$snapshot" ssh',
         "SSH destination checkpoint retention must destroy the remote snapshot over SSH instead of trying a local zfs destroy",
+    )
+    assert_contains(
+        lib,
+        'run_zfs_for_transport "$transport" "destroy ${snapshot}" -- destroy -- "$snapshot"',
+        "destination snapshot destroy must go through the transport-aware zfs runner",
+    )
+    assert_contains(
+        lib,
+        'build_ssh_zfs_command "$remote" command || return 1',
+        "SSH zfs commands must be wrapped by the shared SSH command builder",
     )
     assert_contains(
         delete_worker,

@@ -54,6 +54,7 @@ LOG_FILE="/var/log/zfs_autosnapshot_send.log"
 LOG_ARCHIVE_FILE="/var/log/zfs_autosnapshot_send.archive.log"
 SEND_LOG_MAX_BYTES="${SEND_LOG_MAX_BYTES:-2097152}"
 SEND_LOG_ARCHIVE_MAX_BYTES="${SEND_LOG_ARCHIVE_MAX_BYTES:-4194304}"
+
 DEFAULT_SEND_SNAPSHOT_PREFIX="zfs-send-"
 DEFAULT_SEND_MAX_PARALLEL="1"
 DEFAULT_SEND_RATE_LIMIT="0"
@@ -268,7 +269,9 @@ unraid_actionable_state_value() {
     printf ''
     return 1
   }
-  value="$(printf '%s\n' "$status_text" | extract_status_value "$key" | head -n 1)"
+  # A pipe into awk/head dies with SIGPIPE under set -o pipefail when mdcmd
+  # output is larger than the pipe buffer. That made a started array look stopped.
+  value="$(extract_status_value "$key" <<< "$status_text" || true)"
   normalize_unraid_state_value "$value"
 }
 
@@ -566,7 +569,8 @@ delete_queue_emit_state_line() {
     "$(delete_queue_sanitize_field "${job_ref[SEND_PROTECTED]:-0}")" \
     "$(delete_queue_sanitize_field "${job_ref[DELETE_SCOPE]:-snapshot}")" \
     "$(delete_queue_sanitize_field "${job_ref[SEND_SCHEDULE_JOB_ID]:-}")" \
-    "$(delete_queue_sanitize_field "${job_ref[WORKER_PID]:-}")"
+    "$(delete_queue_sanitize_field "${job_ref[WORKER_PID]:-}")" \
+    "$(delete_queue_sanitize_field "${job_ref[SEND_TRANSPORT]:-}")"
 }
 
 delete_queue_parse_state_line() {
@@ -574,14 +578,14 @@ delete_queue_parse_state_line() {
   local assoc_name="$2"
   local prefix job_id state retry_at requested_epoch queue_sort dataset snapshot snapshot_name snapshot_epoch
   local snapshot_guid snapshot_createtxg delete_pool estimated_reclaim send_protected delete_scope
-  local send_schedule_job_id worker_pid
+  local send_schedule_job_id worker_pid send_transport
   # shellcheck disable=SC2178
   local -n job_ref="$assoc_name"
 
   job_ref=()
   IFS=$'\t' read -r prefix job_id state retry_at requested_epoch queue_sort dataset snapshot snapshot_name snapshot_epoch \
     snapshot_guid snapshot_createtxg delete_pool estimated_reclaim send_protected delete_scope \
-    send_schedule_job_id worker_pid <<< "$line"
+    send_schedule_job_id worker_pid send_transport <<< "$line"
   [[ "$prefix" == "JOB" && -n "$job_id" && -n "$snapshot" ]] || return 1
 
   job_ref[JOB_ID]="$job_id"
@@ -601,6 +605,7 @@ delete_queue_parse_state_line() {
   job_ref[DELETE_SCOPE]="${delete_scope:-snapshot}"
   job_ref[SEND_SCHEDULE_JOB_ID]="$send_schedule_job_id"
   job_ref[WORKER_PID]="$worker_pid"
+  job_ref[SEND_TRANSPORT]="${send_transport:-}"
   return 0
 }
 
@@ -623,20 +628,21 @@ delete_queue_emit_enqueue_line() {
     "$(delete_queue_sanitize_field "${job_ref[ESTIMATED_RECLAIM_BYTES]:-0}")" \
     "$(delete_queue_sanitize_field "${job_ref[SEND_PROTECTED]:-0}")" \
     "$(delete_queue_sanitize_field "${job_ref[DELETE_SCOPE]:-snapshot}")" \
-    "$(delete_queue_sanitize_field "${job_ref[SEND_SCHEDULE_JOB_ID]:-}")"
+    "$(delete_queue_sanitize_field "${job_ref[SEND_SCHEDULE_JOB_ID]:-}")" \
+    "$(delete_queue_sanitize_field "${job_ref[SEND_TRANSPORT]:-}")"
 }
 
 delete_queue_parse_enqueue_line() {
   local line="$1"
   local assoc_name="$2"
   local prefix job_id requested_epoch queue_sort dataset snapshot snapshot_name snapshot_epoch snapshot_guid
-  local snapshot_createtxg delete_pool estimated_reclaim send_protected delete_scope send_schedule_job_id
+  local snapshot_createtxg delete_pool estimated_reclaim send_protected delete_scope send_schedule_job_id send_transport
   # shellcheck disable=SC2178
   local -n job_ref="$assoc_name"
 
   job_ref=()
   IFS=$'\t' read -r prefix job_id requested_epoch queue_sort dataset snapshot snapshot_name snapshot_epoch snapshot_guid \
-    snapshot_createtxg delete_pool estimated_reclaim send_protected delete_scope send_schedule_job_id <<< "$line"
+    snapshot_createtxg delete_pool estimated_reclaim send_protected delete_scope send_schedule_job_id send_transport <<< "$line"
   [[ "$prefix" == "ENQUEUE" && -n "$job_id" && -n "$snapshot" ]] || return 1
 
   job_ref[JOB_ID]="$job_id"
@@ -655,6 +661,7 @@ delete_queue_parse_enqueue_line() {
   job_ref[SEND_PROTECTED]="${send_protected:-0}"
   job_ref[DELETE_SCOPE]="${delete_scope:-snapshot}"
   job_ref[SEND_SCHEDULE_JOB_ID]="$send_schedule_job_id"
+  job_ref[SEND_TRANSPORT]="${send_transport:-}"
   job_ref[WORKER_PID]=""
   return 0
 }
@@ -3152,6 +3159,107 @@ build_ssh_zfs_command() {
   return 0
 }
 
+schedule_transport_for_id() {
+  local schedule_job_id="$1"
+  local transport="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  printf '%s' "$transport"
+}
+
+# Run zfs on the sender, or on the SSH receiver when the destination transport
+# is ssh. Local destinations stay on the local zfs binary. spiped has no
+# remote zfs channel here and must not fall back to the sender's pools.
+# shellcheck disable=SC2120
+run_zfs_for_transport() {
+  local transport="$1"
+  local description="$2"
+  shift 2
+  local remote="zfs" arg command="" err_file rc=0
+
+  [[ "${1:-}" == "--" ]] && shift
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  if [[ "$transport" == "local" ]]; then
+    zfs "$@" || return $?
+    return 0
+  fi
+  if [[ "$transport" != "ssh" ]]; then
+    log "Refusing ${description}; transport ${transport} has no remote zfs path."
+    return 1
+  fi
+
+  for arg in "$@"; do
+    remote+=" $(shell_quote_word "$arg")"
+  done
+  build_ssh_zfs_command "$remote" command || return 1
+  err_file="$(mktemp /tmp/zfsas-zfs-err.XXXXXX 2>/dev/null || true)"
+  if [[ -z "$err_file" ]]; then
+    err_file="/tmp/zfsas-zfs-err.$$"
+    : > "$err_file" || return 1
+  fi
+  eval "$command" 2>"$err_file" || rc=$?
+  if [[ -s "$err_file" ]]; then
+    cat "$err_file" >&2
+  fi
+  rm -f "$err_file" >/dev/null 2>&1 || true
+  return "$rc"
+}
+
+list_snapshots_for_transport() {
+  local transport="$1"
+  local dataset="$2"
+  local recursive="${3:-1}"
+
+  if [[ "$recursive" == "1" ]]; then
+    run_zfs_for_transport "$transport" "list snapshots ${dataset}" -- list -H -p -r -t snapshot -o name,creation -- "$dataset"
+    return $?
+  fi
+  run_zfs_for_transport "$transport" "list snapshots ${dataset}" -- list -H -p -d 1 -t snapshot -o name,creation -- "$dataset"
+}
+
+destroy_snapshot_for_transport() {
+  local transport="$1"
+  local snapshot="$2"
+  local max_attempts=3
+  local attempt=1
+  local output="" rc=0
+
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  while (( attempt <= max_attempts )); do
+    rc=0
+    output="$(run_zfs_for_transport "$transport" "destroy ${snapshot}" -- destroy -- "$snapshot" 2>&1)" || rc=$?
+    if (( rc == 0 )); then
+      return 0
+    fi
+    if (( attempt >= max_attempts )); then
+      log "Delete attempt ${attempt}/${max_attempts} failed for ${snapshot}: ${output}"
+      return 1
+    fi
+    log "Delete attempt ${attempt}/${max_attempts} failed for ${snapshot}; retrying: ${output}"
+    if declare -F delete_retry_sleep_hook >/dev/null 2>&1; then
+      delete_retry_sleep_hook "$attempt"
+    else
+      sleep "$attempt"
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+rollback_snapshot_for_transport() {
+  local transport="$1"
+  local snapshot="$2"
+  run_zfs_for_transport "$transport" "rollback ${snapshot}" -- rollback -r -- "$snapshot"
+}
+
+destroy_dataset_recursive_for_transport() {
+  local transport="$1"
+  local dataset="$2"
+  run_zfs_for_transport "$transport" "destroy -r ${dataset}" -- destroy -r -- "$dataset"
+}
+
 build_ssh_receive_command() {
   local destination="$1"
   local result_var="$2"
@@ -4405,7 +4513,8 @@ find_latest_common_snapshot_for_target_transport() {
 job_list_basenames_for_root() {
   local root_dataset="$1"
   local prefix="$2"
-  zfs list -H -p -r -t snapshot -o name,creation "$root_dataset" 2>/dev/null | grep -F "@${prefix}" || true
+  local transport="${3:-local}"
+  list_snapshots_for_transport "$transport" "$root_dataset" 1 2>/dev/null | grep -F "@${prefix}" || true
 }
 
 queue_safe_token() {
@@ -4783,13 +4892,16 @@ delete_checkpoint_basename_across_tree() {
   local basename="$2"
   local prefix="$3"
   local side_label="$4"
+  local transport="${5:-local}"
   local snap_name snap_epoch snapshots=()
 
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
   while IFS=$'\t' read -r snap_name snap_epoch; do
     [[ -n "$snap_name" ]] || continue
     [[ "${snap_name##*@}" == "$basename" ]] || continue
     snapshots+=("$snap_name")
-  done < <(job_list_basenames_for_root "$root_dataset" "$prefix")
+  done < <(job_list_basenames_for_root "$root_dataset" "$prefix" "$transport")
 
   if (( ${#snapshots[@]} == 0 )); then
     return 0
@@ -4797,15 +4909,16 @@ delete_checkpoint_basename_across_tree() {
 
   for snap_name in "${snapshots[@]}"; do
     log "Deleting ${side_label} send checkpoint: $snap_name"
-    zfs destroy "$snap_name"
+    destroy_snapshot_for_transport "$transport" "$snap_name"
   done
 }
 
 delete_destination_snapshot() {
   local snapshot="$1"
+  local transport="${2:-local}"
   [[ -n "$snapshot" ]] || return 1
   log "Deleting destination snapshot: $snapshot"
-  zfs destroy "$snapshot"
+  destroy_snapshot_for_transport "$transport" "$snapshot"
 }
 
 ensure_destination_space_for_schedule_job() {
@@ -4844,7 +4957,7 @@ ensure_destination_space_for_schedule_job() {
     [[ -n "$best_id" && -n "$candidate_snapshot" ]] || return 1
 
     log "Destination ${dest_dataset} low on space -> deleting oldest eligible destination snapshot ${candidate_snapshot} (selected from schedule ${best_id})"
-    delete_destination_snapshot "$candidate_snapshot"
+    delete_destination_snapshot "$candidate_snapshot" "$(schedule_transport_for_id "$best_id")"
 
     after_effective="$(get_dataset_effective_avail "$capacity_dataset" NO_CONSTRAINT_RECLAIM || true)"
     [[ "$after_effective" =~ ^[0-9]+$ ]] || return 1
@@ -5672,6 +5785,7 @@ queue_snapshot_delete_job() {
   job[ESTIMATED_RECLAIM_BYTES]="$estimated_reclaim"
   job[SEND_PROTECTED]="0"
   job[DELETE_SCOPE]="$delete_scope"
+  job[SEND_TRANSPORT]="$send_transport"
   job[RETRY_AT]="0"
 
   if [[ ( "$delete_scope" == "checkpoint" || "$delete_scope" == "destination_checkpoint" ) && -n "$send_schedule_job_id" ]]; then
@@ -5707,6 +5821,7 @@ latest_checkpoint_basename_for_schedule() {
   local schedule_job_id="$1"
   local result_var="$2"
   local prefix source_root dest_root snap_name snap_epoch snap_base newest_base="" newest_epoch=0
+  local transport="local"
   local -A common=()
 
   printf -v "$result_var" ''
@@ -5732,7 +5847,10 @@ latest_checkpoint_basename_for_schedule() {
     done < <(job_list_basenames_for_root "$source_root" "$prefix")
   fi
 
-  if [[ -n "$dest_root" ]] && dataset_exists "$dest_root"; then
+  transport="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  if [[ -n "$dest_root" ]] && { [[ "$transport" == "ssh" ]] || dataset_exists "$dest_root"; }; then
     while IFS=$'\t' read -r snap_name snap_epoch; do
       [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
       snap_base="${snap_name##*@}"
@@ -5741,7 +5859,7 @@ latest_checkpoint_basename_for_schedule() {
         newest_epoch="$snap_epoch"
         newest_base="$snap_base"
       fi
-    done < <(job_list_basenames_for_root "$dest_root" "$prefix")
+    done < <(job_list_basenames_for_root "$dest_root" "$prefix" "$transport")
   fi
 
   printf -v "$result_var" '%s' "$newest_base"

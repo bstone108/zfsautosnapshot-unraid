@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.02.01 (2026-11-02)
+
+- Cleaning up an old snapshot on a remote ZFS send destination no longer runs `zfs destroy` on the machine that is sending. List, destroy, rollback, and a reseed `destroy -r` for that destination go over SSH. A local destination still uses the local `zfs` command. A remote checkpoint that only exists on the receiver is no longer reported as "dataset does not exist" because the delete ran on the sender.
+- The once-a-minute queue check no longer treats a started array as stopped when Unraid's status report is long. Reading that report used to stop early with a broken-pipe error, so sends and deletes could sit paused even though the array was already up.
+- The 5-try, 5-minute send retry and automatic reseed are unchanged. Testing-only ZFS send debug markers are removed from the public package.
+
 ### 2026.11.01.01 (2026-11-01)
 
 - A failed dataset in a scheduled ZFS send no longer stops the rest of the schedule. That dataset stays failed, the window finishes as failed or partial, and the next scheduled window still runs for every dataset, including the one that failed. A failed job left in the queue after a reboot or upgrade is cleared on its own and cannot hold the schedule.
