@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.02.02 (2026-11-02)
+
+- Send-checkpoint cleanup no longer tries to delete a snapshot on a destination parent that was never received. Only snapshots that a direct listing of that dataset actually returned are deleted. If the snapshot or dataset is already gone, that delete counts as finished instead of failing three times. A snapshot list that fails is still not a reason to delete anything or reseed.
+- The 5-try, 5-minute send retry and automatic reseed are unchanged. Testing-only ZFS send debug markers stay out of the public package.
+
 ### 2026.11.02.01 (2026-11-02)
 
 - Cleaning up an old snapshot on a remote ZFS send destination no longer runs `zfs destroy` on the machine that is sending. List, destroy, rollback, and a reseed `destroy -r` for that destination go over SSH. A local destination still uses the local `zfs` command. A remote checkpoint that only exists on the receiver is no longer reported as "dataset does not exist" because the delete ran on the sender.

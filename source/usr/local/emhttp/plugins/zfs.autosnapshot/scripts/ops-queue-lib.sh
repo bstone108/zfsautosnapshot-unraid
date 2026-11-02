@@ -135,6 +135,7 @@ DELETE_QUEUE_INDEX_LOADED=0
 declare -A SEND_DATASET_SNAPSHOT_LINES_ASC=()
 declare -A SEND_DATASET_SNAPSHOT_LINES_DESC=()
 declare -A SEND_DATASET_SNAPSHOT_CACHE_TRANSPORT=()
+declare -A SEND_DATASET_SNAPSHOT_LISTING=()
 declare -A SEND_SNAPSHOT_CREATION_MAP=()
 declare -A SEND_SNAPSHOT_WRITTEN_MAP=()
 declare -A SEND_SNAPSHOT_USERREFS_MAP=()
@@ -156,6 +157,7 @@ SEND_PROTECTED_BASENAME_CACHE_LOADED=0
 log() {
   printf '%s %s\n' "$(date +'%Y-%m-%d %H:%M:%S %Z')" "$(zfsas_log_sanitize_text "$*")"
 }
+
 
 find_mdcmd() {
   local candidate candidates_raw
@@ -2505,6 +2507,7 @@ clear_send_cleanup_caches() {
   SEND_DATASET_SNAPSHOT_LINES_ASC=()
   SEND_DATASET_SNAPSHOT_LINES_DESC=()
   SEND_DATASET_SNAPSHOT_CACHE_TRANSPORT=()
+  SEND_DATASET_SNAPSHOT_LISTING=()
   SEND_SNAPSHOT_CREATION_MAP=()
   SEND_SNAPSHOT_WRITTEN_MAP=()
   SEND_SNAPSHOT_USERREFS_MAP=()
@@ -2528,7 +2531,7 @@ load_send_dataset_snapshot_cache() {
 load_send_dataset_snapshot_cache_for_transport() {
   local dataset="$1"
   local transport="${2:-local}"
-  local metadata snap property value asc_lines="" desc_lines="" listed_snap command
+  local metadata snap property value asc_lines="" desc_lines="" listed_snap command rc=0 err_file="" err_text=""
   local -A creation_map=()
 
   transport="${transport,,}"
@@ -2536,14 +2539,36 @@ load_send_dataset_snapshot_cache_for_transport() {
   if [[ -n "${SEND_DATASET_SNAPSHOT_LINES_ASC[$dataset]+set}" && "${SEND_DATASET_SNAPSHOT_CACHE_TRANSPORT[$dataset]:-local}" == "$transport" ]]; then
     return 0
   fi
+  # No -d/-r. A depth-1 get also returns child snapshots, and those basenames
+  # must not be treated as snapshots of a parent that was never received.
   if [[ "$transport" == "ssh" ]]; then
-    if build_ssh_zfs_command "zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg $(shell_quote_word "$dataset") 2>/dev/null" command; then
-      metadata="$(eval "$command" 2>/dev/null || true)"
-    else
-      metadata=""
+    if ! build_ssh_zfs_command "zfs get -H -p -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg -- $(shell_quote_word "$dataset")" command; then
+      return 1
     fi
+    run_ssh_send_command "list snapshots ${dataset}" "$command" metadata || rc=$?
   else
-    metadata="$(zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg "$dataset" 2>/dev/null || true)"
+    err_file="$(mktemp /tmp/zfsas-list-err.XXXXXX 2>/dev/null || true)"
+    if [[ -z "$err_file" ]]; then
+      err_file="/tmp/zfsas-list-err.$$"
+      : > "$err_file" || return 1
+    fi
+    metadata="$(zfs get -H -p -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg "$dataset" 2>"$err_file")" || rc=$?
+    err_text="$(cat "$err_file" 2>/dev/null || true)"
+    rm -f "$err_file" >/dev/null 2>&1 || true
+  fi
+  if (( rc != 0 )); then
+    if [[ "$transport" != "ssh" ]]; then
+      metadata="${err_text}"$'\n'"${metadata}"
+    fi
+    if (( rc == 10 )) || ssh_output_proves_dataset_absent "$metadata"; then
+      SEND_DATASET_SNAPSHOT_LINES_ASC["$dataset"]=""
+      SEND_DATASET_SNAPSHOT_LINES_DESC["$dataset"]=""
+      SEND_DATASET_SNAPSHOT_CACHE_TRANSPORT["$dataset"]="$transport"
+      SEND_DATASET_SNAPSHOT_LISTING["$dataset"]="absent"
+      return 0
+    fi
+    log "Snapshot listing for ${dataset} failed (exit ${rc}); not queueing deletes or a reseed from an unverified list."
+    return 1
   fi
 
   while IFS=$'\t' read -r snap property value; do
@@ -2591,6 +2616,7 @@ load_send_dataset_snapshot_cache_for_transport() {
   SEND_DATASET_SNAPSHOT_LINES_ASC["$dataset"]="$asc_lines"
   SEND_DATASET_SNAPSHOT_LINES_DESC["$dataset"]="$desc_lines"
   SEND_DATASET_SNAPSHOT_CACHE_TRANSPORT["$dataset"]="$transport"
+  SEND_DATASET_SNAPSHOT_LISTING["$dataset"]="ok"
 }
 
 send_snapshot_written_bytes_cached() {
@@ -3215,7 +3241,25 @@ list_snapshots_for_transport() {
     run_zfs_for_transport "$transport" "list snapshots ${dataset}" -- list -H -p -r -t snapshot -o name,creation -- "$dataset"
     return $?
   fi
-  run_zfs_for_transport "$transport" "list snapshots ${dataset}" -- list -H -p -d 1 -t snapshot -o name,creation -- "$dataset"
+  run_zfs_for_transport "$transport" "list snapshots ${dataset}" -- list -H -p -t snapshot -o name,creation -- "$dataset"
+}
+
+# 0 when a follow-up listing proves the snapshot or its dataset is gone.
+# A failed listing is not absence: the caller must keep the destroy failure.
+snapshot_confirmed_absent_for_transport() {
+  local transport="$1"
+  local snapshot="$2"
+  local output="" rc=0
+
+  output="$(run_zfs_for_transport "$transport" "confirm snapshot ${snapshot}" -- list -H -o name -t snapshot -- "$snapshot" 2>&1)" || rc=$?
+  if (( rc == 0 )); then
+    [[ "$output" == *"$snapshot"* ]] && return 1
+    return 0
+  fi
+  if (( rc == 10 )) || ssh_output_proves_dataset_absent "$output"; then
+    return 0
+  fi
+  return 1
 }
 
 destroy_snapshot_for_transport() {
@@ -3231,6 +3275,10 @@ destroy_snapshot_for_transport() {
     rc=0
     output="$(run_zfs_for_transport "$transport" "destroy ${snapshot}" -- destroy -- "$snapshot" 2>&1)" || rc=$?
     if (( rc == 0 )); then
+      return 0
+    fi
+    if ssh_output_proves_dataset_absent "$output" && snapshot_confirmed_absent_for_transport "$transport" "$snapshot"; then
+      log "Delete already done for ${snapshot}; it is not on this destination."
       return 0
     fi
     if (( attempt >= max_attempts )); then
@@ -3506,13 +3554,13 @@ read_member_snapshot_inventory() {
   [[ -n "$transport" ]] || transport="local"
   is_valid_dataset_name "$dataset" || return 1
   if [[ "$transport" == "ssh" ]]; then
-    build_ssh_zfs_command "zfs list -H -p -s creation -t snapshot -o name,creation -d 1 -- $(shell_quote_word "$dataset")" command || return 1
+    build_ssh_zfs_command "zfs list -H -p -s creation -t snapshot -o name,creation -- $(shell_quote_word "$dataset")" command || return 1
     run_ssh_send_command "list remote snapshots ${dataset}" "$command" output || return $?
     printf -v "$result_var" '%s' "$output"
     return 0
   fi
   if [[ "$transport" == "local" ]]; then
-    output="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$dataset" 2>/dev/null)" || rc=$?
+    output="$(zfs list -H -p -t snapshot -o name,creation "$dataset" 2>/dev/null)" || rc=$?
     if (( rc != 0 )); then
       return "$rc"
     fi
@@ -4399,7 +4447,7 @@ load_common_base_snapshot_sides() {
   fi
   SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT="$count_text"
 
-  loaded_source="$(zfs list -H -p -t snapshot -o name,creation -d 1 "$source_dataset" 2>/dev/null)" || source_rc=$?
+  loaded_source="$(zfs list -H -p -t snapshot -o name,creation "$source_dataset" 2>/dev/null)" || source_rc=$?
   if (( source_rc != 0 )); then
     log "Source snapshot listing for ${source_dataset} failed (exit ${source_rc}); not treating that as a missing send checkpoint."
     SEND_COMMON_BASE_LISTING="failed"
@@ -4459,11 +4507,13 @@ find_latest_common_basename_for_member_transport() {
 
   while IFS=$'\t' read -r snap_name snap_epoch; do
     [[ -n "$snap_name" && "$snap_epoch" =~ ^[0-9]+$ ]] || continue
+    [[ "${snap_name%@*}" == "$dest_dataset" ]] || continue
     dest_basenames["${snap_name##*@}"]="$snap_epoch"
   done <<< "$dest_inventory"
 
   while IFS=$'\t' read -r snap_name snap_epoch; do
     [[ -n "$snap_name" && "$snap_epoch" =~ ^[0-9]+$ ]] || continue
+    [[ "${snap_name%@*}" == "$source_dataset" ]] || continue
     snap_base="${snap_name##*@}"
     if [[ -n "${dest_basenames[$snap_base]:-}" ]]; then
       printf -v "$result_name_var" '%s' "$snap_base"
@@ -4492,11 +4542,13 @@ find_latest_common_snapshot_for_target_transport() {
 
   while IFS=$'\t' read -r snap_name snap_epoch; do
     [[ -n "$snap_name" && "$snap_name" == *"@"* && "$snap_epoch" =~ ^[0-9]+$ ]] || continue
+    [[ "${snap_name%@*}" == "$dest_dataset" ]] || continue
     dest_map["${snap_name##*@}"]=1
   done <<< "$dest_raw"
 
   while IFS=$'\t' read -r snap_name snap_epoch; do
     [[ -n "$snap_name" && "$snap_name" == *"@"* && "$snap_epoch" =~ ^[0-9]+$ ]] || continue
+    [[ "${snap_name%@*}" == "$source_dataset" ]] || continue
     snap_base="${snap_name##*@}"
     if [[ -n "${dest_map[$snap_base]:-}" ]]; then
       latest_common="$snap_base"
@@ -5870,7 +5922,9 @@ list_existing_destination_datasets_for_schedule() {
   local dest_root include_children transport dataset datasets=""
 
   if [[ -n "${SEND_DESTINATION_DATASETS_BY_SCHEDULE[$schedule_job_id]+set}" ]]; then
-    printf '%s' "${SEND_DESTINATION_DATASETS_BY_SCHEDULE[$schedule_job_id]}"
+    if [[ -n "${SEND_DESTINATION_DATASETS_BY_SCHEDULE[$schedule_job_id]}" ]]; then
+      printf '%s\n' "${SEND_DESTINATION_DATASETS_BY_SCHEDULE[$schedule_job_id]}"
+    fi
     return 0
   fi
 
@@ -5879,34 +5933,65 @@ list_existing_destination_datasets_for_schedule() {
   transport="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
   transport="${transport,,}"
   [[ -n "$transport" ]] || transport="local"
+  if [[ "$transport" == "spiped" ]]; then
+    SEND_DESTINATION_DATASETS_BY_SCHEDULE["$schedule_job_id"]=""
+    return 0
+  fi
   if [[ "$transport" == "ssh" ]]; then
     while IFS= read -r dataset; do
       [[ -n "$dataset" ]] || continue
       datasets+="${dataset}"$'\n'
     done < <(ssh_dataset_tree_inventory "$dest_root" "$include_children" || true)
-    SEND_DESTINATION_DATASETS_BY_SCHEDULE["$schedule_job_id"]="$datasets"
-    printf '%s' "$datasets"
-    return 0
+  elif [[ -n "$dest_root" ]] && dataset_exists "$dest_root"; then
+    if [[ "$include_children" == "1" ]]; then
+      while IFS= read -r dataset; do
+        [[ -n "$dataset" ]] || continue
+        datasets+="${dataset}"$'\n'
+      done < <(zfs list -H -o name -t filesystem,volume -r "$dest_root" 2>/dev/null || true)
+    else
+      datasets="${dest_root}"$'\n'
+    fi
   fi
-  if [[ "$transport" == "spiped" ]]; then
-    SEND_DESTINATION_DATASETS_BY_SCHEDULE["$schedule_job_id"]=""
-    return 0
-  fi
-  if [[ -z "$dest_root" ]] || ! dataset_exists "$dest_root"; then
-    SEND_DESTINATION_DATASETS_BY_SCHEDULE["$schedule_job_id"]=""
-    return 0
-  fi
-
-  if [[ "$include_children" == "1" ]]; then
-    while IFS= read -r dataset; do
-      [[ -n "$dataset" ]] || continue
-      datasets+="${dataset}"$'\n'
-    done < <(zfs list -H -o name -t filesystem,volume -r "$dest_root" 2>/dev/null || true)
-  else
-    datasets="${dest_root}"$'\n'
+  # The destination root is often an empty parent that was never received.
+  # Do not invent it. Keep only datasets a successful existence check returns,
+  # including children that were received under a missing parent.
+  if [[ -z "$datasets" ]]; then
+    datasets="$(existing_mapped_destination_datasets "$schedule_job_id" "$transport")"
   fi
 
   SEND_DESTINATION_DATASETS_BY_SCHEDULE["$schedule_job_id"]="$datasets"
+  if [[ -n "$datasets" ]]; then
+    printf '%s\n' "$datasets"
+  fi
+}
+
+existing_mapped_destination_datasets() {
+  local schedule_job_id="$1"
+  local transport="${2:-local}"
+  local source_root dest_root include_children source_dataset relative dest_dataset datasets=""
+
+  source_root="${SCHEDULE_SOURCE_ROOT[$schedule_job_id]:-}"
+  dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
+  include_children="${SCHEDULE_INCLUDE_CHILDREN[$schedule_job_id]:-0}"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  [[ -n "$source_root" && -n "$dest_root" ]] || return 0
+
+  while IFS= read -r source_dataset; do
+    [[ -n "$source_dataset" ]] || continue
+    if [[ "$source_dataset" == "$source_root" ]]; then
+      dest_dataset="$dest_root"
+    else
+      relative="${source_dataset#"${source_root}"/}"
+      dest_dataset="${dest_root}/${relative}"
+    fi
+    if [[ "$transport" == "ssh" ]]; then
+      ssh_dataset_exists "$dest_dataset" || continue
+    else
+      dataset_exists "$dest_dataset" || continue
+    fi
+    datasets+="${dest_dataset}"$'\n'
+  done < <(list_tree_datasets "$source_root" "$include_children")
   printf '%s' "$datasets"
 }
 
@@ -5996,7 +6081,10 @@ queue_destination_retention_for_dataset() {
   else
     dataset_exists "$dataset" || return 0
   fi
-  load_send_dataset_snapshot_cache_for_transport "$dataset" "$transport"
+  if ! load_send_dataset_snapshot_cache_for_transport "$dataset" "$transport"; then
+    log "Skipping destination retention for ${dataset}; the snapshot listing did not succeed, so nothing will be deleted or reseeded."
+    return 0
+  fi
 
   keep_all_seconds="$(send_retention_keep_all_seconds)"
   keep_daily_seconds="$(send_retention_keep_daily_until_seconds)"
