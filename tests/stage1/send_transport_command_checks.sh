@@ -156,7 +156,7 @@ case "$remote_command" in
     printf '%s\n' "0"
     exit 0
     ;;
-  *"zfs list -H -p -s creation -t snapshot -o name,creation -d 1 -- backup/data"*)
+  *"zfs list -H -p -s creation -t snapshot -o name,creation -- backup/data"*)
     printf '%s\t%s\n' \
       "backup/data@manual-remote-snapshot" "25" \
       "backup/data@zfs-send-feedfacecafe-ancient" "50" \
@@ -165,7 +165,7 @@ case "$remote_command" in
       "backup/data@manual-zero-newer" "120"
     exit 0
     ;;
-  *"zfs get -H -p -d 1 -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg backup/data"*)
+  *"zfs get -H -p -o name,property,value -t snapshot creation,written,userrefs,clones,guid,createtxg -- backup/data"*)
     for snap in backup/data@manual-remote-snapshot backup/data@zfs-send-feedfacecafe-ancient backup/data@zfs-send-feedfacecafe-old backup/data@manual-zero-older backup/data@manual-zero-newer; do
       case "$snap" in
         *@manual-remote-snapshot) creation=25; written=16384; guid=100; txg=10 ;;

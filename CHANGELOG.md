@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.02.t01 (Testing Branch Only)
+
+- Send-checkpoint cleanup no longer tries to delete a snapshot on a destination parent that was never received. Only snapshots that a direct listing of that dataset actually returned are deleted. If the snapshot or dataset is already gone, that delete counts as finished instead of failing three times. A snapshot list that fails is still not a reason to delete anything or reseed.
+
 ### 2026.11.01.t03 (Testing Branch Only)
 
 - The once-a-minute queue check no longer treats a started array as stopped when Unraid's status report is long. Reading that report used to stop early with a broken-pipe error, so sends and deletes could sit paused even though the array was already up.
