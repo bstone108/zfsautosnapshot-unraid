@@ -399,6 +399,45 @@ test_unreadable_status_log_is_rate_limited() {
   fi
 }
 
+test_large_mdcmd_status_does_not_sigpipe() {
+  local case_dir="${TEST_ROOT}/large"
+  local bin="${case_dir}/bin"
+  local status="${case_dir}/status.txt"
+  mkdir -p "$bin"
+  python3 - "$status" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write("".join(f"disk{i}=x\n" for i in range(200000)))
+    handle.write('mdState="STARTED"\n')
+    handle.write("fsState=Started\n")
+PY
+  cat > "${bin}/mdcmd" <<EOF
+#!/bin/bash
+cat "$status"
+EOF
+  chmod 755 "${bin}/mdcmd"
+  local output
+  output="$(run_lib /usr/bin:/bin '
+    set -Eeuo pipefail
+    source "$1"
+    if unraid_array_actionable; then
+      printf "actionable=0\n"
+    else
+      printf "actionable=1\n"
+    fi
+    printf "md=%s\n" "$(unraid_actionable_state_value mdState || true)"
+  ' \
+    "ZFSAS_PROC_MDCMD=${case_dir}/missing-proc" \
+    "ZFSAS_UNRAID_VAR_INI=${case_dir}/missing-var" \
+    "ZFSAS_MDCMD_CANDIDATES=${bin}/mdcmd")"
+  assert_contains "$output" "actionable=0" "a started array with a large mdcmd dump must stay actionable"
+  assert_contains "$output" "md=started" "quoted STARTED after a large mdcmd dump must still be read"
+  if grep -Fq 'printf '"'"'%s\n'"'"' "$status_text" | extract_status_value' "$LIB"; then
+    fail "array status parsing must not pipe printf into head/awk; that exits 141 under pipefail"
+  fi
+}
+
 test_path_extension_and_static_contract
 echo "PASS: cron PATH extension"
 
@@ -425,3 +464,6 @@ echo "PASS: explicit non-actionable array states stay paused"
 
 test_unreadable_status_log_is_rate_limited
 echo "PASS: unreadable array state log is rate-limited"
+
+test_large_mdcmd_status_does_not_sigpipe
+echo "PASS: large mdcmd status does not break the array check"

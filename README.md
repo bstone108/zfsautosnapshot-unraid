@@ -139,8 +139,6 @@ Because it verifies the copy, it can be slow. That is expected.
 
 Stop any watchdogs or outside tools that might restart containers before you use it. If something relaunches containers during the migration, the tool may abort to avoid an unsafe copy. If free space runs low, the migration can pause and wait for you to free enough space before continuing.
 
-If a migration is interrupted, Unraid raises an alert. Apps may not function properly until the migration finishes. The migration resumes in about 15 minutes from a flag stored with the plugin config on the boot drive, and the once-a-minute queue check starts it again when the migrator is not already running. Until that finishes, ignore non-functioning apps caused by the incomplete migration. Folders that were mid-move keep the original folder name in a recognizable temporary name so the restart can tell which folder was being migrated.
-
 ## Snapshot Manager
 
 Snapshot Manager is still a preview feature. It shows dataset-level snapshot summaries and can load a dataset's snapshots when you choose to manage it. It has manual actions such as take snapshot, delete selected snapshots, hold, and release.
@@ -221,6 +219,32 @@ To reproduce a package locally:
 ```bash
 ./scripts/build-release.sh <version> <base_url>
 ```
+
+## Running tests
+
+`tests/run_harness.py` is the repository harness. It was recovered from Kira's Hermes workspace (`/opt/data/workspace/Projects/zfsautosnapshot-unraid-harness`, 2026-05-15) and now lives in this repo. GitHub Actions runs it on every pull request as part of Verify Package, before the in-tree package build. A clean tree is required in CI (`--strict-clean`). A dirty tree is allowed when checking a patch locally.
+
+```bash
+python3 tests/run_harness.py
+```
+
+That run checks repository shape, `php -l`, `bash -n`, `shellcheck -S error`, the regression contracts, an isolated package build, and `tests/stage1`. The stage 1 scripts stub `zfs` and `ssh` and check send, delete, and schedule behavior without a real pool. A few migrator cases expect to run as root, so the harness uses `sudo` when it is not already root. PHP, shellcheck, shfmt, xmllint, and jq are required (`php-cli`, `shellcheck`, `shfmt`, `libxml2-utils`, `jq`).
+
+To run only stage 1:
+
+```bash
+sudo bash tests/stage1/run.sh
+```
+
+What that run covers:
+
+- Destination `list`, `destroy`, `rollback`, and reseed `destroy -r` go over SSH for a remote destination and stay local for a local one (`send_destination_transport_checks.sh`).
+- A failed or empty remote snapshot list is not a reseed, and a failed send step is retried 5 times with the wait only after a failure (`send_remote_retry_and_listing_checks.sh`).
+- A confirmed destination mismatch triggers a reseed (`send_remote_retry_and_listing_checks.sh`).
+- A failed member job does not block the next schedule window (`send_schedule_failure_window_checks.sh`).
+- A daylight-saving fall-back hour does not open a second window (`send_schedule_failure_window_checks.sh`).
+- A long Unraid array-status report does not make a started array look stopped (`unraid_array_status_checks.sh`).
+- Low-space cleanup still picks the oldest snapshot when the list is long, and the cron file stays in Unraid's no-username format (`history_regression_checks.sh`).
 
 ## License
 
