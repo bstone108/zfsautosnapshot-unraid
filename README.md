@@ -245,6 +245,7 @@ What that run covers:
 - A daylight-saving fall-back hour does not open a second window (`send_schedule_failure_window_checks.sh`).
 - A long Unraid array-status report does not make a started array look stopped (`unraid_array_status_checks.sh`).
 - Retention does not delete a checkpoint on a destination parent that was never received, for both local and SSH destinations (`send_missing_parent_retention_checks.sh`).
+- Retention lists and destroys a checkpoint that exists only on the SSH receiver, a failed remote listing does not delete or reseed, and the confirmed-absent check asks the receiver (`send_remote_retention_host_checks.sh`).
 - Low-space cleanup still picks the oldest snapshot when the list is long, and the cron file stays in Unraid's no-username format (`history_regression_checks.sh`).
 
 ## License
