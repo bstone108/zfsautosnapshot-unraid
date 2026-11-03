@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.03.t01 (Testing Branch Only)
+
+- Old send checkpoints on a remote destination are deleted on that destination. The plugin was checking the sending machine, deciding the snapshot was already gone, and leaving it on the receiver. A snapshot list that fails still does not delete anything or reseed. A local destination is unchanged.
+
 ### 2026.11.02.t01 (Testing Branch Only)
 
 - Send-checkpoint cleanup no longer tries to delete a snapshot on a destination parent that was never received. Only snapshots that a direct listing of that dataset actually returned are deleted. If the snapshot or dataset is already gone, that delete counts as finished instead of failing three times. A snapshot list that fails is still not a reason to delete anything or reseed.

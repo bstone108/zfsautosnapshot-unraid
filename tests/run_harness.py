@@ -533,6 +533,7 @@ class Harness:
             "history_regression_checks.sh",
             "unraid_array_status_checks.sh",
             "send_missing_parent_retention_checks.sh",
+            "send_remote_retention_host_checks.sh",
         ]
         missing = [name for name in required if name not in run_sh or not (self.repo / "tests/stage1" / name).exists()]
         if missing:

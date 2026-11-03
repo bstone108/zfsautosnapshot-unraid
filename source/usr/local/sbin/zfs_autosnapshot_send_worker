@@ -807,6 +807,7 @@ build_resume_members_for_current_job() {
   local source_root dest_root include_children basename source_dataset destination_dataset relative
   local member_index=0
   local needs_resume=0
+  local send_transport
 
   source_root="$(job_get job SOURCE_ROOT)"
   dest_root="$(job_get job DESTINATION_ROOT)"
@@ -814,6 +815,9 @@ build_resume_members_for_current_job() {
   basename="$(job_get job SOURCE_SNAPSHOT_NAME)"
 
   [[ -n "$source_root" && -n "$dest_root" && -n "$basename" ]] || return 1
+  send_transport="$(job_get job SEND_TRANSPORT local)"
+  send_transport="${send_transport,,}"
+  [[ -n "$send_transport" ]] || send_transport="local"
   source_snapshot_exists_for_basename "$source_root" "$basename" || return 1
 
   while IFS= read -r source_dataset; do
@@ -825,7 +829,7 @@ build_resume_members_for_current_job() {
       destination_dataset="${dest_root}/${relative}"
     fi
 
-    if dataset_has_snapshot_basename "$destination_dataset" "$basename"; then
+    if dataset_has_snapshot_basename "$destination_dataset" "$basename" "$send_transport"; then
       continue
     fi
 
@@ -1590,7 +1594,7 @@ process_pool_prep_job() {
   for schedule_job_id in $schedule_ids; do
     dest_root="${SCHEDULE_DEST_ROOT[$schedule_job_id]:-}"
     [[ -n "$dest_root" ]] || continue
-    capacity_dataset="$(nearest_existing_dataset_ancestor "$dest_root")"
+    capacity_dataset="$(nearest_existing_dataset_ancestor_for_transport "$dest_root" "$send_transport" || true)"
     [[ -n "$capacity_dataset" ]] || continue
     queue_pool_free_space_cleanup_for_schedule "$schedule_job_id" "$capacity_dataset" planned_reclaim || true
   done
