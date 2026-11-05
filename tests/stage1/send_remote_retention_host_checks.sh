@@ -186,6 +186,11 @@ EOF
   cat > "${PATH%%:*}/ssh" <<'EOF'
 #!/bin/bash
 printf 'SSH %s\n' "$*" >> "${SSH_LOG:?}"
+# OpenSSH reads the caller's stdin unless -n is set. Drain it so a while-read
+# loop cannot hide a missing -n. A tty is left alone so a local run does not block.
+if [[ " $* " != *" -n "* ]] && [[ ! -t 0 ]]; then
+  cat >/dev/null || true
+fi
 remote="${*: -1}"
 dataset="${remote##* }"
 dataset="${dataset//\'/}"

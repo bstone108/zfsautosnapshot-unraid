@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.05.t02 (Testing Branch Only)
+
+- One retention pass now deletes every old send checkpoint on a remote recursive destination, including checkpoints that exist only on the receiver. The previous testing build found those checkpoints but a remote command read the same input as the snapshot list, so each pass removed about one checkpoint per dataset. The newest checkpoint both sides still share is kept.
+
 ### 2026.11.05.t01 (Testing Branch Only)
 
 - A recursive ZFS send now deletes old checkpoints on the destination parent and on each child, including checkpoints that exist only on the destination. The newest checkpoint both sides still share is kept, so the next incremental send still has a base. That cleanup runs again after each dataset is sent, which is where those destination checkpoints were being seen and then left in place.

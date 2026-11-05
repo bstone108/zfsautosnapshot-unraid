@@ -151,6 +151,11 @@ write_ssh_stub() {
   cat > "${PATH%%:*}/ssh" <<EOF
 #!/bin/bash
 printf 'ssh %s\n' "\$*" >> "\${SSH_LOG:?}"
+# OpenSSH reads the caller's stdin unless -n is set. Drain it so a while-read
+# loop cannot hide a missing -n. A tty is left alone so a local run does not block.
+if [[ " \$* " != *" -n "* ]] && [[ ! -t 0 ]]; then
+  cat >/dev/null || true
+fi
 remote="\${*: -1}"
 dataset="\${remote##* }"
 if [[ "\$remote" == *" -d 1 "* && "\$dataset" == "${PARENT}" ]]; then
