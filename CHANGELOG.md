@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.05.t01 (Testing Branch Only)
+
+- A recursive ZFS send now deletes old checkpoints on the destination parent and on each child, including checkpoints that exist only on the destination. The newest checkpoint both sides still share is kept, so the next incremental send still has a base. That cleanup runs again after each dataset is sent, which is where those destination checkpoints were being seen and then left in place.
+- Starting a manual send while the same job is already being queued no longer starts a second copy of that run. If a full send was planned and the destination has since received a checkpoint, the transfer switches to an incremental or does nothing when that checkpoint is already there. A destination that answers "destination has snapshots" is not retried for the full five-attempt, five-minute cycle.
+- Installing this plugin replaces the package on disk when the recorded package is a different build. Previously, installing another build could update only the plugin version text and leave the older scripts in place.
+
 ### 2026.11.03.t01 (Testing Branch Only)
 
 - Old send checkpoints on a remote destination are deleted on that destination. The plugin was checking the sending machine, deciding the snapshot was already gone, and leaving it on the receiver. A snapshot list that fails still does not delete anything or reseed. A local destination is unchanged.

@@ -2439,6 +2439,52 @@ release_pool_prep_lock() {
   rm -rf "$(prep_lock_dir_for_pool "$pool")" >/dev/null 2>&1 || true
 }
 
+schedule_enqueue_lock_dir() {
+  local schedule_job_id="$1"
+  printf '%s/schedule-enqueue-%s.lockdir' "$RUNTIME_DIR" "$(queue_safe_token "$schedule_job_id")"
+}
+
+# One manual or scheduled enqueue may create a run for a schedule at a time.
+# The lock closes the gap before the new job file exists, which is the window
+# where a second kicker would otherwise start a duplicate full send.
+acquire_schedule_enqueue_lock() {
+  local schedule_job_id="$1"
+  local lock_dir pid_file pid
+
+  [[ -n "$schedule_job_id" ]] || return 1
+  mkdir -p "$RUNTIME_DIR" >/dev/null 2>&1 || true
+  lock_dir="$(schedule_enqueue_lock_dir "$schedule_job_id")"
+  pid_file="${lock_dir}/pid"
+
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" > "$pid_file" 2>/dev/null || true
+    return 0
+  fi
+
+  pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+  if ! process_alive "$pid"; then
+    rm -rf "$lock_dir" >/dev/null 2>&1 || true
+    if mkdir "$lock_dir" 2>/dev/null; then
+      printf '%s\n' "$$" > "$pid_file" 2>/dev/null || true
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+release_schedule_enqueue_lock() {
+  local schedule_job_id="$1"
+  local lock_dir pid
+
+  [[ -n "$schedule_job_id" ]] || return 0
+  lock_dir="$(schedule_enqueue_lock_dir "$schedule_job_id")"
+  [[ -d "$lock_dir" ]] || return 0
+  pid="$(sed -n '1p' "${lock_dir}/pid" 2>/dev/null || true)"
+  [[ -z "$pid" || "$pid" == "$$" ]] || return 0
+  rm -rf "$lock_dir" >/dev/null 2>&1 || true
+}
+
 autosnapshot_run_active() {
   local pid=""
 
@@ -3893,6 +3939,15 @@ send_failure_text_needs_full_resend() {
   return 1
 }
 
+# A full send into a dataset that already has snapshots is rejected by
+# zfs receive. Retrying that same full stream cannot succeed.
+send_failure_text_is_destination_snapshot_conflict() {
+  local text="$1"
+  local lower
+  lower="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
+  [[ "$lower" == *"destination has snapshots"* ]]
+}
+
 send_pipeline_reset_full_resend_state() {
   SEND_PIPELINE_NEEDS_FULL_RESEND=0
   SEND_PIPELINE_FAILURE_DETAIL=""
@@ -4143,16 +4198,17 @@ run_pipeline_with_status_once() {
       return 1
     fi
   else
+    send_pipeline_capture_begin
     if (( progress_supported == 1 )); then
       if [[ -n "$rate_limiter_command" ]]; then
-        zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$rate_limiter_command" | eval "$receive_command"
+        zfs send "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$rate_limiter_command" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         meter_rc=${pipeline_status[1]:-0}
         rate_rc=${pipeline_status[2]:-0}
         receive_rc=${pipeline_status[3]:-0}
       else
-        zfs send "$snapshot" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command"
+        zfs send "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | dd bs=4M status=progress 2> >(monitor_dd_zfs_send_progress "$progress_total_bytes" "$progress_start_percent" "$progress_end_percent") | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         meter_rc=${pipeline_status[1]:-0}
@@ -4160,13 +4216,13 @@ run_pipeline_with_status_once() {
       fi
     else
       if [[ -n "$rate_limiter_command" ]]; then
-        zfs send "$snapshot" | eval "$rate_limiter_command" | eval "$receive_command"
+        zfs send "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | eval "$rate_limiter_command" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         rate_rc=${pipeline_status[1]:-0}
         receive_rc=${pipeline_status[2]:-0}
       else
-        zfs send "$snapshot" | eval "$receive_command"
+        zfs send "$snapshot" 2>>"$SEND_PIPELINE_STDERR_FILE" | eval "$receive_command" 2>>"$SEND_PIPELINE_STDERR_FILE"
         pipeline_status=("${PIPESTATUS[@]}")
         send_rc=${pipeline_status[0]:-0}
         receive_rc=${pipeline_status[1]:-0}
@@ -4177,9 +4233,15 @@ run_pipeline_with_status_once() {
     (( meter_rc != 0 )) && pipeline_rc=$meter_rc
     (( rate_rc != 0 )) && pipeline_rc=$rate_rc
     (( receive_rc != 0 )) && pipeline_rc=$receive_rc
+    pipeline_detail="$(send_pipeline_capture_text)"
     if (( pipeline_rc != 0 )); then
       log "Send pipeline failed: mode=full snapshot=${snapshot} destination=${destination} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
       zfsas_send_debug_marker "pipeline_failed mode=full snapshot=${snapshot} destination=${destination} pipeline_exit=${pipeline_rc} send_exit=${send_rc} meter_exit=${meter_rc} rate_exit=${rate_rc} receive_exit=${receive_rc}"
+      if send_failure_text_is_destination_snapshot_conflict "$pipeline_detail"; then
+        SEND_PIPELINE_PERMANENT_FAILURE=1
+        log "Full send was rejected because ${destination} already has snapshots. The same full send will not be retried."
+        zfsas_send_debug_marker "pipeline_permanent_destination_snapshots snapshot=${snapshot} destination=${destination}"
+      fi
       return 1
     fi
   fi
@@ -4668,6 +4730,37 @@ find_latest_common_basename_for_member_transport() {
     fi
   done <<< "$source_inventory"
   zfsas_send_debug_marker "latest_common_scan source=${source_dataset} destination=${dest_dataset} prefix=${prefix} transport=${transport} source_matches=${source_count} destination_matches=${dest_count} listing=${SEND_COMMON_BASE_LISTING} destination_snapshots=${SEND_COMMON_BASE_DEST_SNAPSHOT_COUNT} latest_common=${!result_name_var:-none}"
+  return 0
+}
+
+# A preflight may have planned a full send before another run of the same job
+# received a checkpoint. Prints "skip" when the requested snapshot is already
+# the newest common checkpoint, the base snapshot name when an incremental is
+# possible, or nothing when a full send is still the right plan.
+# Returns non-zero when the snapshot listing was not confirmed.
+reselect_stale_full_send_base() {
+  local source_dataset="$1"
+  local destination="$2"
+  local snapshot="$3"
+  local prefix="$4"
+  local transport="${5:-local}"
+  local result_var="$6"
+  local basename latest=""
+
+  printf -v "$result_var" ''
+  basename="${snapshot##*@}"
+  transport="${transport,,}"
+  [[ -n "$transport" ]] || transport="local"
+  if ! find_latest_common_basename_for_member_transport "$source_dataset" "$destination" "$prefix" latest "$transport"; then
+    return 1
+  fi
+  if [[ -n "$latest" && "$latest" == "$basename" ]]; then
+    printf -v "$result_var" 'skip'
+    return 0
+  fi
+  if [[ -n "$latest" ]]; then
+    printf -v "$result_var" '%s' "${source_dataset}@${latest}"
+  fi
   return 0
 }
 
@@ -5299,6 +5392,14 @@ enqueue_scheduled_send_jobs_due() {
   done
 
   for job_id in "${due_jobs[@]}"; do
+    if ! acquire_schedule_enqueue_lock "$job_id"; then
+      log "Skipping scheduled send ${job_id}; another manual or scheduled enqueue is already creating this run."
+      continue
+    fi
+    if schedule_job_blocked "$job_id"; then
+      release_schedule_enqueue_lock "$job_id"
+      continue
+    fi
     pool="${due_pool[$job_id]}"
     send_transport="${due_transport[$job_id]:-local}"
     prep_job_id="$(pool_prep_job_id_for_group "$pool" "$run_group_id" "$send_transport")"
@@ -5309,6 +5410,7 @@ enqueue_scheduled_send_jobs_due() {
       enqueue_scheduled_prepare_job "$job_id" "${due_window[$job_id]}" "$requested_epoch" "$requested_at" \
         "$prep_job_id" "$pool" "$run_group_id" "1" "Queued by schedule." || true
     fi
+    release_schedule_enqueue_lock "$job_id"
   done
 
   return 0
@@ -6083,7 +6185,7 @@ latest_checkpoint_basename_for_schedule() {
 
 list_existing_destination_datasets_for_schedule() {
   local schedule_job_id="$1"
-  local dest_root include_children transport dataset datasets=""
+  local dest_root include_children transport dataset datasets="" mapped="" merged=""
 
   if [[ -n "${SEND_DESTINATION_DATASETS_BY_SCHEDULE[$schedule_job_id]+set}" ]]; then
     if [[ -n "${SEND_DESTINATION_DATASETS_BY_SCHEDULE[$schedule_job_id]}" ]]; then
@@ -6117,10 +6219,20 @@ list_existing_destination_datasets_for_schedule() {
     fi
   fi
   # The destination root is often an empty parent that was never received.
-  # Do not invent it. Keep only datasets a successful existence check returns,
-  # including children that were received under a missing parent.
-  if [[ -z "$datasets" ]]; then
-    datasets="$(existing_mapped_destination_datasets "$schedule_job_id" "$transport")"
+  # Do not invent it. A recursive inventory can also come back with only the
+  # parent, so merge children that a direct existence check can see. Those
+  # children are where destination-only send checkpoints pile up.
+  mapped="$(existing_mapped_destination_datasets "$schedule_job_id" "$transport")"
+  if [[ -n "$mapped" ]]; then
+    declare -A seen_destinations=()
+    merged=""
+    while IFS= read -r dataset; do
+      [[ -n "$dataset" ]] || continue
+      [[ -z "${seen_destinations[$dataset]:-}" ]] || continue
+      seen_destinations["$dataset"]=1
+      merged+="${dataset}"$'\n'
+    done < <(printf '%s\n%s\n' "$datasets" "$mapped")
+    datasets="$merged"
   fi
 
   SEND_DESTINATION_DATASETS_BY_SCHEDULE["$schedule_job_id"]="$datasets"
@@ -6448,7 +6560,8 @@ queue_pool_retention_cleanup() {
     latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
     while IFS= read -r dataset; do
       [[ -n "$dataset" ]] || continue
-      queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" "$capacity_dataset" "$delta_map_name"
+      # One dataset returning non-zero must not skip the rest of a recursive tree.
+      queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" "$capacity_dataset" "$delta_map_name" || true
     done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
   done < <(list_schedule_job_ids_for_destination_pool "$pool")
 }
@@ -6532,8 +6645,22 @@ queue_schedule_retention_cleanup() {
   latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
   while IFS= read -r dataset; do
     [[ -n "$dataset" ]] || continue
-    queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention"
+    queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" || true
   done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+}
+
+# Retention owns send-checkpoint deletion. Zero-change cleanup runs on the same
+# destination list after a member send and deliberately leaves those checkpoints
+# alone, so the retention pass has to run there too. Pool prep is not the only
+# chance: a recursive member is the path that has already listed the destination.
+queue_schedule_post_send_cleanup_for_dataset() {
+  local schedule_job_id="$1"
+  local dataset="$2"
+  local newest_send_basename="$3"
+
+  [[ -n "$schedule_job_id" && -n "$dataset" && -n "$newest_send_basename" ]] || return 1
+  queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" || true
+  queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change" || true
 }
 
 queue_schedule_zero_change_cleanup() {

@@ -212,6 +212,39 @@ current_send_plan_matches() {
   return 0
 }
 
+# A full-send plan goes stale when another run of this job receives a checkpoint
+# after preflight. Returns 0 and updates the base/description namerefs, 2 when
+# the requested snapshot is already the common checkpoint, 1 when the listing
+# was not confirmed.
+refresh_stale_full_send_plan() {
+  local source_dataset="$1"
+  local destination="$2"
+  local snapshot="$3"
+  local prefix="$4"
+  local base_var="$5"
+  local description_var="$6"
+  local resolved=""
+  # shellcheck disable=SC2178
+  local -n base_ref="$base_var"
+  # shellcheck disable=SC2178
+  local -n description_ref="$description_var"
+
+  [[ -z "${base_ref:-}" ]] || return 0
+  if ! reselect_stale_full_send_base "$source_dataset" "$destination" "$snapshot" "$prefix" "$(current_send_transport)" resolved; then
+    return 1
+  fi
+  if [[ "$resolved" == "skip" ]]; then
+    return 2
+  fi
+  if [[ -n "$resolved" ]]; then
+    base_ref="$resolved"
+    description_ref="Incremental send ${resolved} -> ${snapshot} -> ${destination}"
+    log "Replacing a stale full send with an incremental from ${resolved}."
+    zfsas_send_debug_marker "stale_full_send_reselected source=${source_dataset} destination=${destination} snapshot=${snapshot} base=${resolved}"
+  fi
+  return 0
+}
+
 effective_job_action() {
   local assoc_name="$1"
   # shellcheck disable=SC2178
@@ -1074,7 +1107,7 @@ queue_child_send_jobs() {
 send_member_snapshot() {
   local member_index="$1"
   local member_count="$2"
-  local source_dataset destination snapshot basename latest_common description progress failure_message base_snapshot send_transport
+  local source_dataset destination snapshot basename latest_common description progress failure_message base_snapshot send_transport refresh_rc
   local destination_parent source_exists=0 destination_exists=0 parent_exists=0 readiness_message
   local source_type="" destination_type="" dest_snap_rc=0 verified_dest_snapshots=0
 
@@ -1185,6 +1218,21 @@ send_member_snapshot() {
         description="Full send ${snapshot} -> ${destination}"
       fi
     fi
+    refresh_rc=0
+    refresh_stale_full_send_plan "$source_dataset" "$destination" "$snapshot" "$(job_get job SNAPSHOT_PREFIX)" base_snapshot description || refresh_rc=$?
+    case "$refresh_rc" in
+      2)
+        log "Destination already has ${destination}@${basename}; skipping receive for this member."
+        zfsas_send_debug_marker "member_already_received job_id=$(job_get job JOB_ID) source=${source_dataset} destination=${destination} snapshot=${basename} reason=stale_full_plan"
+        return 0
+        ;;
+      1)
+        failure_message="Unable to verify snapshots between '${source_dataset}' and '${destination}'. The snapshot listing did not succeed, so a stale full send was not started."
+        log "$failure_message"
+        fail_current_job_final "$failure_message"
+        return 1
+        ;;
+    esac
     set_job_progress "snapshot_created" "$progress" "Waiting for send slot."
     run_pipeline_with_space_reservation "$description" "$base_snapshot" "$snapshot" "$destination" "$progress" || return $?
     set_job_progress "verifying" "$((progress + 15))" "Verifying receive."
@@ -1222,7 +1270,23 @@ send_member_snapshot() {
         return $?
       fi
       description="Full send ${snapshot} -> ${destination}"
-      run_pipeline_with_space_reservation "$description" "" "$snapshot" "$destination" "$progress" || return $?
+      base_snapshot=""
+      refresh_rc=0
+      refresh_stale_full_send_plan "$source_dataset" "$destination" "$snapshot" "$(job_get job SNAPSHOT_PREFIX)" base_snapshot description || refresh_rc=$?
+      case "$refresh_rc" in
+        2)
+          log "Destination already has ${destination}@${basename}; skipping receive for this member."
+          zfsas_send_debug_marker "member_already_received job_id=$(job_get job JOB_ID) source=${source_dataset} destination=${destination} snapshot=${basename} reason=common_checkpoint"
+          return 0
+          ;;
+        1)
+          failure_message="Unable to verify snapshots between '${source_dataset}' and '${destination}'. The snapshot listing did not succeed, so this is not a missing send checkpoint. Automatic purge/reseed was not considered."
+          log "$failure_message"
+          fail_current_job_final "$failure_message"
+          return 1
+          ;;
+      esac
+      run_pipeline_with_space_reservation "$description" "$base_snapshot" "$snapshot" "$destination" "$progress" || return $?
     fi
   else
     latest_common=""
@@ -1252,7 +1316,23 @@ send_member_snapshot() {
         return $?
       fi
       description="Manual full send ${snapshot} -> ${destination}"
-      run_pipeline_with_space_reservation "$description" "" "$snapshot" "$destination" "$progress" || return $?
+      base_snapshot=""
+      refresh_rc=0
+      refresh_stale_full_send_plan "$source_dataset" "$destination" "$snapshot" "$(job_get job SNAPSHOT_PREFIX)" base_snapshot description || refresh_rc=$?
+      case "$refresh_rc" in
+        2)
+          log "Destination already has ${destination}@${basename}; skipping receive for this member."
+          zfsas_send_debug_marker "member_already_received job_id=$(job_get job JOB_ID) source=${source_dataset} destination=${destination} snapshot=${basename} reason=common_checkpoint"
+          return 0
+          ;;
+        1)
+          failure_message="Unable to verify snapshots between '${source_dataset}' and '${destination}'. The snapshot listing did not succeed, so this is not a missing send checkpoint. Automatic purge/reseed was not considered."
+          log "$failure_message"
+          fail_current_job_final "$failure_message"
+          return 1
+          ;;
+      esac
+      run_pipeline_with_space_reservation "$description" "$base_snapshot" "$snapshot" "$destination" "$progress" || return $?
     fi
   fi
 
@@ -1507,8 +1587,8 @@ process_cleanup_member_job() {
     esac
   fi
 
-  set_job_progress "cleanup" "92" "Queueing zero-change cleanup."
-  queue_schedule_zero_change_cleanup_for_dataset "$(job_get job SCHEDULE_JOB_ID)" "$destination_dataset" "$snapshot_basename" || true
+  set_job_progress "cleanup" "92" "Queueing destination retention and zero-change cleanup."
+  queue_schedule_post_send_cleanup_for_dataset "$(job_get job SCHEDULE_JOB_ID)" "$destination_dataset" "$snapshot_basename" || true
   complete_job "Queued zero-change cleanup."
   return 0
 }
@@ -1692,8 +1772,8 @@ process_send_job() {
     send_member_snapshot "$index" "$member_count" || return $?
     if [[ "$mode:$action" == "scheduled:send_member" ]]; then
       cleanup_source_checkpoints_for_verified_member || return 1
-      set_job_progress "cleanup" "$((90 + (index * 5 / (member_count == 0 ? 1 : member_count))))" "Queueing zero-change cleanup."
-      queue_schedule_zero_change_cleanup_for_dataset "$(job_get job SCHEDULE_JOB_ID)" "$(job_get job MEMBER_${index}_DESTINATION)" "$(job_get job SOURCE_SNAPSHOT_NAME)" || true
+      set_job_progress "cleanup" "$((90 + (index * 5 / (member_count == 0 ? 1 : member_count))))" "Queueing destination retention and zero-change cleanup."
+      queue_schedule_post_send_cleanup_for_dataset "$(job_get job SCHEDULE_JOB_ID)" "$(job_get job MEMBER_${index}_DESTINATION)" "$(job_get job SOURCE_SNAPSHOT_NAME)" || true
     fi
   done
 
