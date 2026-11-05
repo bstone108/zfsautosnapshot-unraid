@@ -55,6 +55,11 @@ trap 'rm -rf "$tmp_bin"; cleanup' EXIT
 
 cat > "${tmp_bin}/ssh" <<'EOF'
 #!/bin/bash
+# OpenSSH reads the caller's stdin unless -n is set. Drain it so a while-read
+# loop cannot hide a missing -n. A tty is left alone so a local run does not block.
+if [[ " $* " != *" -n "* ]] && [[ ! -t 0 ]]; then
+  cat >/dev/null || true
+fi
 remote_command="${*: -1}"
 printf '%s\n' "$remote_command" >> "$SSH_CALL_LOG"
 mode="${SSH_LIST_MODE:-ok}"
