@@ -47,6 +47,13 @@ assert_contains "$command" "zfs\\ receive" "SSH receive command must carry remot
 assert_contains "$command" "zfs\\ receive\\ -s\\ -uF" "SSH receive command must preserve partial receives for resumable transfers"
 assert_contains "$command" "backup/root" "SSH receive command must include destination dataset"
 assert_not_contains "$command" " -i " "SSH receive command must not include an empty identity-file argument"
+assert_not_contains "$command" " -n " "SSH receive command must keep stdin so it can read the zfs send stream"
+
+query_command=""
+if ! build_ssh_zfs_command "zfs list -H -o name -- backup/root" query_command; then
+  fail "non-streaming SSH zfs command should build when the receiver host is configured"
+fi
+assert_contains "$query_command" " -n " "non-streaming SSH zfs commands must not read the caller's stdin"
 
 SEND_SSH_KEY_PATH="relative/key"
 if build_ssh_receive_command "backup/root" command; then
@@ -126,6 +133,11 @@ trap cleanup_transport_check EXIT
 
 cat >"${tmp_bin}/ssh" <<'SSH_FAKE'
 #!/bin/bash
+# OpenSSH reads the caller's stdin unless -n is set. Drain it so a while-read
+# loop cannot hide a missing -n. A tty is left alone so a local run does not block.
+if [[ " $* " != *" -n "* ]] && [[ ! -t 0 ]]; then
+  cat >/dev/null || true
+fi
 remote_command="${*: -1}"
 case "$remote_command" in
   *"zfs list -H -o name -t filesystem,volume -- backup/data"*)
@@ -395,6 +407,11 @@ MBUFFER_RATE_FAKE
 chmod +x "${tmp_bin}/mbuffer"
 cat >"${tmp_bin}/ssh" <<'SSH_RESUME_FAKE'
 #!/bin/bash
+# OpenSSH reads the caller's stdin unless -n is set. Drain it so a while-read
+# loop cannot hide a missing -n. A tty is left alone so a local run does not block.
+if [[ " $* " != *" -n "* ]] && [[ ! -t 0 ]]; then
+  cat >/dev/null || true
+fi
 remote_command="${*: -1}"
 if [[ "${SSH_RESUME_MODE:-resume}" == "probe_failure" && "$remote_command" == *"zfs list -H -o name -- backup/data"* ]]; then
   exit 77

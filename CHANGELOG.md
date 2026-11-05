@@ -5,6 +5,14 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.05.01 (2026-11-05)
+
+- One retention pass deletes every old send checkpoint on a remote recursive destination, on the parent and on each child, including checkpoints that exist only on the receiver. The newest checkpoint both sides still share is kept, so the next incremental send still has a base.
+- Starting a manual send while the same job is already being queued no longer starts a second copy of that run. If a full send was planned and the destination has since received a checkpoint, the transfer switches to an incremental or does nothing when that checkpoint is already there. A destination that answers "destination has snapshots" is not retried for the full five-attempt, five-minute cycle.
+- Old send checkpoints on a remote destination are deleted on that destination. The plugin was checking the sending machine, deciding the snapshot was already gone, and leaving it on the receiver. A snapshot list that fails still does not delete anything or reseed. A local destination is unchanged.
+- Installing this plugin replaces the package on disk when the recorded package is a different build. Previously, installing another build could update only the plugin version text and leave the older scripts in place.
+- The 5-try, 5-minute send retry and automatic reseed are unchanged. Testing-only ZFS send debug markers stay out of the public package.
+
 ### 2026.11.02.02 (2026-11-02)
 
 - Send-checkpoint cleanup no longer tries to delete a snapshot on a destination parent that was never received. Only snapshots that a direct listing of that dataset actually returned are deleted. If the snapshot or dataset is already gone, that delete counts as finished instead of failing three times. A snapshot list that fails is still not a reason to delete anything or reseed.
