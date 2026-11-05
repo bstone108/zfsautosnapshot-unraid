@@ -1,9 +1,34 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.11.02.02" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.11.05.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.11.02.02 (2026-11-02)
+### 2026.11.05.01 (2026-11-05)
+- One retention pass deletes every old send checkpoint on a remote recursive destination, including checkpoints that exist only on the receiver. A remote command was reading the same input as the snapshot list, so each pass removed about one checkpoint per dataset. The newest checkpoint both sides still share is kept.
+- A recursive ZFS send deletes old checkpoints on the destination parent and each child, including checkpoints that exist only on the destination. The newest checkpoint both sides still share is kept. That cleanup also runs after each dataset is sent.
+- A manual send started while the same job is already being queued does not start a second run. A full send planned before the destination received a checkpoint becomes an incremental, or does nothing if that checkpoint is already there. "destination has snapshots" is not retried for the full five-attempt, five-minute cycle.
+- Installing this plugin replaces the package on disk when the recorded package is a different build, so the scripts match the plugin version.
+- Testing-only ZFS send debug markers stay out of the public package. The 5-try, 5-minute send retry and automatic reseed are unchanged.
+- Old send checkpoints on a remote destination are deleted on that destination. The plugin was checking the sending machine, deciding the snapshot was already gone, and leaving it on the receiver. A snapshot list that fails still does not delete anything or reseed. A local destination is unchanged.
 - Send-checkpoint cleanup no longer tries to delete a snapshot on a destination parent that was never received. Only snapshots that a direct listing of that dataset actually returned are deleted. If the snapshot or dataset is already gone, that delete counts as finished instead of failing three times. A snapshot list that fails is still not a reason to delete anything or reseed.
-- The 5-try, 5-minute send retry and automatic reseed are unchanged.
+- The once-a-minute queue check no longer treats a started array as stopped when Unraid's status report is long. Reading that report used to stop early with a broken-pipe error, so sends and deletes could sit paused even though the array was already up.
+- Cleaning up an old snapshot on a remote ZFS send destination no longer runs zfs destroy on the sender. List, destroy, rollback, and a reseed destroy -r for that destination go over SSH. A local destination still uses local zfs.
+- A failed dataset in a scheduled ZFS send no longer stops later sends. The failed dataset stays failed, that window finishes as failed or partial, and the next scheduled time still sends every dataset, including the one that failed. A failed job left in the queue is removed on its own and cannot hold the schedule.
+- A 6-hour, 12-hour, daily, or weekly send no longer starts an extra time during the repeated hour when clocks fall back for daylight saving time.
+- A ZFS send no longer treats a failed, timed-out, or empty remote snapshot list as a missing checkpoint. The list has to succeed before the plugin decides there is no shared snapshot.
+- A failed ZFS send step is retried up to 5 times, waiting 5 minutes only after a failure before that same step is tried again. A step that succeeds continues immediately.
+- When a confirmed snapshot list shows no shared checkpoint, or a finished incremental receive says the destination does not match, the plugin deletes that destination dataset and sends a full backup. The log says why. A failed or unverified list does not delete anything. Set SEND_AUTO_RESEED=0 to turn this rebuild off.
+- Dataset Migrator no longer measures folder sizes on every automatic status check. Those checks only follow a running migration, so the page buttons become usable even when a size scan is slow. Folder sizes are calculated when you press Refresh, and once in the background the first time a dataset is shown. The page shows when that scan last finished. A second Refresh while a scan is running says "scan in progress". A folder that is its own ZFS dataset uses the dataset's used space, and a size walk cannot run forever.
+- A scheduled send no longer queues the same child send job twice when preparation runs again for that parent.
+- Saved send schedule progress is dropped for jobs that were removed from the send list. If the send config cannot be read, that saved progress is left alone.
+- On startup, leftover temporary copies of the delete queue older than one hour are removed.
+- Fixed the once-a-minute send and delete queue check so it can tell the array is started when the scheduler PATH does not include mdcmd. Queue work no longer stays paused on a started array just because /proc/mdcmd cannot be read.
+- If the array state still cannot be read from mdcmd, /proc/mdcmd, or var.ini, the log says that directly and repeats it at most once an hour. A stopped, stopping, or starting array still pauses queue workers.
+- If a dataset migration is interrupted, Unraid raises an alert that the migration was interrupted, apps may not function properly until it finishes, the migration will resume in about 15 minutes, and non-functioning apps should be ignored until then.
+- The migration records an in-progress flag on the boot drive. The existing once-a-minute queue check restarts recovery or the migration when that flag is present and the migrator is not running.
+- Interrupted folders keep the original folder name in a recognizable temporary name so a restart can tell which folder was being migrated.
+- Snapshot Manager keeps the manage-snapshots panel at the top of the visible window when you scroll the embedded page.
+- Added an Outbound stream rate limit field to the ZFS Send WebGUI. It validates and saves SEND_RATE_LIMIT; use 0 to disable or a rate such as 1M/8M to protect an Internet-constrained link.
+- Made interrupted-receive probing fail closed: a new SSH receive is allowed only after the receiver explicitly reports that the target dataset does not exist. Fixed pipeline failure diagnostics to retain actual component exit statuses.
+- Added optional outbound stream throttling via SEND_RATE_LIMIT and mbuffer -R (for example 8M); 0 leaves throttling disabled.
 
   </CHANGES>
 
@@ -13,9 +38,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.11.02.02-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.11.02.02-noarch-1.txz</URL>
-    <MD5>e3d8320de670c8f34ec7a38e704a806b</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.11.05.01-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.11.05.01-noarch-1.txz</URL>
+    <MD5>dc87d0f462c7c1ea497a9b87d7ae322c</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -23,10 +48,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.11.02.02-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.11.05.01-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="e3d8320de670c8f34ec7a38e704a806b"
+PKG_MD5="dc87d0f462c7c1ea497a9b87d7ae322c"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
@@ -73,6 +98,31 @@ fi
 if ! ls -1 /var/log/packages 2>/dev/null | grep -q "^${PKG_NAME}"; then
   echo "Package registration missing after install; retrying with --reinstall." >&2
   "${UPGRADEPKG}" --install-new --reinstall "${PKG_PATH}"
+fi
+
+# upgradepkg will not replace a package whose recorded version is already
+# newer, so installing an older plg over a newer package updates only the
+# plugin version string and leaves the previous scripts on disk. Install this
+# plg's package whenever the recorded package name is not exactly this build.
+expected_pkg="${PKG_FILE%.txz}"
+installed_pkg="$(ls -1 /var/log/packages 2>/dev/null | grep "^${PKG_NAME}-" | head -n 1 || true)"
+if [[ "$installed_pkg" != "$expected_pkg" ]]; then
+  echo "Installed package '${installed_pkg:-none}' does not match ${expected_pkg}. Replacing it so the on-disk files match this plugin." >&2
+  if command -v installpkg >/dev/null 2>&1; then
+    INSTALLPKG="$(command -v installpkg)"
+  elif [[ -x /sbin/installpkg ]]; then
+    INSTALLPKG="/sbin/installpkg"
+  elif [[ -x /usr/sbin/installpkg ]]; then
+    INSTALLPKG="/usr/sbin/installpkg"
+  else
+    INSTALLPKG=""
+  fi
+  removepkg "${PKG_NAME}" >/dev/null 2>&1 || true
+  if [[ -n "${INSTALLPKG}" ]]; then
+    "${INSTALLPKG}" "${PKG_PATH}"
+  else
+    "${UPGRADEPKG}" --install-new --reinstall "${PKG_PATH}"
+  fi
 fi
 
 if ! ls -1 /var/log/packages 2>/dev/null | grep -q "^${PKG_NAME}"; then
