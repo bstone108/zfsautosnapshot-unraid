@@ -77,11 +77,21 @@ enqueue_all_scheduled_jobs_now() {
   done
 
   for job_id in "${run_jobs[@]}"; do
+    if ! acquire_schedule_enqueue_lock "$job_id"; then
+      log "Skipping manual send ${job_id}; another manual or scheduled enqueue is already creating this run."
+      continue
+    fi
+    if schedule_job_blocked "$job_id"; then
+      log "Skipping manual send ${job_id}; a scheduled or manual run of this job is already queued or running."
+      release_schedule_enqueue_lock "$job_id"
+      continue
+    fi
     pool="${run_pool[$job_id]}"
     send_transport="${run_transport[$job_id]:-local}"
     prep_job_id="$(pool_prep_job_id_for_group "$pool" "$run_group_id" "$send_transport")"
     enqueue_scheduled_prepare_job "$job_id" "manual-${now_epoch}" "$now_epoch" "$requested_at" \
       "$prep_job_id" "$pool" "$run_group_id" "0" "Queued by manual run request." || true
+    release_schedule_enqueue_lock "$job_id"
   done
 }
 
