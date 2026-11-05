@@ -1552,7 +1552,9 @@ schedule_can_resume_current_window() {
 
   latest_current_window_send_basename_for_dataset "$schedule_job_id" "$dest_root" "$window_key" current_basename "" "$transport" || return 1
   source_snapshot_exists_for_basename "$source_root" "$current_basename" || return 1
-  while IFS= read -r source_dataset; do
+  # fd 3 keeps the dataset list off stdin. dataset_has_snapshot_basename talks
+  # to the receiver over ssh, and ssh would otherwise read this loop's input.
+  while IFS= read -r source_dataset <&3; do
     [[ -n "$source_dataset" ]] || continue
     if [[ "$source_dataset" == "$source_root" ]]; then
       destination_dataset="$dest_root"
@@ -1566,7 +1568,7 @@ schedule_can_resume_current_window() {
     fi
 
     source_snapshot_exists_for_basename "$source_dataset" "$current_basename" || return 1
-  done < <(list_tree_datasets "$source_root" "$include_children")
+  done 3< <(list_tree_datasets "$source_root" "$include_children")
   find_previous_schedule_checkpoint_basename "$source_root" "$current_basename" "$schedule_job_id" previous_basename || true
 
   printf -v "$result_basename_var" '%s' "$current_basename"
@@ -2884,7 +2886,7 @@ get_pool_freeing_for_transport() {
       ;;
     ssh)
       build_ssh_zfs_command "zpool get -H -o value freeing $(shell_quote_word "$pool") 2>/dev/null" command || value=""
-      [[ -n "${command:-}" ]] && value="$(eval "$command" 2>/dev/null || true)"
+      [[ -n "${command:-}" ]] && value="$(eval "$command" </dev/null 2>/dev/null || true)"
       ;;
     *)
       value=""
@@ -2911,7 +2913,7 @@ get_pool_effective_avail_for_transport() {
       ;;
     ssh)
       build_ssh_zfs_command "zfs list -H -p -o avail $(shell_quote_word "$pool") 2>/dev/null" command || avail=""
-      [[ -n "${command:-}" ]] && avail="$(eval "$command" 2>/dev/null || true)"
+      [[ -n "${command:-}" ]] && avail="$(eval "$command" </dev/null 2>/dev/null || true)"
       ;;
     *)
       avail=""
@@ -2972,9 +2974,9 @@ get_dataset_quota_headroom_for_transport() {
       ;;
     ssh)
       build_ssh_zfs_command "zfs get -H -p -o value quota $(shell_quote_word "$dataset") 2>/dev/null" command || quota_limit=""
-      [[ -n "${command:-}" ]] && quota_limit="$(eval "$command" 2>/dev/null || true)"
+      [[ -n "${command:-}" ]] && quota_limit="$(eval "$command" </dev/null 2>/dev/null || true)"
       build_ssh_zfs_command "zfs get -H -p -o value usedbydataset $(shell_quote_word "$dataset") 2>/dev/null" command || quota_used=""
-      [[ -n "${command:-}" ]] && quota_used="$(eval "$command" 2>/dev/null || true)"
+      [[ -n "${command:-}" ]] && quota_used="$(eval "$command" </dev/null 2>/dev/null || true)"
       ;;
     *)
       quota_limit=""
@@ -3008,9 +3010,9 @@ get_dataset_refquota_headroom_for_transport() {
       ;;
     ssh)
       build_ssh_zfs_command "zfs get -H -p -o value refquota $(shell_quote_word "$dataset") 2>/dev/null" command || refquota_limit=""
-      [[ -n "${command:-}" ]] && refquota_limit="$(eval "$command" 2>/dev/null || true)"
+      [[ -n "${command:-}" ]] && refquota_limit="$(eval "$command" </dev/null 2>/dev/null || true)"
       build_ssh_zfs_command "zfs get -H -p -o value referenced $(shell_quote_word "$dataset") 2>/dev/null" command || refquota_used=""
-      [[ -n "${command:-}" ]] && refquota_used="$(eval "$command" 2>/dev/null || true)"
+      [[ -n "${command:-}" ]] && refquota_used="$(eval "$command" </dev/null 2>/dev/null || true)"
       ;;
     *)
       refquota_limit=""
@@ -3308,6 +3310,11 @@ shell_quote_word() {
 build_ssh_zfs_command() {
   local remote_zfs_command="$1"
   local result_var="$2"
+  # 1 only for the receive stream. Every other remote zfs command must not
+  # read the caller's stdin. OpenSSH forwards that stdin unless -n is set, and
+  # a while-read here-string or pipe is that stdin, so one nested ssh would
+  # otherwise consume the rest of the loop.
+  local read_stdin="${3:-0}"
   local ssh_host="$SEND_SSH_HOST"
   local ssh_port="${SEND_SSH_PORT:-$DEFAULT_SEND_SSH_PORT}"
   local ssh_user="${SEND_SSH_USER:-$DEFAULT_SEND_SSH_USER}"
@@ -3326,6 +3333,9 @@ build_ssh_zfs_command() {
   fi
 
   ssh_parts+=(-p "$ssh_port")
+  if [[ "$read_stdin" != "1" ]]; then
+    ssh_parts+=(-n)
+  fi
   if [[ -n "$ssh_key_path" ]]; then
     ssh_parts+=(-i "$ssh_key_path")
   fi
@@ -3379,7 +3389,7 @@ run_zfs_for_transport() {
     err_file="/tmp/zfsas-zfs-err.$$"
     : > "$err_file" || return 1
   fi
-  eval "$command" 2>"$err_file" || rc=$?
+  eval "$command" </dev/null 2>"$err_file" || rc=$?
   if [[ -s "$err_file" ]]; then
     cat "$err_file" >&2
   fi
@@ -3473,7 +3483,8 @@ build_ssh_receive_command() {
   # -s preserves partial receive state and exposes receive_resume_token after
   # an interrupted stream, allowing zfs send -t to resume rather than resend.
   remote_receive="zfs receive -s -uF -- $(shell_quote_word "$destination")"
-  build_ssh_zfs_command "$remote_receive" "$result_var"
+  # The receive process is the pipe target of zfs send. It must keep stdin.
+  build_ssh_zfs_command "$remote_receive" "$result_var" 1
 }
 
 build_spiped_receive_command() {
@@ -3612,7 +3623,7 @@ run_ssh_send_command_once() {
     err_file="/tmp/zfsas-ssh-err.$$"
     : > "$err_file" || return 1
   fi
-  ssh_stdout_buf="$(eval "$command" 2>"$err_file")" || rc=$?
+  ssh_stdout_buf="$(eval "$command" </dev/null 2>"$err_file")" || rc=$?
   err_text="$(cat "$err_file" 2>/dev/null || true)"
   rm -f "$err_file" >/dev/null 2>&1 || true
   if (( rc == 0 )); then
@@ -3917,7 +3928,7 @@ ssh_dataset_tree_inventory() {
     recursive_flag="-r "
   fi
   build_ssh_zfs_command "zfs list -H -o name -t filesystem,volume ${recursive_flag}-- $(shell_quote_word "$dataset") 2>/dev/null" command || return 1
-  eval "$command" 2>/dev/null || true
+  eval "$command" </dev/null 2>/dev/null || true
 }
 
 send_failure_text_needs_full_resend() {
@@ -4873,7 +4884,8 @@ collect_latest_common_checkpoint_basenames_for_schedule() {
   [[ -n "$source_root" && -n "$dest_root" ]] || return 0
   dataset_exists "$source_root" || return 0
 
-  while IFS= read -r source_dataset; do
+  # fd 3: the common-checkpoint lookup below runs ssh for each member.
+  while IFS= read -r source_dataset <&3; do
     [[ -n "$source_dataset" ]] || continue
     if [[ "$source_dataset" == "$source_root" ]]; then
       dest_dataset="$dest_root"
@@ -4890,7 +4902,7 @@ collect_latest_common_checkpoint_basenames_for_schedule() {
       return 1
     fi
     [[ -n "$latest_common" ]] && result_ref["$latest_common"]=1
-  done < <(list_tree_datasets "$source_root" "$include_children")
+  done 3< <(list_tree_datasets "$source_root" "$include_children")
 }
 
 checkpoint_basename_is_latest_common_for_schedule() {
@@ -5047,7 +5059,8 @@ find_oldest_deletable_destination_snapshot_for_schedule() {
 
   cached_all_scheduled_job_protected_basenames protected
 
-  while IFS=$'\t' read -r snap_name snap_epoch; do
+  # fd 3/4: userrefs, clones, and the per-dataset listing all talk over ssh.
+  while IFS=$'\t' read -r snap_name snap_epoch <&3; do
     [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
     snap_dataset="${snap_name%@*}"
     snap_base="${snap_name##*@}"
@@ -5067,12 +5080,12 @@ find_oldest_deletable_destination_snapshot_for_schedule() {
       oldest_snap="$snap_name"
       oldest_epoch="$snap_epoch"
     fi
-  done < <(
-    while IFS= read -r snap_dataset; do
+  done 3< <(
+    while IFS= read -r snap_dataset <&4; do
       [[ -n "$snap_dataset" ]] || continue
       load_send_dataset_snapshot_cache_for_transport "$snap_dataset" "$transport"
       printf '%s' "${SEND_DATASET_SNAPSHOT_LINES_ASC[$snap_dataset]}"
-    done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+    done 4< <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
   )
 
   printf -v "$result_snap_var" '%s' "$oldest_snap"
@@ -5985,16 +5998,17 @@ estimate_destination_checkpoint_reclaim_bytes() {
   transport="${transport,,}"
   [[ -n "$transport" ]] || transport="local"
   if [[ -z "${SEND_CHECKPOINT_RECLAIM_CACHE[$loaded_key]:-}" ]]; then
-    while IFS= read -r dataset; do
+    # fd 3/4: listing and written-byte lookups ssh, and must not eat the lists.
+    while IFS= read -r dataset <&3; do
       [[ -n "$dataset" ]] || continue
       load_send_dataset_snapshot_cache_for_transport "$dataset" "$transport"
-      while IFS=$'\t' read -r snap_name snap_epoch; do
+      while IFS=$'\t' read -r snap_name snap_epoch <&4; do
         [[ -n "$snap_name" ]] || continue
         snap_base="${snap_name##*@}"
         send_basename_matches_schedule "$snap_base" "$schedule_job_id" || continue
         SEND_CHECKPOINT_RECLAIM_CACHE["${schedule_job_id}|${snap_base}"]=$(( ${SEND_CHECKPOINT_RECLAIM_CACHE["${schedule_job_id}|${snap_base}"]:-0} + $(send_snapshot_written_bytes_cached "$snap_name" "$transport") ))
-      done <<< "${SEND_DATASET_SNAPSHOT_LINES_ASC[$dataset]}"
-    done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+      done 4<<< "${SEND_DATASET_SNAPSHOT_LINES_ASC[$dataset]}"
+    done 3< <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
     SEND_CHECKPOINT_RECLAIM_CACHE["$loaded_key"]=1
   fi
 
@@ -6253,7 +6267,8 @@ existing_mapped_destination_datasets() {
   [[ -n "$transport" ]] || transport="local"
   [[ -n "$source_root" && -n "$dest_root" ]] || return 0
 
-  while IFS= read -r source_dataset; do
+  # fd 3: ssh_dataset_exists must not consume the remaining source datasets.
+  while IFS= read -r source_dataset <&3; do
     [[ -n "$source_dataset" ]] || continue
     if [[ "$source_dataset" == "$source_root" ]]; then
       dest_dataset="$dest_root"
@@ -6267,7 +6282,7 @@ existing_mapped_destination_datasets() {
       dataset_exists "$dest_dataset" || continue
     fi
     datasets+="${dest_dataset}"$'\n'
-  done < <(list_tree_datasets "$source_root" "$include_children")
+  done 3< <(list_tree_datasets "$source_root" "$include_children")
   printf '%s' "$datasets"
 }
 
@@ -6294,7 +6309,8 @@ list_existing_destination_datasets_for_pool() {
     return 0
   fi
 
-  while IFS= read -r schedule_job_id; do
+  # fd 3: listing one schedule ssh's, and that ssh must not drop later schedules.
+  while IFS= read -r schedule_job_id <&3; do
     [[ -n "$schedule_job_id" ]] || continue
     while IFS= read -r dataset; do
       [[ -n "$dataset" ]] || continue
@@ -6302,7 +6318,7 @@ list_existing_destination_datasets_for_pool() {
       seen["$dataset"]=1
       datasets+="${dataset}"$'\n'
     done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
-  done < <(list_schedule_job_ids_for_destination_pool "$pool")
+  done 3< <(list_schedule_job_ids_for_destination_pool "$pool")
 
   SEND_DESTINATION_DATASETS_BY_POOL["$pool"]="$datasets"
   printf '%s' "$datasets"
@@ -6378,7 +6394,10 @@ queue_destination_retention_for_dataset() {
   cached_all_scheduled_job_protected_basenames protected
   [[ -n "$newest_send_basename" ]] && protected["$newest_send_basename"]=1
 
-  while IFS=$'\t' read -r snap_name snap_epoch; do
+  # fd 3: each deletable snapshot checks the remote common checkpoint over ssh.
+  # Reading the here-string on stdin let that ssh swallow every later line,
+  # so one retention pass queued about one delete per dataset.
+  while IFS=$'\t' read -r snap_name snap_epoch <&3; do
     [[ -n "$snap_name" && -n "$snap_epoch" ]] || continue
     snap_base="${snap_name##*@}"
 
@@ -6499,7 +6518,7 @@ queue_destination_retention_for_dataset() {
         fi
       fi
     fi
-  done <<< "${SEND_DATASET_SNAPSHOT_LINES_DESC[$dataset]}"
+  done 3<<< "${SEND_DATASET_SNAPSHOT_LINES_DESC[$dataset]}"
 }
 
 active_delete_state_count_for_pool() {
@@ -6555,15 +6574,16 @@ queue_pool_retention_cleanup() {
   local delta_map_name="$3"
   local schedule_job_id dataset newest_send_basename=""
 
-  while IFS= read -r schedule_job_id; do
+  # fd 3/4: retention on one dataset ssh's and must not skip the datasets after it.
+  while IFS= read -r schedule_job_id <&3; do
     [[ -n "$schedule_job_id" ]] || continue
     latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
-    while IFS= read -r dataset; do
+    while IFS= read -r dataset <&4; do
       [[ -n "$dataset" ]] || continue
       # One dataset returning non-zero must not skip the rest of a recursive tree.
       queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" "$capacity_dataset" "$delta_map_name" || true
-    done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
-  done < <(list_schedule_job_ids_for_destination_pool "$pool")
+    done 4< <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+  done 3< <(list_schedule_job_ids_for_destination_pool "$pool")
 }
 
 queue_pool_free_space_cleanup_for_target() {
@@ -6643,10 +6663,11 @@ queue_schedule_retention_cleanup() {
   local dataset newest_send_basename=""
 
   latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
-  while IFS= read -r dataset; do
+  # fd 3: one dataset's retention ssh must not drop the remaining datasets.
+  while IFS= read -r dataset <&3; do
     [[ -n "$dataset" ]] || continue
     queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" || true
-  done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+  done 3< <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
 }
 
 # Retention owns send-checkpoint deletion. Zero-change cleanup runs on the same
@@ -6668,10 +6689,11 @@ queue_schedule_zero_change_cleanup() {
   local dataset newest_send_basename=""
 
   latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
-  while IFS= read -r dataset; do
+  # fd 3: zero-change cleanup ssh's per dataset and must see every dataset.
+  while IFS= read -r dataset <&3; do
     [[ -n "$dataset" ]] || continue
     queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change"
-  done < <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
+  done 3< <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
 }
 
 queue_schedule_zero_change_cleanup_for_dataset() {

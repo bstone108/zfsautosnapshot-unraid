@@ -66,6 +66,16 @@ def main() -> int:
     )
     assert_contains(
         ops_lib,
+        "ssh_parts+=(-n)",
+        "non-streaming SSH must not read the caller's stdin",
+    )
+    assert_contains(
+        ops_lib,
+        'build_ssh_zfs_command "$remote_receive" "$result_var" 1',
+        "SSH receive must keep stdin so it can read the zfs send stream",
+    )
+    assert_contains(
+        ops_lib,
         "zfs receive -uF --",
         "SSH receive helper must pass remote destination to zfs receive after -- for safer dataset handling",
     )

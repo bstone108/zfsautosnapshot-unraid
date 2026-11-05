@@ -78,6 +78,11 @@ EOF
 cat > "${root}/bin/ssh" <<EOF
 #!/bin/bash
 printf 'SSH %s\n' "\$*" >> "\${SSH_LOG:?}"
+# OpenSSH reads the caller's stdin unless -n is set. Drain it so a while-read
+# loop cannot hide a missing -n. A tty is left alone so a local run does not block.
+if [[ " \$* " != *" -n "* ]] && [[ ! -t 0 ]]; then
+  cat >/dev/null || true
+fi
 remote="\${*: -1}"
 mode="\${SSH_MODE:-common}"
 if [[ "\$remote" == *"receive_resume_token"* ]]; then

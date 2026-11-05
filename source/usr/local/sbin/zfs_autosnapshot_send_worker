@@ -853,7 +853,8 @@ build_resume_members_for_current_job() {
   [[ -n "$send_transport" ]] || send_transport="local"
   source_snapshot_exists_for_basename "$source_root" "$basename" || return 1
 
-  while IFS= read -r source_dataset; do
+  # fd 3: checking each destination snapshot over ssh must not skip later members.
+  while IFS= read -r source_dataset <&3; do
     [[ -n "$source_dataset" ]] || continue
     if [[ "$source_dataset" == "$source_root" ]]; then
       destination_dataset="$dest_root"
@@ -873,7 +874,7 @@ build_resume_members_for_current_job() {
     job[MEMBER_${member_index}_SNAPSHOT]="${source_dataset}@${basename}"
     member_index=$((member_index + 1))
     needs_resume=1
-  done < <(list_tree_datasets "$source_root" "$include_children")
+  done 3< <(list_tree_datasets "$source_root" "$include_children")
 
   job[MEMBER_COUNT]="$member_index"
   if (( needs_resume == 0 )); then
