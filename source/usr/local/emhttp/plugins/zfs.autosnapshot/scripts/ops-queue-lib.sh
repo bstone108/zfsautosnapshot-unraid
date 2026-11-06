@@ -3605,9 +3605,10 @@ delete_dest_transport_locked_update() {
   return 0
 }
 
-# A send planning retention is the next chance to queue cleanup. Only a host
-# that already used its three connection attempts is cleared. A host still
-# inside the 30-minute wait keeps that wait.
+# The next scheduled or post-send retention pass may queue cleanup again.
+# Only a host that already used its connection attempts is cleared. A host
+# still inside the 30-minute wait keeps that wait. Space approval must not
+# call this: clearing the host there makes a down destination loop forever.
 delete_destination_replan_if_exhausted() {
   local host="$1"
   local count=0 next_epoch=0
@@ -6591,6 +6592,9 @@ queue_destination_retention_for_dataset() {
   local keep_all_seconds keep_daily_seconds keep_weekly_seconds
   local week_key day_key
   local now_epoch
+  # Space approval passes 0. Scheduled and post-send retention keep the default
+  # so the next backup can retry a destination that was marked down.
+  local replan_exhausted="${7:-1}"
   local -A protected=()
   local -A kept_day=()
   local -A kept_week=()
@@ -6602,7 +6606,9 @@ queue_destination_retention_for_dataset() {
     [[ -n "$transport" ]] || transport="local"
   fi
   if [[ "$transport" == "ssh" ]]; then
-    delete_destination_replan_if_exhausted "${SEND_SSH_HOST:-}"
+    if [[ "$replan_exhausted" != "0" ]]; then
+      delete_destination_replan_if_exhausted "${SEND_SSH_HOST:-}"
+    fi
     ssh_dataset_exists "$dataset" || return 0
   else
     dataset_exists "$dataset" || return 0
@@ -6797,16 +6803,28 @@ queue_pool_retention_cleanup() {
   local pool="$1"
   local capacity_dataset="$2"
   local delta_map_name="$3"
-  local schedule_job_id dataset newest_send_basename=""
+  # 0 keeps a down destination down. Space approval passes 0 so the send that
+  # is waiting on space cannot clear the host and queue the same cleanup again.
+  local replan_exhausted="${4:-1}"
+  local schedule_job_id dataset newest_send_basename="" transport
 
   # fd 3/4: retention on one dataset ssh's and must not skip the datasets after it.
   while IFS= read -r schedule_job_id <&3; do
     [[ -n "$schedule_job_id" ]] || continue
+    transport="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
+    transport="${transport,,}"
+    [[ -n "$transport" ]] || transport="local"
+    # Reset even when the receiver is down and this pass finds no datasets.
+    # That is the next scheduled backup's retry. A host still in its 30-minute
+    # wait is left alone.
+    if [[ "$transport" == "ssh" && "$replan_exhausted" != "0" ]]; then
+      delete_destination_replan_if_exhausted "${SEND_SSH_HOST:-}"
+    fi
     latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
     while IFS= read -r dataset <&4; do
       [[ -n "$dataset" ]] || continue
       # One dataset returning non-zero must not skip the rest of a recursive tree.
-      queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" "$capacity_dataset" "$delta_map_name" || true
+      queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" "$capacity_dataset" "$delta_map_name" "$replan_exhausted" || true
     done 4< <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
   done 3< <(list_schedule_job_ids_for_destination_pool "$pool")
 }
@@ -6887,6 +6905,9 @@ queue_schedule_retention_cleanup() {
   local schedule_job_id="$1"
   local dataset newest_send_basename=""
 
+  if [[ "$(schedule_transport_for_id "$schedule_job_id")" == "ssh" ]]; then
+    delete_destination_replan_if_exhausted "${SEND_SSH_HOST:-}"
+  fi
   latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
   # fd 3: one dataset's retention ssh must not drop the remaining datasets.
   while IFS= read -r dataset <&3; do
@@ -6905,6 +6926,9 @@ queue_schedule_post_send_cleanup_for_dataset() {
   local newest_send_basename="$3"
 
   [[ -n "$schedule_job_id" && -n "$dataset" && -n "$newest_send_basename" ]] || return 1
+  if [[ "$(schedule_transport_for_id "$schedule_job_id")" == "ssh" ]]; then
+    delete_destination_replan_if_exhausted "${SEND_SSH_HOST:-}"
+  fi
   queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" || true
   queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change" || true
 }
@@ -6928,6 +6952,28 @@ queue_schedule_zero_change_cleanup_for_dataset() {
 
   [[ -n "$schedule_job_id" && -n "$dataset" && -n "$newest_send_basename" ]] || return 1
   queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change"
+}
+
+# Stop this send. The queue handler has not claimed the job yet; drop any
+# reservation or claim this process owns so later jobs are not stuck behind it.
+# A failed send does not block the next scheduled window.
+fail_send_launch_for_space() {
+  local job_path="$1"
+  local assoc_name="$2"
+  local message="$3"
+  local reason="${4:-space}"
+  local job_id
+  # shellcheck disable=SC2178
+  local -n launch_job_ref="$assoc_name"
+
+  job_id="$(job_get launch_job_ref JOB_ID)"
+  log "$message"
+  release_send_space_reservation_for_job "$job_id"
+  release_job_claim "$job_id" || true
+  mark_job_terminal_failure "$assoc_name" "$message"
+  job_write "$job_path" "$assoc_name" || true
+  zfsas_send_debug_marker "space_approval_failed job_id=${job_id} reason=${reason}"
+  return 1
 }
 
 defer_send_launch_approval() {
@@ -6954,6 +7000,7 @@ approve_send_job_space_for_launch() {
   local job_path="$1"
   local reservation_pid="$2"
   local job_id destination capacity_dataset dest_pool required_bytes buffer_bytes needed_bytes available_bytes freeing_bytes shortfall threshold_bytes cleanup_target now_epoch last_cleanup_at prep_job_id prep_path prep_state send_transport
+  local failure_count=0 dest_host="" max_attempts=0 queued_none=0 before_deletes=0 after_deletes=0 added_deletes=0 failure_message=""
   local -A launch_job=()
   local -A prep_job=()
   local -A planned_reclaim=()
@@ -6968,6 +7015,11 @@ approve_send_job_space_for_launch() {
   send_transport="${send_transport,,}"
   [[ -n "$send_transport" ]] || send_transport="local"
   [[ -n "$job_id" && -n "$destination" && "$required_bytes" =~ ^[0-9]+$ ]] || return 1
+  case "$(job_get launch_job STATE)" in
+    failed|complete|skipped)
+      return 1
+      ;;
+  esac
 
   prep_job_id="$(job_get launch_job PREP_JOB_ID)"
   if [[ -n "$prep_job_id" ]]; then
@@ -7029,12 +7081,38 @@ approve_send_job_space_for_launch() {
     return 1
   fi
 
+  # Deletes still in the 30-minute retry_wait are active work above, and this
+  # send keeps waiting for them. Once those deletes are gone and the receiver
+  # has used every connection attempt, another plan would only clear the host
+  # and start the same failures again.
+  if [[ "$send_transport" == "ssh" ]]; then
+    dest_host="${SEND_SSH_HOST:-}"
+    if [[ -n "$dest_host" ]]; then
+      failure_count=0
+      delete_dest_transport_locked_update "$dest_host" lookup failure_count || true
+      max_attempts="${DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS:-$DEFAULT_DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS}"
+      [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts="$DEFAULT_DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS"
+      if (( failure_count >= max_attempts )); then
+        failure_message="Destination cleanup unreachable after ${failure_count} connection failures; will retry on next scheduled backup."
+        fail_send_launch_for_space "$job_path" launch_job "$failure_message" "destination_unreachable" || return 1
+      fi
+    fi
+  fi
+
   now_epoch="$(date +%s)"
   last_cleanup_at="$(job_get launch_job SPACE_CLEANUP_REQUESTED_AT 0)"
   [[ "$last_cleanup_at" =~ ^[0-9]+$ ]] || last_cleanup_at=0
   if (( now_epoch - last_cleanup_at < 30 )); then
     defer_send_launch_approval "$job_path" launch_job "Waiting for destination cleanup planning cooldown." 3
     return 1
+  fi
+
+  # The previous plan queued nothing and the one cooldown has passed. Planning
+  # again would repeat that empty pass every 30 seconds.
+  queued_none="$(job_get launch_job SPACE_CLEANUP_QUEUED_NONE 0)"
+  if [[ "$queued_none" == "1" ]]; then
+    failure_message="Destination cleanup queued nothing new and space is still short. Nothing left to clean; this send will retry on the next scheduled backup."
+    fail_send_launch_for_space "$job_path" launch_job "$failure_message" "nothing_to_clean" || return 1
   fi
 
   if ! acquire_pool_prep_lock "$dest_pool"; then
@@ -7050,8 +7128,24 @@ approve_send_job_space_for_launch() {
     cleanup_target="$threshold_bytes"
   fi
   log "Destination space approval is short on pool ${dest_pool}; queue manager is planning cleanup up to ${cleanup_target} bytes for ${job_id}."
-  queue_pool_retention_cleanup "$dest_pool" "$capacity_dataset" planned_reclaim || true
+  before_deletes="$(active_delete_inbox_count_for_pool "$dest_pool")"
+  [[ "$before_deletes" =~ ^[0-9]+$ ]] || before_deletes=0
+  # Pass 0 so this plan cannot clear a destination that is already down.
+  queue_pool_retention_cleanup "$dest_pool" "$capacity_dataset" planned_reclaim 0 || true
   queue_pool_free_space_cleanup_for_target "$dest_pool" "$capacity_dataset" "$cleanup_target" planned_reclaim "$send_transport" || true
+  after_deletes="$(active_delete_inbox_count_for_pool "$dest_pool")"
+  [[ "$after_deletes" =~ ^[0-9]+$ ]] || after_deletes=0
+  added_deletes=$((after_deletes - before_deletes))
+  if (( added_deletes < 0 )); then
+    added_deletes=0
+  fi
+  if (( added_deletes > 0 )); then
+    launch_job[SPACE_CLEANUP_QUEUED_NONE]=0
+  else
+    launch_job[SPACE_CLEANUP_QUEUED_NONE]=1
+    launch_job[LAST_MESSAGE]="Destination cleanup queued nothing new. Waiting one planning cooldown before stopping this send."
+  fi
+  job_write "$job_path" launch_job || true
   release_pool_prep_lock "$dest_pool"
   ensure_delete_worker_for_backlog
   return 1

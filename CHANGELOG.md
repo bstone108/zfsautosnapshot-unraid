@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.06.t02 (Testing Branch Only)
+
+- A send that is waiting for free space on a destination no longer plans cleanup forever when that destination cannot be reached. After the destination has failed its connection attempts and no cleanup is still waiting, that send stops and the log says cleanup is unreachable. The next scheduled backup tries again. While cleanup is still in its retry wait, the send keeps waiting. If a cleanup plan finds nothing new to delete, the send waits through one short cooldown and then stops instead of checking again. Other backups are not held up.
+
 ### 2026.11.06.t01 (Testing Branch Only)
 
 - A remote cleanup delete waits up to 5 minutes to connect when the destination is slow to answer. A destroy that is already running is not cut off.

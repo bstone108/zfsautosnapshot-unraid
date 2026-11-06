@@ -535,6 +535,7 @@ class Harness:
             "send_missing_parent_retention_checks.sh",
             "send_remote_retention_host_checks.sh",
             "send_remote_delete_destination_backoff_checks.sh",
+            "send_space_approval_escape_checks.sh",
             "send_recursive_dest_retention_checks.sh",
             "send_recursive_single_pass_retention_checks.sh",
             "send_manual_schedule_race_checks.sh",
