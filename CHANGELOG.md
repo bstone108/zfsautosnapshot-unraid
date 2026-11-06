@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.06.t01 (Testing Branch Only)
+
+- A remote cleanup delete waits up to 5 minutes to connect when the destination is slow to answer. A destroy that is already running is not cut off.
+- If the connection to a destination fails, cleanup waits 30 minutes before trying that destination again. Three connection failures mark that destination down and drop its pending cleanup deletes. Other destinations are left alone. A later successful delete clears the failure count. Sends to that destination stay on their normal schedule. A snapshot that is busy or already gone is still handled one at a time.
+
 ### 2026.11.05.t02 (Testing Branch Only)
 
 - One retention pass now deletes every old send checkpoint on a remote recursive destination, including checkpoints that exist only on the receiver. The previous testing build found those checkpoints but a remote command read the same input as the snapshot list, so each pass removed about one checkpoint per dataset. The newest checkpoint both sides still share is kept.

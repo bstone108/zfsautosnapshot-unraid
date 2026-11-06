@@ -348,7 +348,7 @@ def main() -> int:
     )
     assert_contains(
         lib,
-        'build_ssh_zfs_command "$remote" command || return 1',
+        'build_ssh_zfs_command "$remote" command 0 "$connect_timeout" || return 1',
         "SSH zfs commands must be wrapped by the shared SSH command builder",
     )
     assert_contains(
