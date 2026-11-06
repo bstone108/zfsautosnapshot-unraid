@@ -807,6 +807,7 @@ main() {
   bash "${ROOT_DIR}/tests/stage1/send_missing_parent_retention_checks.sh"
   bash "${ROOT_DIR}/tests/stage1/send_remote_retention_host_checks.sh"
   bash "${ROOT_DIR}/tests/stage1/send_remote_delete_destination_backoff_checks.sh"
+  bash "${ROOT_DIR}/tests/stage1/send_space_approval_escape_checks.sh"
   bash "${ROOT_DIR}/tests/stage1/send_recursive_dest_retention_checks.sh"
   bash "${ROOT_DIR}/tests/stage1/send_recursive_single_pass_retention_checks.sh"
   bash "${ROOT_DIR}/tests/stage1/send_manual_schedule_race_checks.sh"
