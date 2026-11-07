@@ -246,6 +246,8 @@ What that run covers:
 - A long Unraid array-status report does not make a started array look stopped (`unraid_array_status_checks.sh`).
 - Retention does not delete a checkpoint on a destination parent that was never received, for both local and SSH destinations (`send_missing_parent_retention_checks.sh`).
 - Retention lists and destroys a checkpoint that exists only on the SSH receiver, a failed remote listing does not delete or reseed, and the confirmed-absent check asks the receiver (`send_remote_retention_host_checks.sh`).
+- A remote cleanup delete waits 30 minutes after a connection failure, drops that destination after three failures, and leaves other destinations and sends running (`send_remote_delete_destination_backoff_checks.sh`).
+- A send waiting on destination space keeps waiting while cleanup is in its retry wait, and stops when the destination is unreachable or nothing new can be deleted (`send_space_approval_escape_checks.sh`).
 - One retention pass deletes every stale checkpoint on a recursive SSH destination, parent and children, including destination-only checkpoints, and keeps the newest common checkpoint (`send_recursive_dest_retention_checks.sh`, `send_recursive_single_pass_retention_checks.sh`).
 - A manual send started while the same job is already queued does not start a second full send of a checkpoint the destination already has (`send_manual_schedule_race_checks.sh`).
 - Low-space cleanup still picks the oldest snapshot when the list is long, and the cron file stays in Unraid's no-username format (`history_regression_checks.sh`).

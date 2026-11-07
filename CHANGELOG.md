@@ -5,6 +5,12 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.06.01 (2026-11-06)
+
+- A remote cleanup delete waits up to 5 minutes to connect when the destination is slow to answer. A destroy that is already running is not cut off. If the connection fails, that destination waits 30 minutes before another cleanup delete. Three connection failures drop that destination's pending cleanup deletes and leave other destinations alone. A later successful delete clears the failure count. Sends stay on their normal schedule. A snapshot that is busy or already gone is still handled one at a time.
+- A send waiting on destination free space stops when that destination is unreachable after its connection attempts, or when cleanup finds nothing new to delete. It tries again on the next scheduled backup. A send still waits while cleanup deletes are in their retry wait. Other backups are not held up.
+- Testing-only ZFS send debug markers stay out of the public package. The 5-try, 5-minute send retry and automatic reseed are unchanged.
+
 ### 2026.11.05.01 (2026-11-05)
 
 - One retention pass deletes every old send checkpoint on a remote recursive destination, on the parent and on each child, including checkpoints that exist only on the receiver. The newest checkpoint both sides still share is kept, so the next incremental send still has a base.

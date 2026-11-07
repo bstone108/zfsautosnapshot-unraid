@@ -52,6 +52,7 @@ declare -A QUEUE_SEND_PROTECTED=()
 declare -A QUEUE_DELETE_SCOPE=()
 declare -A QUEUE_SEND_SCHEDULE_JOB_ID=()
 declare -A QUEUE_SEND_TRANSPORT=()
+declare -A QUEUE_DEST_HOST=()
 declare -A QUEUE_WORKER_PID=()
 declare -A QUEUE_BY_SNAPSHOT=()
 declare -A QUEUE_BY_CHECKPOINT=()
@@ -135,7 +136,7 @@ queue_delete_duplicate_exists() {
 
 queue_add_job() {
   local assoc_name="$1"
-  local job_id snapshot delete_scope schedule_job_id snapshot_name new_index
+  local job_id snapshot delete_scope schedule_job_id snapshot_name new_index transport_norm
   # shellcheck disable=SC2178
   local -n job_ref="$assoc_name"
 
@@ -164,6 +165,14 @@ queue_add_job() {
   QUEUE_DELETE_SCOPE["$job_id"]="${job_ref[DELETE_SCOPE]:-snapshot}"
   QUEUE_SEND_SCHEDULE_JOB_ID["$job_id"]="${job_ref[SEND_SCHEDULE_JOB_ID]:-}"
   QUEUE_SEND_TRANSPORT["$job_id"]="${job_ref[SEND_TRANSPORT]:-}"
+  QUEUE_DEST_HOST["$job_id"]="${job_ref[DEST_HOST]:-}"
+  if [[ -z "${QUEUE_DEST_HOST[$job_id]}" ]]; then
+    transport_norm="${job_ref[SEND_TRANSPORT]:-}"
+    transport_norm="${transport_norm,,}"
+    if [[ "$transport_norm" == "ssh" ]]; then
+      QUEUE_DEST_HOST["$job_id"]="${SEND_SSH_HOST:-}"
+    fi
+  fi
   QUEUE_WORKER_PID["$job_id"]="${job_ref[WORKER_PID]:-}"
   QUEUE_ACTIVE_COUNT=$((QUEUE_ACTIVE_COUNT + 1))
   queue_state_counter_increment "${QUEUE_STATE[$job_id]}"
@@ -181,6 +190,7 @@ queue_add_job() {
   fi
 
   daemon_mark_dirty
+  remember_delete_destination_backoff "$job_id" || true
   return 0
 }
 
@@ -239,7 +249,7 @@ queue_remove_job() {
   unset 'QUEUE_DATASET[$job_id]' 'QUEUE_SNAPSHOT[$job_id]' 'QUEUE_SNAPSHOT_NAME[$job_id]' 'QUEUE_SNAPSHOT_EPOCH[$job_id]'
   unset 'QUEUE_SNAPSHOT_GUID[$job_id]' 'QUEUE_SNAPSHOT_CREATETXG[$job_id]' 'QUEUE_DELETE_POOL[$job_id]'
   unset 'QUEUE_ESTIMATED_RECLAIM_BYTES[$job_id]' 'QUEUE_SEND_PROTECTED[$job_id]' 'QUEUE_DELETE_SCOPE[$job_id]' 'QUEUE_SEND_TRANSPORT[$job_id]'
-  unset 'QUEUE_SEND_SCHEDULE_JOB_ID[$job_id]' 'QUEUE_WORKER_PID[$job_id]'
+  unset 'QUEUE_SEND_SCHEDULE_JOB_ID[$job_id]' 'QUEUE_DEST_HOST[$job_id]' 'QUEUE_WORKER_PID[$job_id]'
   (( QUEUE_ACTIVE_COUNT > 0 )) && QUEUE_ACTIVE_COUNT=$((QUEUE_ACTIVE_COUNT - 1))
   queue_state_counter_decrement "$state"
 
@@ -278,6 +288,7 @@ queue_load_job_assoc() {
   job_ref[DELETE_SCOPE]="${QUEUE_DELETE_SCOPE[$job_id]}"
   job_ref[SEND_SCHEDULE_JOB_ID]="${QUEUE_SEND_SCHEDULE_JOB_ID[$job_id]}"
   job_ref[SEND_TRANSPORT]="${QUEUE_SEND_TRANSPORT[$job_id]:-}"
+  job_ref[DEST_HOST]="${QUEUE_DEST_HOST[$job_id]:-}"
   job_ref[WORKER_PID]="${QUEUE_WORKER_PID[$job_id]}"
   return 0
 }
@@ -307,6 +318,7 @@ queue_store_job_assoc() {
   QUEUE_DELETE_SCOPE["$job_id"]="${job_ref[DELETE_SCOPE]:-snapshot}"
   QUEUE_SEND_SCHEDULE_JOB_ID["$job_id"]="${job_ref[SEND_SCHEDULE_JOB_ID]:-}"
   QUEUE_SEND_TRANSPORT["$job_id"]="${job_ref[SEND_TRANSPORT]:-}"
+  QUEUE_DEST_HOST["$job_id"]="${job_ref[DEST_HOST]:-${QUEUE_DEST_HOST[$job_id]:-}}"
   QUEUE_WORKER_PID["$job_id"]="${job_ref[WORKER_PID]:-}"
   queue_record_state_transition "$previous_state" "${QUEUE_STATE[$job_id]}"
   daemon_mark_dirty
@@ -563,8 +575,163 @@ delete_job_transport() {
   printf '%s' "$transport"
 }
 
+delete_job_destination_host() {
+  local job_id="${1:-}"
+  local host=""
+
+  if [[ -n "$job_id" ]]; then
+    host="${QUEUE_DEST_HOST[$job_id]:-}"
+  fi
+  if [[ -z "$host" ]]; then
+    host="${SEND_SSH_HOST:-}"
+  fi
+  printf '%s' "$host"
+}
+
+delete_with_job_ssh_host() {
+  local host="$1"
+  shift
+  local saved="${SEND_SSH_HOST:-}" rc=0
+
+  if [[ -n "$host" ]]; then
+    SEND_SSH_HOST="$host"
+  fi
+  "$@" || rc=$?
+  SEND_SSH_HOST="$saved"
+  return "$rc"
+}
+
+delete_destination_transport_text() {
+  local text="$1"
+  text="${text//$'\r'/ }"
+  text="${text//$'\n'/ }"
+  printf '%s' "${text:0:240}"
+}
+
+defer_delete_jobs_for_destination_host() {
+  local host="$1"
+  local retry_at="$2"
+  local attempt="$3"
+  local exit_code="$4"
+  local job_id="" transport="" job_host="" deferred=0
+  local -a ids=()
+  local -A held=()
+
+  for job_id in "${QUEUE_IDS[@]}"; do
+    [[ -n "$job_id" ]] || continue
+    queue_job_exists "$job_id" || continue
+    transport="${QUEUE_SEND_TRANSPORT[$job_id]:-}"
+    transport="${transport,,}"
+    [[ "$transport" == "ssh" ]] || continue
+    job_host="$(delete_job_destination_host "$job_id")"
+    [[ "$job_host" == "$host" ]] || continue
+    ids+=("$job_id")
+  done
+
+  for job_id in "${ids[@]}"; do
+    queue_load_job_assoc "$job_id" held || continue
+    held[STATE]="retry_wait"
+    held[RETRY_AT]="$retry_at"
+    held[WORKER_PID]=""
+    queue_store_job_assoc "$job_id" held
+    if [[ "$job_id" == "${CURRENT_JOB_ID:-}" ]]; then
+      queue_move_job_to_tail "$job_id" || true
+    fi
+    deferred=$((deferred + 1))
+  done
+
+  log "Destination host ${host} remote delete failed with a connection error (attempt ${attempt} of ${DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS}, exit ${exit_code}). Waiting ${DELETE_DESTINATION_TRANSPORT_BACKOFF_SECONDS}s before retrying that destination. Deferred ${deferred} cleanup job(s). Sends and other destinations keep running."
+}
+
+purge_delete_jobs_for_destination_host() {
+  local host="$1"
+  local attempt="$2"
+  local exit_code="$3"
+  local detail="$4"
+  local job_id="" transport="" job_host="" dropped=0
+  local -a ids=()
+
+  for job_id in "${QUEUE_IDS[@]}"; do
+    [[ -n "$job_id" ]] || continue
+    queue_job_exists "$job_id" || continue
+    transport="${QUEUE_SEND_TRANSPORT[$job_id]:-}"
+    transport="${transport,,}"
+    [[ "$transport" == "ssh" ]] || continue
+    job_host="$(delete_job_destination_host "$job_id")"
+    [[ "$job_host" == "$host" ]] || continue
+    ids+=("$job_id")
+  done
+
+  for job_id in "${ids[@]}"; do
+    queue_remove_job "$job_id"
+    dropped=$((dropped + 1))
+  done
+
+  log "Destination host ${host} is down after ${attempt} connection failures (last exit ${exit_code}). Dropped ${dropped} pending cleanup/delete job(s) for that destination. They will be planned again the next time a send to that destination runs retention. Last error: ${detail}"
+}
+
+delete_destination_note_transport_failure() {
+  local snapshot="$1"
+  local exit_code="$2"
+  local output="$3"
+  local host="" count=0 next_epoch=0 detail=""
+
+  host="$(delete_job_destination_host "${CURRENT_JOB_ID:-}")"
+  [[ -n "$host" ]] || return 0
+  detail="$(delete_destination_transport_text "${snapshot}: ${output}")"
+  delete_dest_transport_locked_update "$host" fail count next_epoch || return 0
+  if (( count >= DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS )); then
+    purge_delete_jobs_for_destination_host "$host" "$count" "$exit_code" "$detail"
+    return 0
+  fi
+  defer_delete_jobs_for_destination_host "$host" "$next_epoch" "$count" "$exit_code"
+}
+
+delete_destination_note_transport_success() {
+  local host="" count=0 next_epoch=0
+
+  host="$(delete_job_destination_host "${CURRENT_JOB_ID:-}")"
+  [[ -n "$host" ]] || return 0
+  delete_dest_transport_locked_update "$host" lookup count next_epoch || return 0
+  if (( count > 0 )); then
+    delete_dest_transport_locked_update "$host" success || return 0
+    log "Destination host ${host} remote delete succeeded. Its connection failure count was reset."
+  fi
+}
+
+remember_delete_destination_backoff() {
+  local job_id="$1"
+  local transport="" host="" count=0 next_epoch=0 now_epoch=0 state=""
+  local -A held=()
+
+  queue_job_exists "$job_id" || return 0
+  transport="${QUEUE_SEND_TRANSPORT[$job_id]:-}"
+  transport="${transport,,}"
+  [[ "$transport" == "ssh" ]] || return 0
+  host="$(delete_job_destination_host "$job_id")"
+  [[ -n "$host" ]] || return 0
+  delete_dest_transport_locked_update "$host" lookup count next_epoch || return 0
+  if (( count >= DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS )); then
+    log "Dropping cleanup job ${job_id} for ${QUEUE_SNAPSHOT[$job_id]:-unknown}. Destination host ${host} is down after ${count} connection failures and is not being retried."
+    queue_remove_job "$job_id"
+    return 0
+  fi
+  now_epoch="$(delete_queue_now_epoch)"
+  [[ "$now_epoch" =~ ^[0-9]+$ ]] || now_epoch=0
+  if [[ "$next_epoch" =~ ^[0-9]+$ ]] && (( next_epoch > now_epoch )); then
+    state="${QUEUE_STATE[$job_id]:-queued}"
+    if [[ "$state" == "queued" || "$state" == "retry_wait" || "$state" == "running" ]]; then
+      queue_load_job_assoc "$job_id" held || return 0
+      held[STATE]="retry_wait"
+      held[RETRY_AT]="$next_epoch"
+      held[WORKER_PID]=""
+      queue_store_job_assoc "$job_id" held
+    fi
+  fi
+}
+
 process_send_checkpoint_delete() {
-  local snapshot basename schedule_job_id source_root dest_root prefix delete_scope transport
+  local snapshot basename schedule_job_id source_root dest_root prefix delete_scope transport rc=0
   local -A job=()
 
   queue_load_job_assoc "$CURRENT_JOB_ID" job || return 1
@@ -602,7 +769,15 @@ process_send_checkpoint_delete() {
     log "Deleting scheduled-send checkpoint ${basename} across its source and destination trees."
     dataset_exists "$source_root" && delete_checkpoint_basename_across_tree "$source_root" "$basename" "$prefix" "source" local
     if [[ "$transport" == "ssh" ]]; then
-      delete_checkpoint_basename_across_tree "$dest_root" "$basename" "$prefix" "destination" ssh
+      rc=0
+      delete_with_job_ssh_host "$(delete_job_destination_host "$CURRENT_JOB_ID")" \
+        delete_checkpoint_basename_across_tree "$dest_root" "$basename" "$prefix" "destination" ssh || rc=$?
+      if (( rc == 75 )); then
+        return 0
+      fi
+      if (( rc != 0 )); then
+        return "$rc"
+      fi
     elif [[ "$transport" == "local" ]] && dataset_exists "$dest_root"; then
       delete_checkpoint_basename_across_tree "$dest_root" "$basename" "$prefix" "destination" local
     fi
@@ -614,7 +789,15 @@ process_send_checkpoint_delete() {
   if [[ "$delete_scope" == "destination_checkpoint" ]]; then
     if [[ "$transport" == "ssh" ]]; then
       log "Deleting remote SSH destination scheduled-send checkpoint snapshot ${snapshot}."
-      delete_single_snapshot "$snapshot" ssh || return $?
+      rc=0
+      delete_with_job_ssh_host "$(delete_job_destination_host "$CURRENT_JOB_ID")" \
+        delete_single_snapshot "$snapshot" ssh || rc=$?
+      if (( rc == 75 )); then
+        return 0
+      fi
+      if (( rc != 0 )); then
+        return "$rc"
+      fi
       complete_delete_job "Deleted remote SSH destination scheduled-send checkpoint snapshot ${snapshot}."
       return 0
     fi
@@ -640,7 +823,7 @@ process_standard_delete() {
 }
 
 process_delete_job() {
-  local snapshot
+  local snapshot rc=0
   local -A job=()
 
   queue_load_job_assoc "$CURRENT_JOB_ID" job || return 1
@@ -652,10 +835,11 @@ process_delete_job() {
   fi
 
   if [[ "$(job_get job SEND_PROTECTED 0)" == "1" ]]; then
-    process_send_checkpoint_delete || {
-      fail_delete_job "Snapshot delete failed for ${snapshot}. Review the send log for the exact destroy error."
+    process_send_checkpoint_delete || rc=$?
+    if (( rc == 0 || rc == 75 )); then
       return 0
-    }
+    fi
+    fail_delete_job "Snapshot delete failed for ${snapshot}. Review the send log for the exact destroy error."
     return 0
   fi
 
@@ -669,7 +853,7 @@ next_ready_job_id() {
   local result_var="$1"
   local candidate_job_id state retry_at now_epoch index
 
-  now_epoch="$(date +%s)"
+  now_epoch="$(delete_queue_now_epoch)"
   printf -v "$result_var" ''
   queue_advance_head_index
 
