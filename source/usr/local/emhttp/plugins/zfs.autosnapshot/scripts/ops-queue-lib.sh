@@ -73,6 +73,20 @@ DEFAULT_RETRY_DELAYS=(60 300 900)
 # is tried again. A step that succeeds continues immediately.
 DEFAULT_SEND_REMOTE_MAX_ATTEMPTS=5
 DEFAULT_SEND_REMOTE_RETRY_DELAY_SECONDS=300
+# Remote destroy originally had no ConnectTimeout, no ServerAlive*, and no
+# timeout(1) wrapper. A destroy that is already running is not cut off: that
+# wait is already longer than five minutes. The connect phase used OpenSSH's
+# default, the system TCP timeout, which is under five minutes. Destroy now
+# waits at least 300 seconds to connect. A configured value at or above 300
+# is kept.
+DEFAULT_DELETE_REMOTE_DESTROY_CONNECT_TIMEOUT_SECONDS=300
+# Delete-queue connection failures are counted per destination host, not per
+# snapshot. The wait is a retry time on that host's jobs. It is not a sleep
+# that holds the send queue or any other destination.
+DEFAULT_DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS=3
+DEFAULT_DELETE_DESTINATION_TRANSPORT_BACKOFF_SECONDS=1800
+DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS="$DEFAULT_DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS"
+DELETE_DESTINATION_TRANSPORT_BACKOFF_SECONDS="$DEFAULT_DELETE_DESTINATION_TRANSPORT_BACKOFF_SECONDS"
 # When a snapshot listing is confirmed and there is no common base, or a
 # completed incremental receive reports a genuine destination mismatch, purge
 # the destination and send a full backup. 0 disables that rebuild.
@@ -574,7 +588,7 @@ delete_queue_emit_state_line() {
   # shellcheck disable=SC2178
   local -n job_ref="$assoc_name"
 
-  printf 'JOB\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf 'JOB\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(delete_queue_sanitize_field "${job_ref[JOB_ID]:-}")" \
     "$(delete_queue_sanitize_field "${job_ref[STATE]:-queued}")" \
     "$(delete_queue_sanitize_field "${job_ref[RETRY_AT]:-0}")" \
@@ -592,7 +606,8 @@ delete_queue_emit_state_line() {
     "$(delete_queue_sanitize_field "${job_ref[DELETE_SCOPE]:-snapshot}")" \
     "$(delete_queue_sanitize_field "${job_ref[SEND_SCHEDULE_JOB_ID]:-}")" \
     "$(delete_queue_sanitize_field "${job_ref[WORKER_PID]:-}")" \
-    "$(delete_queue_sanitize_field "${job_ref[SEND_TRANSPORT]:-}")"
+    "$(delete_queue_sanitize_field "${job_ref[SEND_TRANSPORT]:-}")" \
+    "$(delete_queue_sanitize_field "${job_ref[DEST_HOST]:-}")"
 }
 
 delete_queue_parse_state_line() {
@@ -624,6 +639,7 @@ delete_queue_parse_state_line() {
   job_ref[SEND_SCHEDULE_JOB_ID]="${fields[16]:-}"
   job_ref[WORKER_PID]="${fields[17]:-}"
   job_ref[SEND_TRANSPORT]="${fields[18]:-}"
+  job_ref[DEST_HOST]="${fields[19]:-}"
   return 0
 }
 
@@ -632,7 +648,7 @@ delete_queue_emit_enqueue_line() {
   # shellcheck disable=SC2178
   local -n job_ref="$assoc_name"
 
-  printf 'ENQUEUE\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf 'ENQUEUE\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(delete_queue_sanitize_field "${job_ref[JOB_ID]:-}")" \
     "$(delete_queue_sanitize_field "${job_ref[REQUESTED_EPOCH]:-0}")" \
     "$(delete_queue_sanitize_field "${job_ref[QUEUE_SORT]:-0}")" \
@@ -647,7 +663,8 @@ delete_queue_emit_enqueue_line() {
     "$(delete_queue_sanitize_field "${job_ref[SEND_PROTECTED]:-0}")" \
     "$(delete_queue_sanitize_field "${job_ref[DELETE_SCOPE]:-snapshot}")" \
     "$(delete_queue_sanitize_field "${job_ref[SEND_SCHEDULE_JOB_ID]:-}")" \
-    "$(delete_queue_sanitize_field "${job_ref[SEND_TRANSPORT]:-}")"
+    "$(delete_queue_sanitize_field "${job_ref[SEND_TRANSPORT]:-}")" \
+    "$(delete_queue_sanitize_field "${job_ref[DEST_HOST]:-}")"
 }
 
 delete_queue_parse_enqueue_line() {
@@ -678,6 +695,7 @@ delete_queue_parse_enqueue_line() {
   job_ref[DELETE_SCOPE]="${fields[13]:-snapshot}"
   job_ref[SEND_SCHEDULE_JOB_ID]="${fields[14]:-}"
   job_ref[SEND_TRANSPORT]="${fields[15]:-}"
+  job_ref[DEST_HOST]="${fields[16]:-}"
   job_ref[WORKER_PID]=""
   return 0
 }
@@ -3300,6 +3318,7 @@ build_ssh_zfs_command() {
   # a while-read here-string or pipe is that stdin, so one nested ssh would
   # otherwise consume the rest of the loop.
   local read_stdin="${3:-0}"
+  local connect_timeout="${4:-}"
   local ssh_host="$SEND_SSH_HOST"
   local ssh_port="${SEND_SSH_PORT:-$DEFAULT_SEND_SSH_PORT}"
   local ssh_user="${SEND_SSH_USER:-$DEFAULT_SEND_SSH_USER}"
@@ -3320,6 +3339,9 @@ build_ssh_zfs_command() {
   ssh_parts+=(-p "$ssh_port")
   if [[ "$read_stdin" != "1" ]]; then
     ssh_parts+=(-n)
+  fi
+  if [[ "$connect_timeout" =~ ^[0-9]+$ ]] && (( connect_timeout > 0 )); then
+    ssh_parts+=(-o "ConnectTimeout=${connect_timeout}")
   fi
   if [[ -n "$ssh_key_path" ]]; then
     ssh_parts+=(-i "$ssh_key_path")
@@ -3352,7 +3374,12 @@ run_zfs_for_transport() {
   local description="$2"
   shift 2
   local remote="zfs" arg command="" err_file rc=0
+  local connect_timeout=""
 
+  if [[ "${1:-}" == "--connect-timeout" ]]; then
+    connect_timeout="${2:-}"
+    shift 2
+  fi
   [[ "${1:-}" == "--" ]] && shift
   transport="${transport,,}"
   [[ -n "$transport" ]] || transport="local"
@@ -3368,7 +3395,7 @@ run_zfs_for_transport() {
   for arg in "$@"; do
     remote+=" $(shell_quote_word "$arg")"
   done
-  build_ssh_zfs_command "$remote" command || return 1
+  build_ssh_zfs_command "$remote" command 0 "$connect_timeout" || return 1
   err_file="$(mktemp /tmp/zfsas-zfs-err.XXXXXX 2>/dev/null || true)"
   if [[ -z "$err_file" ]]; then
     err_file="/tmp/zfsas-zfs-err.$$"
@@ -3412,24 +3439,214 @@ snapshot_confirmed_absent_for_transport() {
   return 1
 }
 
+# Clock for delete-queue retry times. Tests replace this with a fixed epoch.
+delete_queue_now_epoch() {
+  if declare -F delete_queue_now_epoch_hook >/dev/null 2>&1; then
+    delete_queue_now_epoch_hook
+    return 0
+  fi
+  date +%s
+}
+
+# Connect timeout for one remote destroy. The original destroy path set no
+# ConnectTimeout, so this raises the under-five-minute system TCP default to
+# 300 seconds and leaves any already-longer setting unchanged.
+delete_remote_destroy_connect_timeout_seconds() {
+  local value="${DELETE_REMOTE_DESTROY_CONNECT_TIMEOUT_SECONDS:-$DEFAULT_DELETE_REMOTE_DESTROY_CONNECT_TIMEOUT_SECONDS}"
+  local floor=300
+
+  if [[ ! "$value" =~ ^[0-9]+$ ]] || (( value < floor )); then
+    value="$floor"
+  fi
+  printf '%s' "$value"
+}
+
+# Connection and transport failures are a property of the destination host.
+# Dataset-missing and snapshot-busy errors stay on the single item.
+ssh_failure_is_transport_class() {
+  local rc="$1"
+  local text="$2"
+  local lower
+
+  [[ "$rc" =~ ^[0-9]+$ ]] || rc=1
+  if (( rc == 255 )); then
+    return 0
+  fi
+  lower="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
+  [[ "$lower" == *"timed out"* || "$lower" == *"timeout"* ]] && return 0
+  [[ "$lower" == *"connection refused"* ]] && return 0
+  [[ "$lower" == *"connection reset"* ]] && return 0
+  [[ "$lower" == *"broken pipe"* ]] && return 0
+  return 1
+}
+
+delete_dest_transport_state_path() {
+  printf '%s/delete-dest-transport.state' "${OPS_STATUS_DIR:-/tmp/zfs-autosnapshot-ops/status}"
+}
+
+# action is lookup, fail, success, or replan.
+# fail adds one attempt for this host and, until the third failure, sets the
+# next time that host may be tried. success and a post-purge replan clear it.
+delete_dest_transport_locked_update() {
+  local host="$1"
+  local action="$2"
+  local count_var="${3:-}"
+  local next_var="${4:-}"
+  local path="" lock="" fd=7 line="" seen_host="" seen_count="" seen_next=""
+  local found=0 new_count=0 new_next=0 now_epoch=0 max_attempts=0 backoff=0
+  local tmp=""
+  local -a kept=()
+
+  [[ -n "$host" ]] || return 1
+  max_attempts="${DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS:-$DEFAULT_DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS}"
+  backoff="${DELETE_DESTINATION_TRANSPORT_BACKOFF_SECONDS:-$DEFAULT_DELETE_DESTINATION_TRANSPORT_BACKOFF_SECONDS}"
+  [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts="$DEFAULT_DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS"
+  [[ "$backoff" =~ ^[0-9]+$ ]] || backoff="$DEFAULT_DELETE_DESTINATION_TRANSPORT_BACKOFF_SECONDS"
+  (( max_attempts >= 1 )) || max_attempts=3
+
+  path="$(delete_dest_transport_state_path)"
+  mkdir -p "$(dirname "$path")" >/dev/null 2>&1 || return 1
+  lock="${path}.lock"
+  : > "$lock" 2>/dev/null || true
+  exec {fd}>>"$lock" || return 1
+  flock "$fd" || {
+    eval "exec ${fd}>&-"
+    return 1
+  }
+
+  if [[ -f "$path" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ -n "$line" ]] || continue
+      IFS=$'\t' read -r seen_host seen_count seen_next <<<"$line"
+      [[ -n "$seen_host" ]] || continue
+      if [[ "$seen_host" == "$host" ]]; then
+        found=1
+        [[ "$seen_count" =~ ^[0-9]+$ ]] || seen_count=0
+        [[ "$seen_next" =~ ^[0-9]+$ ]] || seen_next=0
+        new_count="$seen_count"
+        new_next="$seen_next"
+      else
+        kept+=("$line")
+      fi
+    done < "$path"
+  fi
+
+  case "$action" in
+    lookup)
+      ;;
+    fail)
+      if (( new_count < max_attempts )); then
+        new_count=$((new_count + 1))
+      fi
+      if (( new_count >= max_attempts )); then
+        new_next=0
+      else
+        now_epoch="$(delete_queue_now_epoch)"
+        [[ "$now_epoch" =~ ^[0-9]+$ ]] || now_epoch=0
+        new_next=$((now_epoch + backoff))
+      fi
+      ;;
+    success)
+      new_count=0
+      new_next=0
+      ;;
+    replan)
+      if (( new_count >= max_attempts )); then
+        new_count=0
+        new_next=0
+      fi
+      ;;
+    *)
+      flock -u "$fd" || true
+      eval "exec ${fd}>&-"
+      return 1
+      ;;
+  esac
+
+  if [[ "$action" != "lookup" ]]; then
+    tmp="${path}.tmp.$$"
+    : > "$tmp"
+    if (( ${#kept[@]} > 0 )); then
+      printf '%s\n' "${kept[@]}" >> "$tmp"
+    fi
+    if (( new_count > 0 || new_next > 0 )); then
+      printf '%s\t%s\t%s\n' "$host" "$new_count" "$new_next" >> "$tmp"
+    fi
+    mv "$tmp" "$path"
+  fi
+
+  flock -u "$fd" || true
+  eval "exec ${fd}>&-"
+
+  if [[ -n "$count_var" ]]; then
+    printf -v "$count_var" '%s' "$new_count"
+  fi
+  if [[ -n "$next_var" ]]; then
+    printf -v "$next_var" '%s' "$new_next"
+  fi
+  if [[ "$action" == "lookup" && "$found" == "0" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# The next scheduled or post-send retention pass may queue cleanup again.
+# Only a host that already used its connection attempts is cleared. A host
+# still inside the 30-minute wait keeps that wait. Space approval must not
+# call this: clearing the host there makes a down destination loop forever.
+delete_destination_replan_if_exhausted() {
+  local host="$1"
+  local count=0 next_epoch=0
+
+  [[ -n "$host" ]] || return 0
+  delete_dest_transport_locked_update "$host" lookup count next_epoch || return 0
+  if (( count >= ${DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS:-3} )); then
+    delete_dest_transport_locked_update "$host" replan || return 0
+    log "Destination host ${host} was down after ${count} connection failures. A send is planning retention, so cleanup for that destination can be queued again."
+  fi
+  return 0
+}
+
 destroy_snapshot_for_transport() {
   local transport="$1"
   local snapshot="$2"
   local max_attempts=3
   local attempt=1
   local output="" rc=0
+  local connect_timeout=""
 
   transport="${transport,,}"
   [[ -n "$transport" ]] || transport="local"
+  if [[ "$transport" == "ssh" ]]; then
+    connect_timeout="$(delete_remote_destroy_connect_timeout_seconds)"
+  fi
   while (( attempt <= max_attempts )); do
     rc=0
-    output="$(run_zfs_for_transport "$transport" "destroy ${snapshot}" -- destroy -- "$snapshot" 2>&1)" || rc=$?
+    if [[ -n "$connect_timeout" ]]; then
+      output="$(run_zfs_for_transport "$transport" "destroy ${snapshot}" --connect-timeout "$connect_timeout" -- destroy -- "$snapshot" 2>&1)" || rc=$?
+    else
+      output="$(run_zfs_for_transport "$transport" "destroy ${snapshot}" -- destroy -- "$snapshot" 2>&1)" || rc=$?
+    fi
     if (( rc == 0 )); then
+      if [[ "$transport" == "ssh" ]] && declare -F delete_destination_note_transport_success >/dev/null 2>&1; then
+        delete_destination_note_transport_success || true
+      fi
       return 0
     fi
     if ssh_output_proves_dataset_absent "$output" && snapshot_confirmed_absent_for_transport "$transport" "$snapshot"; then
       log "Delete already done for ${snapshot}; it is not on this destination."
+      if [[ "$transport" == "ssh" ]] && declare -F delete_destination_note_transport_success >/dev/null 2>&1; then
+        delete_destination_note_transport_success || true
+      fi
       return 0
+    fi
+    # One connection failure is one attempt for the whole destination. The
+    # delete worker waits and may drop that host's queue. Callers without
+    # that worker keep the short per-item retries below.
+    if [[ "$transport" == "ssh" ]] && ssh_failure_is_transport_class "$rc" "$output" \
+      && declare -F delete_destination_note_transport_failure >/dev/null 2>&1; then
+      delete_destination_note_transport_failure "$snapshot" "$rc" "$output" || true
+      return 75
     fi
     if (( attempt >= max_attempts )); then
       log "Delete attempt ${attempt}/${max_attempts} failed for ${snapshot}: ${output}"
@@ -5183,7 +5400,7 @@ delete_checkpoint_basename_across_tree() {
   local prefix="$3"
   local side_label="$4"
   local transport="${5:-local}"
-  local snap_name snap_epoch snapshots=()
+  local snap_name snap_epoch rc=0 snapshots=()
 
   transport="${transport,,}"
   [[ -n "$transport" ]] || transport="local"
@@ -5199,8 +5416,13 @@ delete_checkpoint_basename_across_tree() {
 
   for snap_name in "${snapshots[@]}"; do
     log "Deleting ${side_label} send checkpoint: $snap_name"
-    destroy_snapshot_for_transport "$transport" "$snap_name"
+    rc=0
+    destroy_snapshot_for_transport "$transport" "$snap_name" || rc=$?
+    if (( rc != 0 )); then
+      return "$rc"
+    fi
   done
+  return 0
 }
 
 delete_destination_snapshot() {
@@ -6088,6 +6310,9 @@ queue_snapshot_delete_job() {
   job[DELETE_SCOPE]="$delete_scope"
   job[SEND_TRANSPORT]="$send_transport"
   job[RETRY_AT]="0"
+  if [[ "$send_transport" == "ssh" ]]; then
+    job[DEST_HOST]="${SEND_SSH_HOST:-}"
+  fi
 
   if [[ ( "$delete_scope" == "checkpoint" || "$delete_scope" == "destination_checkpoint" ) && -n "$send_schedule_job_id" ]]; then
     job[SEND_PROTECTED]="1"
@@ -6336,6 +6561,9 @@ queue_destination_retention_for_dataset() {
   local keep_all_seconds keep_daily_seconds keep_weekly_seconds
   local week_key day_key
   local now_epoch
+  # Space approval passes 0. Scheduled and post-send retention keep the default
+  # so the next backup can retry a destination that was marked down.
+  local replan_exhausted="${7:-1}"
   local -A protected=()
   local -A kept_day=()
   local -A kept_week=()
@@ -6347,6 +6575,9 @@ queue_destination_retention_for_dataset() {
     [[ -n "$transport" ]] || transport="local"
   fi
   if [[ "$transport" == "ssh" ]]; then
+    if [[ "$replan_exhausted" != "0" ]]; then
+      delete_destination_replan_if_exhausted "${SEND_SSH_HOST:-}"
+    fi
     ssh_dataset_exists "$dataset" || return 0
   else
     dataset_exists "$dataset" || return 0
@@ -6541,16 +6772,28 @@ queue_pool_retention_cleanup() {
   local pool="$1"
   local capacity_dataset="$2"
   local delta_map_name="$3"
-  local schedule_job_id dataset newest_send_basename=""
+  # 0 keeps a down destination down. Space approval passes 0 so the send that
+  # is waiting on space cannot clear the host and queue the same cleanup again.
+  local replan_exhausted="${4:-1}"
+  local schedule_job_id dataset newest_send_basename="" transport
 
   # fd 3/4: retention on one dataset ssh's and must not skip the datasets after it.
   while IFS= read -r schedule_job_id <&3; do
     [[ -n "$schedule_job_id" ]] || continue
+    transport="${SCHEDULE_TRANSPORT[$schedule_job_id]:-local}"
+    transport="${transport,,}"
+    [[ -n "$transport" ]] || transport="local"
+    # Reset even when the receiver is down and this pass finds no datasets.
+    # That is the next scheduled backup's retry. A host still in its 30-minute
+    # wait is left alone.
+    if [[ "$transport" == "ssh" && "$replan_exhausted" != "0" ]]; then
+      delete_destination_replan_if_exhausted "${SEND_SSH_HOST:-}"
+    fi
     latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
     while IFS= read -r dataset <&4; do
       [[ -n "$dataset" ]] || continue
       # One dataset returning non-zero must not skip the rest of a recursive tree.
-      queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" "$capacity_dataset" "$delta_map_name" || true
+      queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" "$capacity_dataset" "$delta_map_name" "$replan_exhausted" || true
     done 4< <(list_existing_destination_datasets_for_schedule "$schedule_job_id")
   done 3< <(list_schedule_job_ids_for_destination_pool "$pool")
 }
@@ -6631,6 +6874,9 @@ queue_schedule_retention_cleanup() {
   local schedule_job_id="$1"
   local dataset newest_send_basename=""
 
+  if [[ "$(schedule_transport_for_id "$schedule_job_id")" == "ssh" ]]; then
+    delete_destination_replan_if_exhausted "${SEND_SSH_HOST:-}"
+  fi
   latest_checkpoint_basename_for_schedule "$schedule_job_id" newest_send_basename
   # fd 3: one dataset's retention ssh must not drop the remaining datasets.
   while IFS= read -r dataset <&3; do
@@ -6649,6 +6895,9 @@ queue_schedule_post_send_cleanup_for_dataset() {
   local newest_send_basename="$3"
 
   [[ -n "$schedule_job_id" && -n "$dataset" && -n "$newest_send_basename" ]] || return 1
+  if [[ "$(schedule_transport_for_id "$schedule_job_id")" == "ssh" ]]; then
+    delete_destination_replan_if_exhausted "${SEND_SSH_HOST:-}"
+  fi
   queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "retention" || true
   queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change" || true
 }
@@ -6672,6 +6921,27 @@ queue_schedule_zero_change_cleanup_for_dataset() {
 
   [[ -n "$schedule_job_id" && -n "$dataset" && -n "$newest_send_basename" ]] || return 1
   queue_destination_retention_for_dataset "$dataset" "$schedule_job_id" "$newest_send_basename" "zero_change"
+}
+
+# Stop this send. The queue handler has not claimed the job yet; drop any
+# reservation or claim this process owns so later jobs are not stuck behind it.
+# A failed send does not block the next scheduled window.
+fail_send_launch_for_space() {
+  local job_path="$1"
+  local assoc_name="$2"
+  local message="$3"
+  local reason="${4:-space}"
+  local job_id
+  # shellcheck disable=SC2178
+  local -n launch_job_ref="$assoc_name"
+
+  job_id="$(job_get launch_job_ref JOB_ID)"
+  log "$message"
+  release_send_space_reservation_for_job "$job_id"
+  release_job_claim "$job_id" || true
+  mark_job_terminal_failure "$assoc_name" "$message"
+  job_write "$job_path" "$assoc_name" || true
+  return 1
 }
 
 defer_send_launch_approval() {
@@ -6698,6 +6968,7 @@ approve_send_job_space_for_launch() {
   local job_path="$1"
   local reservation_pid="$2"
   local job_id destination capacity_dataset dest_pool required_bytes buffer_bytes needed_bytes available_bytes freeing_bytes shortfall threshold_bytes cleanup_target now_epoch last_cleanup_at prep_job_id prep_path prep_state send_transport
+  local failure_count=0 dest_host="" max_attempts=0 queued_none=0 before_deletes=0 after_deletes=0 added_deletes=0 failure_message=""
   local -A launch_job=()
   local -A prep_job=()
   local -A planned_reclaim=()
@@ -6712,6 +6983,11 @@ approve_send_job_space_for_launch() {
   send_transport="${send_transport,,}"
   [[ -n "$send_transport" ]] || send_transport="local"
   [[ -n "$job_id" && -n "$destination" && "$required_bytes" =~ ^[0-9]+$ ]] || return 1
+  case "$(job_get launch_job STATE)" in
+    failed|complete|skipped)
+      return 1
+      ;;
+  esac
 
   prep_job_id="$(job_get launch_job PREP_JOB_ID)"
   if [[ -n "$prep_job_id" ]]; then
@@ -6770,12 +7046,38 @@ approve_send_job_space_for_launch() {
     return 1
   fi
 
+  # Deletes still in the 30-minute retry_wait are active work above, and this
+  # send keeps waiting for them. Once those deletes are gone and the receiver
+  # has used every connection attempt, another plan would only clear the host
+  # and start the same failures again.
+  if [[ "$send_transport" == "ssh" ]]; then
+    dest_host="${SEND_SSH_HOST:-}"
+    if [[ -n "$dest_host" ]]; then
+      failure_count=0
+      delete_dest_transport_locked_update "$dest_host" lookup failure_count || true
+      max_attempts="${DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS:-$DEFAULT_DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS}"
+      [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts="$DEFAULT_DELETE_DESTINATION_TRANSPORT_MAX_ATTEMPTS"
+      if (( failure_count >= max_attempts )); then
+        failure_message="Destination cleanup unreachable after ${failure_count} connection failures; will retry on next scheduled backup."
+        fail_send_launch_for_space "$job_path" launch_job "$failure_message" "destination_unreachable" || return 1
+      fi
+    fi
+  fi
+
   now_epoch="$(date +%s)"
   last_cleanup_at="$(job_get launch_job SPACE_CLEANUP_REQUESTED_AT 0)"
   [[ "$last_cleanup_at" =~ ^[0-9]+$ ]] || last_cleanup_at=0
   if (( now_epoch - last_cleanup_at < 30 )); then
     defer_send_launch_approval "$job_path" launch_job "Waiting for destination cleanup planning cooldown." 3
     return 1
+  fi
+
+  # The previous plan queued nothing and the one cooldown has passed. Planning
+  # again would repeat that empty pass every 30 seconds.
+  queued_none="$(job_get launch_job SPACE_CLEANUP_QUEUED_NONE 0)"
+  if [[ "$queued_none" == "1" ]]; then
+    failure_message="Destination cleanup queued nothing new and space is still short. Nothing left to clean; this send will retry on the next scheduled backup."
+    fail_send_launch_for_space "$job_path" launch_job "$failure_message" "nothing_to_clean" || return 1
   fi
 
   if ! acquire_pool_prep_lock "$dest_pool"; then
@@ -6791,8 +7093,24 @@ approve_send_job_space_for_launch() {
     cleanup_target="$threshold_bytes"
   fi
   log "Destination space approval is short on pool ${dest_pool}; queue manager is planning cleanup up to ${cleanup_target} bytes for ${job_id}."
-  queue_pool_retention_cleanup "$dest_pool" "$capacity_dataset" planned_reclaim || true
+  before_deletes="$(active_delete_inbox_count_for_pool "$dest_pool")"
+  [[ "$before_deletes" =~ ^[0-9]+$ ]] || before_deletes=0
+  # Pass 0 so this plan cannot clear a destination that is already down.
+  queue_pool_retention_cleanup "$dest_pool" "$capacity_dataset" planned_reclaim 0 || true
   queue_pool_free_space_cleanup_for_target "$dest_pool" "$capacity_dataset" "$cleanup_target" planned_reclaim "$send_transport" || true
+  after_deletes="$(active_delete_inbox_count_for_pool "$dest_pool")"
+  [[ "$after_deletes" =~ ^[0-9]+$ ]] || after_deletes=0
+  added_deletes=$((after_deletes - before_deletes))
+  if (( added_deletes < 0 )); then
+    added_deletes=0
+  fi
+  if (( added_deletes > 0 )); then
+    launch_job[SPACE_CLEANUP_QUEUED_NONE]=0
+  else
+    launch_job[SPACE_CLEANUP_QUEUED_NONE]=1
+    launch_job[LAST_MESSAGE]="Destination cleanup queued nothing new. Waiting one planning cooldown before stopping this send."
+  fi
+  job_write "$job_path" launch_job || true
   release_pool_prep_lock "$dest_pool"
   ensure_delete_worker_for_backlog
   return 1

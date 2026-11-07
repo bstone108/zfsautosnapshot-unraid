@@ -290,6 +290,23 @@ def main() -> int:
             "zero-byte space bypass must happen before acquire_send_space_reservation_for_transport so remote finalizers do not stall"
         )
     assert_contains(
+        approve_body,
+        "Destination cleanup unreachable after ${failure_count} connection failures; will retry on next scheduled backup.",
+        "space approval must fail a send when destination cleanup is unreachable after the connection attempts are used up",
+    )
+    assert_contains(
+        approve_body,
+        "Nothing left to clean; this send will retry on the next scheduled backup.",
+        "space approval must stop after an empty cleanup plan instead of planning again every cooldown",
+    )
+    assert_contains(
+        approve_body,
+        'queue_pool_retention_cleanup "$dest_pool" "$capacity_dataset" planned_reclaim 0',
+        "space approval must plan retention without clearing an exhausted destination host",
+    )
+    if "delete_destination_replan_if_exhausted" in approve_body:
+        raise AssertionError("space approval must not reset exhausted destination state while it is waiting on space")
+    assert_contains(
         worker,
         'defer_current_job "Waiting for children." 1',
         "scheduled finalizers should recheck child completion quickly instead of sleeping through ready work",
@@ -348,7 +365,7 @@ def main() -> int:
     )
     assert_contains(
         lib,
-        'build_ssh_zfs_command "$remote" command || return 1',
+        'build_ssh_zfs_command "$remote" command 0 "$connect_timeout" || return 1',
         "SSH zfs commands must be wrapped by the shared SSH command builder",
     )
     assert_contains(
