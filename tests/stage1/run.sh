@@ -714,6 +714,84 @@ EOF
   assert_file_contains "${case_dir}/log/summary.log" "Result: Success"
 }
 
+test_orphaned_send_marker_releases_cleanup_on_fifth_run() {
+  local case_dir activity idle jobs locks dead_pid job_id marker lock_dir
+  local run now_epoch counter
+  case_dir="$(new_case orphan_send_marker)"
+  activity="${case_dir}/active-send-datasets"
+  idle="${case_dir}/send-activity-idle"
+  jobs="${case_dir}/jobs"
+  locks="${case_dir}/job-locks"
+  mkdir -p "$activity" "$jobs" "$locks"
+
+  write_config "${case_dir}" "tank/data:100G"
+  cat > "${case_dir}/state/pools.tsv" <<'EOF'
+tank	500000000000	0	1000000000000	500000000000	50%	ONLINE
+EOF
+  cat > "${case_dir}/state/datasets.tsv" <<'EOF'
+tank	500000000000	0	0	0	0
+tank/data	500000000000	0	0	0	0
+EOF
+  cat > "${case_dir}/state/snaps.tsv" <<'EOF'
+tank/data@autosnapshot-new	tank/data	1999999900	10	0	0	10
+tank/data@autosnapshot-old	tank/data	1900000000	100	10	0	100
+EOF
+
+  dead_pid=""
+  local candidate
+  for candidate in 2147483646 2147483645 2147483644 2147483000 2147482000; do
+    if [[ ! -d "/proc/${candidate}" ]]; then
+      dead_pid="$candidate"
+      break
+    fi
+  done
+  [[ -n "$dead_pid" ]] || fail "could not find an unused pid for the orphaned send marker"
+
+  job_id="send-child-send-c4e2f1a7b305-manual-1793916608-0"
+  marker="${activity}/worker-${dead_pid}-${job_id}.datasets"
+  printf '%s\n' "tank/data" > "$marker"
+  lock_dir="${locks}/job-${job_id}.lockdir"
+  mkdir -p "$lock_dir"
+  printf '%s\n' "$dead_pid" > "${lock_dir}/pid"
+  counter="${idle}/$(basename "$marker").runs"
+
+  now_epoch=2000000000
+  for run in 1 2 3 4; do
+    MOCK_NOW_EPOCH="$now_epoch" \
+      ZFSAS_SEND_ACTIVITY_DIR="$activity" \
+      ZFSAS_SEND_ACTIVITY_IDLE_DIR="$idle" \
+      ZFSAS_OPS_JOBS_DIR="$jobs" \
+      ZFSAS_JOB_LOCKS_DIR="$locks" \
+      run_case "$case_dir"
+    cp "${case_dir}/stdout.log" "${case_dir}/stdout-run-${run}.log"
+    [[ -f "$marker" ]] || fail "orphaned send marker was removed on idle run ${run}"
+    [[ -d "$lock_dir" ]] || fail "orphaned job lock was removed on idle run ${run}"
+    [[ "$(head -n 1 "$counter" 2>/dev/null || true)" == "$run" ]] || fail "idle counter was not ${run} after idle run ${run}"
+    assert_file_contains "${case_dir}/stdout-run-${run}.log" "Idle snapshot runs: ${run} of 5."
+    assert_file_not_contains "${case_dir}/stdout-run-${run}.log" "Removed orphaned send activity marker"
+    assert_file_contains "${case_dir}/stdout-run-${run}.log" "A ZFS send operation is active, so this autosnapshot pass will skip all cleanup phases"
+    assert_snapshot_exists "$case_dir" "tank/data@autosnapshot-old"
+    now_epoch=$((now_epoch + 60))
+  done
+
+  MOCK_NOW_EPOCH="$now_epoch" \
+    ZFSAS_SEND_ACTIVITY_DIR="$activity" \
+    ZFSAS_SEND_ACTIVITY_IDLE_DIR="$idle" \
+    ZFSAS_OPS_JOBS_DIR="$jobs" \
+    ZFSAS_JOB_LOCKS_DIR="$locks" \
+    run_case "$case_dir"
+  [[ ! -e "$marker" ]] || fail "orphaned send marker was still present after the fifth idle run"
+  [[ ! -d "$lock_dir" ]] || fail "orphaned job lock was still present after the fifth idle run"
+  [[ ! -e "$counter" ]] || fail "idle counter remained after the marker was removed"
+  assert_file_contains "${case_dir}/stdout.log" "Removed orphaned send activity marker $(basename "$marker")"
+  assert_file_contains "${case_dir}/stdout.log" "pid=${dead_pid}"
+  assert_file_contains "${case_dir}/stdout.log" "age="
+  assert_file_not_contains "${case_dir}/stdout.log" "A ZFS send operation is active, so this autosnapshot pass will skip all cleanup phases"
+  assert_snapshot_missing "$case_dir" "tank/data@autosnapshot-old"
+  assert_file_contains "${case_dir}/stdout.log" "Deleting (older than 183d): tank/data@autosnapshot-old"
+  assert_file_contains "${case_dir}/stdout.log" "Creating snapshot: tank/data@autosnapshot-"
+}
+
 test_lock_loser_does_not_run_log_maintenance() {
   local case_dir path_prefix lock_file
   case_dir="$(new_case lock_loser_log_maintenance)"
@@ -788,6 +866,9 @@ main() {
   test_lock_loser_does_not_run_log_maintenance
   echo "PASS: lock loser does not run log maintenance"
 
+  test_orphaned_send_marker_releases_cleanup_on_fifth_run
+  echo "PASS: orphaned send marker releases cleanup on the fifth idle run"
+
   python3 "${ROOT_DIR}/tests/stage1/send_settings_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/migrate_datasets_static_checks.py"
   python3 "${ROOT_DIR}/tests/stage1/migrate_datasets_recovery_simulation.py"
@@ -818,6 +899,7 @@ main() {
   bash "${ROOT_DIR}/tests/stage1/zero_change_common_harness.sh"
   bash "${ROOT_DIR}/tests/stage1/unraid_array_status_checks.sh"
   bash "${ROOT_DIR}/tests/stage1/history_regression_checks.sh"
+  bash "${ROOT_DIR}/tests/stage1/send_activity_marker_idle_checks.sh"
 
   echo "All Stage 1 tests passed."
 }
