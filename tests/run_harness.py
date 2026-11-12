@@ -539,6 +539,7 @@ class Harness:
             "send_recursive_dest_retention_checks.sh",
             "send_recursive_single_pass_retention_checks.sh",
             "send_manual_schedule_race_checks.sh",
+            "send_activity_marker_idle_checks.sh",
         ]
         missing = [name for name in required if name not in run_sh or not (self.repo / "tests/stage1" / name).exists()]
         if missing:

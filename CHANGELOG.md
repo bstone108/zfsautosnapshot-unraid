@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.12.t01 (Testing Branch Only)
+
+- A send marker left behind when a send worker is killed no longer pauses local snapshot cleanup forever. Each snapshot run checks whether that send is still queued or still running. A running send, including one that is waiting to retry, still pauses cleanup. If the marker is still there and nothing is queued or running, that run is counted. After 5 runs in a row with nothing queued or running, the leftover marker is removed and cleanup continues on that same run.
+
 ### 2026.11.06.t02 (Testing Branch Only)
 
 - A send that is waiting for free space on a destination no longer plans cleanup forever when that destination cannot be reached. After the destination has failed its connection attempts and no cleanup is still waiting, that send stops and the log says cleanup is unreachable. The next scheduled backup tries again. While cleanup is still in its retry wait, the send keeps waiting. If a cleanup plan finds nothing new to delete, the send waits through one short cooldown and then stops instead of checking again. Other backups are not held up.
