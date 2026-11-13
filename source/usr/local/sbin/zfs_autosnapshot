@@ -29,7 +29,14 @@ CONFIG_FILE="${CONFIG_FILE:-$CONFIG_DIR/zfs_autosnapshot.conf}"
 PLUGIN_NAME="zfs.autosnapshot"
 RUNTIME_DIR="/var/run/zfs-autosnapshot"
 AUTOSNAPSHOT_ACTIVE_FILE="${RUNTIME_DIR}/zfs_autosnapshot.active"
-SEND_ACTIVITY_DIR="/var/run/zfs-autosnapshot-ops/active-send-datasets"
+SEND_ACTIVITY_DIR="${ZFSAS_SEND_ACTIVITY_DIR:-/var/run/zfs-autosnapshot-ops/active-send-datasets}"
+SEND_ACTIVITY_IDLE_DIR="${ZFSAS_SEND_ACTIVITY_IDLE_DIR:-/var/run/zfs-autosnapshot-ops/send-activity-idle}"
+SEND_OPS_JOBS_DIR="${ZFSAS_OPS_JOBS_DIR:-/tmp/zfs-autosnapshot-ops/jobs}"
+SEND_JOB_LOCKS_DIR="${ZFSAS_JOB_LOCKS_DIR:-/var/run/zfs-autosnapshot-ops/job-locks}"
+# Consecutive runs of this script with a send marker and nothing queued or
+# running before that marker is removed. Counted in runs, so it follows the
+# snapshot schedule at whatever interval that schedule uses.
+SEND_ACTIVITY_ORPHAN_IDLE_RUNS=5
 
 # -----------------------------------------------------------------------------
 # Defaults (can be overridden in config file)
@@ -372,6 +379,332 @@ send_operation_active_for_dataset() {
 any_send_operation_active() {
 	[[ -d "$SEND_ACTIVITY_DIR" ]] || return 1
 	find "$SEND_ACTIVITY_DIR" -maxdepth 1 -type f -name '*.datasets' 2>/dev/null | grep -q .
+}
+
+send_activity_pid_state() {
+	local pid="$1"
+	local stat_line
+
+	[[ "$pid" =~ ^[0-9]+$ ]] || return 1
+	[[ -r "/proc/${pid}/stat" ]] || return 1
+	stat_line="$(cat "/proc/${pid}/stat" 2>/dev/null || true)"
+	# comm is inside parentheses and may contain spaces. State follows the last ") ".
+	stat_line="${stat_line##*) }"
+	[[ -n "$stat_line" ]] || return 1
+	printf '%s' "${stat_line%% *}"
+}
+
+send_activity_pid_alive() {
+	local pid="$1"
+	local state
+
+	[[ "$pid" =~ ^[0-9]+$ ]] || return 1
+	if [[ -d "/proc/${pid}" ]]; then
+		state="$(send_activity_pid_state "$pid" || true)"
+		[[ -n "$state" && "$state" != "Z" ]]
+		return
+	fi
+	if [[ -d /proc ]]; then
+		return 1
+	fi
+	kill -0 "$pid" >/dev/null 2>&1
+}
+
+send_activity_pid_is_send_worker() {
+	local pid="$1"
+	local args_text arg
+
+	send_activity_pid_alive "$pid" || return 1
+	args_text="$(tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+	while IFS= read -r arg; do
+		[[ -n "$arg" ]] || continue
+		[[ "${arg##*/}" == "zfs_autosnapshot_send_worker" ]] && return 0
+	done <<< "$args_text"
+	return 1
+}
+
+send_activity_marker_basename() {
+	local marker="$1"
+	basename "$marker"
+}
+
+send_activity_marker_pid() {
+	local base="$1"
+	if [[ "$base" =~ ^worker-([0-9]+)-.+\.datasets$ ]]; then
+		printf '%s' "${BASH_REMATCH[1]}"
+	fi
+}
+
+send_activity_marker_job_id() {
+	local base="$1"
+	if [[ "$base" =~ ^worker-[0-9]+-(.+)\.datasets$ ]]; then
+		printf '%s' "${BASH_REMATCH[1]}"
+	fi
+}
+
+send_activity_job_field() {
+	local file="$1"
+	local key="$2"
+	local line value
+
+	[[ -f "$file" ]] || return 1
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		case "$line" in
+		"$key"=*)
+			value="${line#*=}"
+			value="${value#\"}"
+			value="${value%\"}"
+			printf '%s' "$value"
+			return 0
+			;;
+		esac
+	done < "$file"
+	return 1
+}
+
+send_activity_job_ids_match() {
+	local marker_job_id="$1"
+	local file_job_id="$2"
+	local sanitized
+
+	[[ -n "$marker_job_id" && -n "$file_job_id" ]] || return 1
+	[[ "$marker_job_id" == "$file_job_id" ]] && return 0
+	sanitized="$(printf '%s' "$file_job_id" | tr -c 'A-Za-z0-9._-' '_')"
+	[[ "$marker_job_id" == "$sanitized" ]]
+}
+
+send_activity_job_id_is_safe() {
+	local job_id="$1"
+	[[ "$job_id" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+send_activity_claim_pid() {
+	local job_id="$1"
+	local lock_dir
+
+	send_activity_job_id_is_safe "$job_id" || return 1
+	lock_dir="${SEND_JOB_LOCKS_DIR}/job-${job_id}.lockdir"
+	[[ -d "$lock_dir" && ! -L "$lock_dir" ]] || return 1
+	sed -n '1p' "${lock_dir}/pid" 2>/dev/null || true
+}
+
+send_activity_claim_is_live() {
+	local job_id="$1"
+	local claim_pid
+
+	claim_pid="$(send_activity_claim_pid "$job_id" || true)"
+	send_activity_pid_is_send_worker "$claim_pid"
+}
+
+send_activity_queue_has_valid_work() {
+	local job_id="$1"
+	local file file_job_id state worker_pid
+	local had_nullglob=0
+	local found=1
+
+	[[ -n "$job_id" ]] || return 1
+	if send_activity_claim_is_live "$job_id"; then
+		return 0
+	fi
+	[[ -d "$SEND_OPS_JOBS_DIR" ]] || return 1
+
+	shopt -q nullglob && had_nullglob=1
+	shopt -s nullglob
+	for file in "$SEND_OPS_JOBS_DIR"/*.job; do
+		[[ -f "$file" ]] || continue
+		file_job_id="$(send_activity_job_field "$file" JOB_ID || true)"
+		send_activity_job_ids_match "$job_id" "$file_job_id" || continue
+		state="$(send_activity_job_field "$file" STATE || true)"
+		case "$state" in
+		queued|retry_wait)
+			found=0
+			break
+			;;
+		running)
+			worker_pid="$(send_activity_job_field "$file" WORKER_PID || true)"
+			if send_activity_pid_is_send_worker "$worker_pid"; then
+				found=0
+				break
+			fi
+			;;
+		esac
+	done
+	if ((had_nullglob == 0)); then
+		shopt -u nullglob
+	fi
+	return "$found"
+}
+
+send_activity_marker_is_live() {
+	local marker="$1"
+	local base pid job_id
+
+	base="$(send_activity_marker_basename "$marker")"
+	pid="$(send_activity_marker_pid "$base")"
+	job_id="$(send_activity_marker_job_id "$base")"
+	if send_activity_pid_is_send_worker "$pid"; then
+		return 0
+	fi
+	if send_activity_queue_has_valid_work "$job_id"; then
+		return 0
+	fi
+	return 1
+}
+
+send_activity_idle_counter_file() {
+	local base="$1"
+	printf '%s/%s.runs' "$SEND_ACTIVITY_IDLE_DIR" "$base"
+}
+
+send_activity_marker_age_seconds() {
+	local marker="$1"
+	local now mtime
+
+	now="$(date +%s 2>/dev/null || true)"
+	mtime="$(stat -c %Y "$marker" 2>/dev/null || true)"
+	if [[ ! "$now" =~ ^[0-9]+$ || ! "$mtime" =~ ^[0-9]+$ ]]; then
+		printf 'unknown'
+		return 0
+	fi
+	if ((mtime > now)); then
+		printf '0'
+		return 0
+	fi
+	printf '%s' "$((now - mtime))"
+}
+
+send_activity_age_text() {
+	local age="$1"
+	if [[ "$age" =~ ^[0-9]+$ ]]; then
+		printf '%ss' "$age"
+	else
+		printf 'unknown'
+	fi
+}
+
+send_activity_read_idle_count() {
+	local counter="$1"
+	local count
+
+	[[ -f "$counter" ]] || {
+		printf '0'
+		return 0
+	}
+	count="$(head -n 1 "$counter" 2>/dev/null || true)"
+	count="${count//$'\r'/}"
+	if [[ "$count" =~ ^[0-9]+$ ]]; then
+		printf '%s' "$count"
+	else
+		printf '0'
+	fi
+}
+
+send_activity_write_idle_count() {
+	local counter="$1"
+	local count="$2"
+	local tmp
+
+	mkdir -p "$SEND_ACTIVITY_IDLE_DIR" || return 1
+	chmod 0700 "$SEND_ACTIVITY_IDLE_DIR" 2>/dev/null || true
+	tmp="$(mktemp "${SEND_ACTIVITY_IDLE_DIR}/.runs.XXXXXX")" || return 1
+	printf '%s\n' "$count" > "$tmp" || {
+		rm -f "$tmp" >/dev/null 2>&1 || true
+		return 1
+	}
+	chmod 0600 "$tmp" 2>/dev/null || true
+	if ! mv -f "$tmp" "$counter"; then
+		rm -f "$tmp" >/dev/null 2>&1 || true
+		return 1
+	fi
+	return 0
+}
+
+send_activity_prune_idle_counters() {
+	local counter base
+	local had_nullglob=0
+
+	[[ -d "$SEND_ACTIVITY_IDLE_DIR" ]] || return 0
+	shopt -q nullglob && had_nullglob=1
+	shopt -s nullglob
+	for counter in "$SEND_ACTIVITY_IDLE_DIR"/*.runs; do
+		[[ -f "$counter" ]] || continue
+		base="$(basename "$counter" .runs)"
+		if [[ ! -f "${SEND_ACTIVITY_DIR}/${base}" ]]; then
+			rm -f "$counter" >/dev/null 2>&1 || true
+		fi
+	done
+	if ((had_nullglob == 0)); then
+		shopt -u nullglob
+	fi
+}
+
+send_activity_remove_orphaned_job_lock() {
+	local job_id="$1"
+	local marker_pid="$2"
+	local lock_dir claim_pid
+
+	send_activity_job_id_is_safe "$job_id" || return 0
+	lock_dir="${SEND_JOB_LOCKS_DIR}/job-${job_id}.lockdir"
+	[[ -d "$lock_dir" && ! -L "$lock_dir" ]] || return 0
+	claim_pid="$(sed -n '1p' "${lock_dir}/pid" 2>/dev/null || true)"
+	claim_pid="${claim_pid//$'\r'/}"
+	if send_activity_pid_alive "$claim_pid"; then
+		log "Left send job lock $(basename "$lock_dir") in place because owner pid ${claim_pid} is still running."
+		return 0
+	fi
+	rm -rf "$lock_dir" >/dev/null 2>&1 || true
+	log "Removed orphaned send job lock $(basename "$lock_dir") (owner pid ${claim_pid:-${marker_pid:-unknown}} is not running)."
+}
+
+# One pass per snapshot run. A marker with a live send worker, or a job/claim
+# that is still queued or running, keeps cleanup paused and clears its idle
+# count. A marker with nothing queued or running is counted. After
+# SEND_ACTIVITY_ORPHAN_IDLE_RUNS consecutive runs it is removed so cleanup can
+# continue on this same run. Live processes are not signaled.
+reconcile_send_activity_markers() {
+	local marker base pid job_id counter count age age_text threshold
+	local had_nullglob=0
+
+	threshold="${SEND_ACTIVITY_ORPHAN_IDLE_RUNS:-5}"
+	[[ "$threshold" =~ ^[0-9]+$ ]] || threshold=5
+	((threshold >= 1)) || threshold=5
+
+	send_activity_prune_idle_counters
+
+	[[ -d "$SEND_ACTIVITY_DIR" ]] || return 0
+	shopt -q nullglob && had_nullglob=1
+	shopt -s nullglob
+	for marker in "$SEND_ACTIVITY_DIR"/*.datasets; do
+		[[ -f "$marker" && ! -L "$marker" ]] || continue
+		base="$(send_activity_marker_basename "$marker")"
+		counter="$(send_activity_idle_counter_file "$base")"
+		if send_activity_marker_is_live "$marker"; then
+			rm -f "$counter" >/dev/null 2>&1 || true
+			continue
+		fi
+
+		pid="$(send_activity_marker_pid "$base")"
+		job_id="$(send_activity_marker_job_id "$base")"
+		count="$(send_activity_read_idle_count "$counter")"
+		count=$((count + 1))
+		age="$(send_activity_marker_age_seconds "$marker")"
+		age_text="$(send_activity_age_text "$age")"
+		if ((count >= threshold)); then
+			rm -f "$marker" >/dev/null 2>&1 || true
+			rm -f "$counter" >/dev/null 2>&1 || true
+			log "Removed orphaned send activity marker ${base} (pid=${pid:-unknown}, age=${age_text}) after ${count} consecutive snapshot runs with no queued or running send."
+			send_activity_remove_orphaned_job_lock "$job_id" "$pid"
+			continue
+		fi
+
+		if send_activity_write_idle_count "$counter" "$count"; then
+			log "Send activity marker ${base} has no queued or running send (pid=${pid:-unknown}, age=${age_text}). Idle snapshot runs: ${count} of ${threshold}."
+		fi
+	done
+	if ((had_nullglob == 0)); then
+		shopt -u nullglob
+	fi
+	return 0
 }
 
 register_active_child() {
@@ -1681,6 +2014,20 @@ time_clean_dataset() {
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
+# Janitorial upgrade sweep. Separate from post-install. A failure here must
+# not stop the snapshot run; the next run retries.
+zfsas_snapshot_run_upgrade_migration() {
+	local upgrade_migration_script
+	upgrade_migration_script="${ZFSAS_UPGRADE_MIGRATION_SCRIPT:-/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/upgrade-migration.sh}"
+	[[ -r "$upgrade_migration_script" ]] || return 0
+	# shellcheck source=/dev/null
+	source "$upgrade_migration_script" || return 0
+	if declare -F zfsas_run_upgrade_migration >/dev/null 2>&1; then
+		zfsas_run_upgrade_migration || true
+	fi
+}
+zfsas_snapshot_run_upgrade_migration
+
 if [[ -f "$CONFIG_FILE" ]]; then
 	load_config_file "$CONFIG_FILE"
 fi
@@ -1814,6 +2161,11 @@ for pair in "${pairs[@]}"; do
 done
 pairs=("${active_pairs[@]}")
 RUN_ACTIVE_DATASET_COUNT="${#pairs[@]}"
+
+# Count this snapshot run against any send markers before cleanup is decided.
+# A marker that has now been idle for enough consecutive runs is removed here,
+# so cleanup on this same run is not held by it.
+reconcile_send_activity_markers || true
 
 if ((${#pairs[@]} == 0)); then
 	log "No configured datasets currently exist; nothing to snapshot."

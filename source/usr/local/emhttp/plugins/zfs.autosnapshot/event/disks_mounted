@@ -14,4 +14,15 @@ if [[ -r "$MIGRATOR_RECOVERY_STATE" && -x "$MIGRATOR_WORKER" ]]; then
   nohup "$MIGRATOR_WORKER" --recover-pending >/dev/null 2>&1 &
 fi
 
+# Second chance for upgrade residue when boot happens after an install that
+# skipped post-install. No-op once this version has been cleaned.
+UPGRADE_MIGRATION_SCRIPT="${PLUGIN_DIR}/scripts/upgrade-migration.sh"
+if [[ -r "$UPGRADE_MIGRATION_SCRIPT" ]]; then
+  # shellcheck source=/dev/null
+  source "$UPGRADE_MIGRATION_SCRIPT" || true
+  if declare -F zfsas_run_upgrade_migration >/dev/null 2>&1; then
+    zfsas_run_upgrade_migration || true
+  fi
+fi
+
 exit 0

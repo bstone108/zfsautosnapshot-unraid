@@ -97,6 +97,18 @@ enqueue_all_scheduled_jobs_now() {
 
 main() {
   local now_epoch manual_now=0
+  local upgrade_migration_script
+
+  # Once a minute, even when the snapshot schedule is disabled. The sweep
+  # returns immediately when this version was already cleaned.
+  upgrade_migration_script="${ZFSAS_UPGRADE_MIGRATION_SCRIPT:-/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/upgrade-migration.sh}"
+  if [[ -r "$upgrade_migration_script" ]]; then
+    # shellcheck source=/dev/null
+    source "$upgrade_migration_script" || true
+    if declare -F zfsas_run_upgrade_migration >/dev/null 2>&1; then
+      zfsas_run_upgrade_migration || true
+    fi
+  fi
 
   while (( $# > 0 )); do
     case "$1" in
