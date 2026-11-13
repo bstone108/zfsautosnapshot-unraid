@@ -113,6 +113,7 @@ ensure_executable "/usr/local/sbin/zfs_autosnapshot_send_worker"
 ensure_executable "/usr/local/sbin/zfs_autosnapshot_delete_worker"
 ensure_executable "/usr/local/sbin/zfs_autosnapshot_snapshot_manager_worker"
 ensure_executable "/usr/local/sbin/zfs_autosnapshot_migrate_datasets"
+ensure_executable "/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/upgrade-migration.sh"
 repair_system_log_dir_if_needed "/var/log"
 
 echo "Normalized plugin config ownership and permissions under $BOOT_PLUGIN_DIR"

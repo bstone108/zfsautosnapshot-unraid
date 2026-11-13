@@ -2014,6 +2014,20 @@ time_clean_dataset() {
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
+# Janitorial upgrade sweep. Separate from post-install. A failure here must
+# not stop the snapshot run; the next run retries.
+zfsas_snapshot_run_upgrade_migration() {
+	local upgrade_migration_script
+	upgrade_migration_script="${ZFSAS_UPGRADE_MIGRATION_SCRIPT:-/usr/local/emhttp/plugins/zfs.autosnapshot/scripts/upgrade-migration.sh}"
+	[[ -r "$upgrade_migration_script" ]] || return 0
+	# shellcheck source=/dev/null
+	source "$upgrade_migration_script" || return 0
+	if declare -F zfsas_run_upgrade_migration >/dev/null 2>&1; then
+		zfsas_run_upgrade_migration || true
+	fi
+}
+zfsas_snapshot_run_upgrade_migration
+
 if [[ -f "$CONFIG_FILE" ]]; then
 	load_config_file "$CONFIG_FILE"
 fi

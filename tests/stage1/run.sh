@@ -900,6 +900,7 @@ main() {
   bash "${ROOT_DIR}/tests/stage1/unraid_array_status_checks.sh"
   bash "${ROOT_DIR}/tests/stage1/history_regression_checks.sh"
   bash "${ROOT_DIR}/tests/stage1/send_activity_marker_idle_checks.sh"
+  bash "${ROOT_DIR}/tests/stage1/upgrade_migration_checks.sh"
 
   echo "All Stage 1 tests passed."
 }

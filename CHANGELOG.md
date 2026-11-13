@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.13.t01 (Testing Branch Only)
+
+- An upgrade that skips the normal install steps, such as installing the package directly, is cleaned up on the next snapshot run, the once-a-minute queue check, or when the array disks are mounted. The plugin remembers the last version it finished cleaning. When the installed version is different, it removes the old flash ops_queue folder if that folder is still there, leftover Recovery/Repair tool files if those files are still there, and AppleDouble metadata in the plugin folder if those files are still there. Settings, schedules, datasets, snapshots, and queued work are left alone. If a cleanup step fails, the log says so and the next run tries again. A normal plugin install still runs its own post-install steps.
+
 ### 2026.11.12.t01 (Testing Branch Only)
 
 - A send marker left behind when a send worker is killed no longer pauses local snapshot cleanup forever. Each snapshot run checks whether that send is still queued or still running. A running send, including one that is waiting to retry, still pauses cleanup. If the marker is still there and nothing is queued or running, that run is counted. After 5 runs in a row with nothing queued or running, the leftover marker is removed and cleanup continues on that same run.
