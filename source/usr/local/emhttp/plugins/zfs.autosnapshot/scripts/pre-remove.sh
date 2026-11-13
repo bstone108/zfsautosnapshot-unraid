@@ -163,6 +163,8 @@ stop_pid_tree() {
   for pid in "${pid_tree[@]}"; do
     if kill -0 "$pid" >/dev/null 2>&1; then
       echo "Force stopping stuck process: $pid"
+      # Existing removal force-stop after the 10 second graceful wait above.
+      # The version-change cleanup sweep must not stop processes and does not use this.
       kill -9 "$pid" >/dev/null 2>&1 || true
     fi
   done
