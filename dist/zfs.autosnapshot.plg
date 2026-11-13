@@ -1,7 +1,9 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.11.06.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.11.13.01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.11.06.01 (2026-11-07)
+### 2026.11.13.01 (2026-11-13)
+- A send marker left behind when a send worker is killed no longer pauses local snapshot cleanup forever. Each snapshot run checks whether that send is still queued or still running. A running send, including one that is waiting to retry, still pauses cleanup. If the marker is still there and nothing is queued or running, that run is counted. After 5 runs in a row with nothing queued or running, the leftover marker is removed and cleanup continues on that same run.
+- An upgrade that skips the normal install steps, such as installing the package directly, is cleaned up on the next snapshot run, the once-a-minute queue check, or when the array disks are mounted. The plugin remembers the last version it finished cleaning. When the installed version is different, it removes the old flash ops_queue folder if that folder is still there, leftover Recovery/Repair tool files if those files are still there, and AppleDouble metadata in the plugin folder if those files are still there. Settings, schedules, datasets, snapshots, and queued work are left alone. If a cleanup step fails, the log says so and the next run tries again. A normal plugin install still runs its own post-install steps.
 - A remote cleanup delete waits up to 5 minutes to connect when the destination is slow to answer. A destroy that is already running is not cut off. If the connection fails, that destination waits 30 minutes before another cleanup delete. Three connection failures drop that destination's pending cleanup deletes and leave other destinations alone. A later successful delete clears the failure count. Sends stay on their normal schedule. A snapshot that is busy or already gone is still handled one at a time.
 - A send waiting on destination free space stops when that destination is unreachable after its connection attempts, or when cleanup finds nothing new to delete. It tries again on the next scheduled backup. A send still waits while cleanup deletes are in their retry wait. Other backups are not held up.
 - One retention pass deletes every old send checkpoint on a remote recursive destination, including checkpoints that exist only on the receiver. A remote command was reading the same input as the snapshot list, so each pass removed about one checkpoint per dataset. The newest checkpoint both sides still share is kept.
@@ -40,9 +42,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.11.06.01-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.11.06.01-noarch-1.txz</URL>
-    <MD5>5404b77530530f25397e91207914cfd5</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.11.13.01-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/zfs-autosnapshot-2026.11.13.01-noarch-1.txz</URL>
+    <MD5>b2410f967d766f78e75892110a0a3cd4</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -50,10 +52,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.11.06.01-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.11.13.01-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/main/dist/${PKG_FILE}"
-PKG_MD5="5404b77530530f25397e91207914cfd5"
+PKG_MD5="b2410f967d766f78e75892110a0a3cd4"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
