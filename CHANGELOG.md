@@ -5,6 +5,11 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.13.01 (2026-11-13)
+
+- A send marker left behind when a send worker is killed no longer pauses local snapshot cleanup forever. Each snapshot run checks whether that send is still queued or still running. A running send, including one that is waiting to retry, still pauses cleanup. If the marker is still there and nothing is queued or running, that run is counted. After 5 runs in a row with nothing queued or running, the leftover marker is removed and cleanup continues on that same run.
+- An upgrade that skips the normal install steps, such as installing the package directly, is cleaned up on the next snapshot run, the once-a-minute queue check, or when the array disks are mounted. The plugin remembers the last version it finished cleaning. When the installed version is different, it removes the old flash ops_queue folder if that folder is still there, leftover Recovery/Repair tool files if those files are still there, and AppleDouble metadata in the plugin folder if those files are still there. Settings, schedules, datasets, snapshots, and queued work are left alone. If a cleanup step fails, the log says so and the next run tries again. A normal plugin install still runs its own post-install steps.
+
 ### 2026.11.06.01 (2026-11-06)
 
 - A remote cleanup delete waits up to 5 minutes to connect when the destination is slow to answer. A destroy that is already running is not cut off. If the connection fails, that destination waits 30 minutes before another cleanup delete. Three connection failures drop that destination's pending cleanup deletes and leave other destinations alone. A later successful delete clears the failure count. Sends stay on their normal schedule. A snapshot that is busy or already gone is still handled one at a time.

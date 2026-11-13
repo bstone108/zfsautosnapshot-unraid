@@ -171,6 +171,8 @@ stop_pid_tree() {
   for pid in "${pid_tree[@]}"; do
     if kill -0 "$pid" >/dev/null 2>&1; then
       echo "Force stopping stuck process: $pid"
+      # Existing install force-stop after the 10 second graceful wait above.
+      # The version-change cleanup sweep must not stop processes and does not use this.
       kill -9 "$pid" >/dev/null 2>&1 || true
     fi
   done
@@ -256,8 +258,19 @@ else
   fi
 fi
 
+# Residue helpers are shared with the version-change sweep. This install path
+# still runs them itself, whether or not that sweep has already recorded a version.
+# shellcheck source=upgrade-migration.sh
+if [[ -r "${BASH_SOURCE[0]%/*}/upgrade-migration.sh" ]]; then
+  source "${BASH_SOURCE[0]%/*}/upgrade-migration.sh"
+fi
+
 # Remove any AppleDouble metadata files that can break Unraid page parsing.
-find "$PLUGIN_DIR" -type f \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+if declare -F zfsas_migration_remove_appledouble >/dev/null 2>&1; then
+  zfsas_migration_remove_appledouble || true
+else
+  find "$PLUGIN_DIR" -type f \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+fi
 
 # Always stop any in-flight job before applying runtime refresh / cron sync so an
 # old buggy process cannot survive an upgrade.
@@ -298,7 +311,11 @@ for RUN_MATCH in "$OPS_KICKER_RUN_MATCH" "$OPS_HANDLER_RUN_MATCH" "$OPS_SEND_WOR
 done
 rm -rf "$OPS_JOB_LOCKS_DIR" >/dev/null 2>&1 || true
 rm -rf "${OPS_RUNTIME_DIR}/queue-manager.lockdir" >/dev/null 2>&1 || true
-rm -rf "$LEGACY_OPS_QUEUE_DIR" >/dev/null 2>&1 || true
+if declare -F zfsas_migration_remove_legacy_ops_queue >/dev/null 2>&1; then
+  zfsas_migration_remove_legacy_ops_queue || true
+else
+  rm -rf "$LEGACY_OPS_QUEUE_DIR" >/dev/null 2>&1 || true
+fi
 rm -rf "$TMP_OPS_QUEUE_DIR" >/dev/null 2>&1 || true
 
 RUNTIME_DIR="$RECOVERY_RUNTIME_DIR"
@@ -314,11 +331,15 @@ stop_running_jobs
 
 # Emergency disable: Recovery/Repair Tools were removed from the package.
 # Delete stale files left by older testing installs so the broken tools cannot be opened directly.
-rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-tools.php
-rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-status.php
-rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-action.php
-rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-helpers.php
-rm -f /usr/local/sbin/zfs_autosnapshot_recovery_scan
+if declare -F zfsas_migration_remove_stale_recovery_files >/dev/null 2>&1; then
+  zfsas_migration_remove_stale_recovery_files
+else
+  rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-tools.php
+  rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-status.php
+  rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-action.php
+  rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-helpers.php
+  rm -f /usr/local/sbin/zfs_autosnapshot_recovery_scan
+fi
 
 RUNTIME_DIR="$MIGRATOR_RUNTIME_DIR"
 LOCK_FILE="$MIGRATOR_LOCK_FILE"
