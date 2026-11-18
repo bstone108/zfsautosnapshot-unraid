@@ -5,6 +5,13 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.18.t01 (Testing Branch Only)
+
+- Dataset Migrator stops a container when any of its mounts touches a folder being migrated. That includes /mnt/user and /mnt/user0 paths, a path on any pool or disk, a symlink, and a mount of a parent folder or a subfolder. Containers that use that container for their network, volumes_from, or compose depends_on are stopped with it.
+- If the copied folder does not verify, the original files stay in the temporary folder and the new dataset is kept. The migrator waits 15 minutes, copies into that same dataset again, and checks the copy. It tries this 3 times. A clean check removes only the temporary folder.
+- If those attempts still do not match, the migrator stops Docker, virtual machines, and LXC, removes the broken dataset, puts the original folder name back, and starts autostart services again. It waits 15 minutes, gives any autostart item that did not come up one more start, marks that folder reverted, and continues with the other folders.
+- Recovering one interrupted folder no longer ends the migration. The remaining folders continue.
+
 ### 2026.11.13.t01 (Testing Branch Only)
 
 - An upgrade that skips the normal install steps, such as installing the package directly, is cleaned up on the next snapshot run, the once-a-minute queue check, or when the array disks are mounted. The plugin remembers the last version it finished cleaning. When the installed version is different, it removes the old flash ops_queue folder if that folder is still there, leftover Recovery/Repair tool files if those files are still there, and AppleDouble metadata in the plugin folder if those files are still there. Settings, schedules, datasets, snapshots, and queued work are left alone. If a cleanup step fails, the log says so and the next run tries again. A normal plugin install still runs its own post-install steps.

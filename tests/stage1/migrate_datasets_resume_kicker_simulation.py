@@ -303,8 +303,14 @@ def test_recover_pending_synthesizes_temp_folder_and_alerts() -> None:
             raise AssertionError("recovery removed a directory that is not a deterministic migration temp folder")
         if (plugin_root / "recovery.env").exists():
             raise AssertionError("recovery.env should be cleared after synthesized recovery")
-        if not (plugin_root / "migration.inprogress").exists():
-            raise AssertionError("recovering one folder must keep the in-progress flag so remaining folders can resume")
+        if (plugin_root / "migration.inprogress").exists():
+            raise AssertionError("recovering the only folder and finding nothing else eligible should finish and clear the in-progress flag")
+        log_text = (root / "worker.log").read_text(encoding="utf-8") if (root / "worker.log").exists() else ""
+        output = f"{result.stdout}\n{log_text}"
+        if "Resuming the remaining migration queue" not in output:
+            raise AssertionError(f"recovery did not resume the remaining queue before deciding nothing was left:\n{output}")
+        if "No eligible folders remain" not in output:
+            raise AssertionError(f"recovery did not scan for remaining folders:\n{output}")
         log_text = (root / "worker.log").read_text(encoding="utf-8") if (root / "worker.log").exists() else ""
         output = f"{result.stdout}\n{log_text}"
         if "original folder 'app'" not in output and 'original folder "app"' not in output:

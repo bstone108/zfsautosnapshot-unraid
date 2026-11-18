@@ -327,6 +327,8 @@ $csrfToken = zfsas_get_csrf_token();
   <div class="zfsas-dm-card">
     <h3 style="margin-top:0;">Container Handling</h3>
     <div class="zfsas-dm-help">Before the copy starts, the tool records which containers were running, temporarily disables their Docker restart policy while the migration is active, then brings them back up afterward. If any container fails to start, the tool starts the rest, waits 5 minutes, and retries the failed ones once.</div>
+    <div class="zfsas-dm-help">A container is stopped when any of its mounts touches a folder being migrated. That includes /mnt/user and /mnt/user0 share paths, /mnt/pool and /mnt/disk paths, symlinks, and a mount of a parent directory or a subdirectory. Containers that use that container for their network, volumes_from, or compose depends_on are stopped with it.</div>
+    <div class="zfsas-dm-help">If verification does not match, the original files stay in the temporary folder and the new dataset is kept. The tool pauses 15 minutes and copies into that dataset again, up to 3 times. It removes the dataset and restores the original folder only after those attempts fail, and then it continues with the other folders.</div>
     <div id="migrate_container_source_notice" class="zfsas-dm-source-notice"></div>
     <div class="zfsas-table-wrap">
       <table class="zfsas-table">
@@ -809,7 +811,7 @@ $csrfToken = zfsas_get_csrf_token();
       return;
     }
 
-    var useStatusRows = statusMatchesSelectedDataset(status) && (status.isActive || status.isStale) && Array.isArray(status.folders);
+    var useStatusRows = statusMatchesSelectedDataset(status) && (status.isActive || status.isStale || String(status.STATE || '') === 'complete_with_failures') && Array.isArray(status.folders);
     var rows = [];
 
     if (useStatusRows) {
@@ -851,7 +853,7 @@ $csrfToken = zfsas_get_csrf_token();
     var html = '';
     rows.forEach(function (row) {
       var state = String(row.state || 'unknown');
-      var chipKind = state === 'failed' ? 'error' : ((state === 'eligible' || state === 'complete') ? '' : 'warn');
+      var chipKind = (state === 'failed' || state === 'reverted') ? 'error' : ((state === 'eligible' || state === 'complete') ? '' : 'warn');
       html += '<tr>';
       html += '<td><code>' + escapeHtml(row.name || '') + '</code></td>';
       html += '<td><code>' + escapeHtml(row.targetDataset || '') + '</code></td>';
@@ -966,8 +968,18 @@ $csrfToken = zfsas_get_csrf_token();
       renderPageStatus('Dataset migrator worker stopped before it finished.', true);
     } else if (status && status.isActive && String(status.WAITING_FOR_SPACE || '0') === '1') {
       renderPageStatus('Dataset migration is waiting for free space before touching the next folder.', false);
+    } else if (status && status.isActive && String(status.STATE || '') === 'repairing') {
+      renderPageStatus('Dataset migration is repairing a folder in place after verification did not match.', false);
+    } else if (status && status.isActive && String(status.STATE || '') === 'last_resort') {
+      renderPageStatus('Dataset migration stopped Docker, VMs, and LXC so a broken dataset can be removed and the original folder restored.', false);
+    } else if (status && status.isActive && String(status.STATE || '') === 'settling') {
+      renderPageStatus('Dataset migration is waiting for autostarted Docker containers, VMs, and LXC containers to settle.', false);
+    } else if (status && status.isActive && String(status.STATE || '') === 'recovering') {
+      renderPageStatus('Dataset migration was interrupted and is recovering the unfinished folder.', false);
     } else if (status && status.isActive) {
       renderPageStatus('Dataset migration is running in the background.', false);
+    } else if (status && String(status.STATE || '') === 'complete_with_failures') {
+      renderPageStatus(status.MESSAGE || 'Dataset migration finished, and at least one folder was reverted.', true);
     } else if (payload.scanInProgress) {
       renderPageStatus('Folder size scan is in progress.', false);
     } else {

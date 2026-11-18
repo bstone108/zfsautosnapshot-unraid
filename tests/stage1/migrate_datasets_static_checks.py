@@ -124,8 +124,8 @@ require_status_endpoint(
     "A second scan while one is running must report that a scan is in progress.",
 )
 require(
-    r'var\s+useStatusRows\s*=\s*statusMatchesSelectedDataset\(status\)\s*&&\s*\(status\.isActive\s*\|\|\s*status\.isStale\)\s*&&\s*Array\.isArray\(status\.folders\);',
-    "Folder rows must use worker rows whenever the selected dataset has a live/stale worker, even before the worker has emitted rows; terminal complete states should fall back to refreshed preview rows.",
+    r'function\s+renderFolderRows[\s\S]*?var\s+useStatusRows\s*=\s*statusMatchesSelectedDataset\(status\)\s*&&\s*\(status\.isActive\s*\|\|\s*status\.isStale\s*\|\|\s*String\(status\.STATE\s*\|\|\s*\'\'\)\s*===\s*\'complete_with_failures\'\)\s*&&\s*Array\.isArray\(status\.folders\);',
+    "Folder rows must use worker rows for a live/stale worker and after a finished run that reverted a folder.",
 )
 if re.search(r'Array\.isArray\(status\.folders\)\s*&&\s*status\.folders\.length\s*>\s*0', text):
     raise AssertionError("Active/stale folder rendering must not fall back to preview/empty text just because the worker has not emitted folder rows yet.")
@@ -215,9 +215,48 @@ require_worker(
     "Recovery must use an exact rsync --delete pass from the preserved source temp folder to the child dataset.",
 )
 require_worker(
-    r'run_delayed_recovery\s*\(\)\s*{.*?sleep\s+"\$RECOVERY_BOOT_DELAY_SECONDS".*?stop_container_batch\s+"\$RECOVERY_BATCH_CONTAINERS".*?rsync_recover_exact.*?start_selected_containers\s+"\$RECOVERY_BATCH_CONTAINERS"',
-    "Boot recovery must wait for containers to settle, stop only the affected batch, exact-sync, and restore services.",
+    r'repair_folder_in_place\s*\(\)\s*{.*?sleep\s+"\$RECOVERY_BOOT_DELAY_SECONDS".*?stop_writers_for_paths.*?repair_copy_into_dataset.*?verify_copied_folder.*?cut_over_verified_folder',
+    "In-place repair must pause, stop writer containers, rsync --delete into the existing dataset, verify, and cut over only after a clean verify.",
 )
+require_worker(
+    r'run_delayed_recovery\s*\(\)\s*{.*?notify_interrupted_migration.*?repair_folder_in_place.*?RESUMING_AFTER_RECOVERY=1',
+    "Boot recovery must repair the interrupted folder and then resume the remaining queue.",
+)
+require_worker(
+    r'rollback_failed_folder\s*\(\)\s*{.*?Leaving dataset.*?The preserved source was not deleted',
+    "The normal failure path must keep the dataset and the preserved source instead of destroying the dataset.",
+)
+if re.search(r'rollback_failed_folder\s*\(\)\s*{.*?^}', worker_text, re.S | re.M) and re.search(
+    r'zfs\s+destroy',
+    re.search(r'rollback_failed_folder\s*\(\)\s*{.*?^}', worker_text, re.S | re.M).group(0),
+):
+    raise AssertionError("rollback_failed_folder must not destroy the dataset.")
+require_worker(
+    r'RC_DOCKER="\$\{ZFSAS_MIGRATOR_RC_DOCKER:-/etc/rc\.d/rc\.docker\}"',
+    "Docker service control must default to /etc/rc.d/rc.docker.",
+)
+require_worker(
+    r'RC_LIBVIRT="\$\{ZFSAS_MIGRATOR_RC_LIBVIRT:-/etc/rc\.d/rc\.libvirt\}"',
+    "VM service control must default to /etc/rc.d/rc.libvirt.",
+)
+require_worker(
+    r'last_resort_revert_folder\s*\(\)\s*{.*?run_rc\s+"\$RC_DOCKER"\s+stop.*?run_rc\s+"\$RC_LIBVIRT"\s+stop.*?stop_lxc_containers_nicely.*?zfs\s+destroy\s+-r.*?run_rc\s+"\$RC_LIBVIRT"\s+start.*?run_rc\s+"\$RC_DOCKER"\s+start.*?start_lxc_autostart.*?attention_for_lxc_autostart.*?attention_for_docker_autostart.*?attention_for_libvirt_autostart',
+    "Last resort must stop Docker, libvirt, and LXC nicely, destroy only the broken dataset, restore the original folder, restart autostart, and then check autostart items.",
+)
+require_worker(
+    r'lxc-stop\s+--timeout="\$timeout"\s+-n',
+    "LXC nice stop must use lxc-stop --timeout, as the LXC plugin does before disks unmount.",
+)
+require_worker(
+    r'lxc-stop\s+--kill\s+-n',
+    "An autostart LXC that did not come up is force-stopped with lxc-stop --kill and started once.",
+)
+require_worker(
+    r'lxc-autostart',
+    "LXC startup must use lxc-autostart when the plugin startup script is not present.",
+)
+if "kill -9" in worker_text or "kill -KILL" in worker_text:
+    raise AssertionError("The migrator must not use kill -9.")
 require_worker(
     r'--recover-pending\).*?RUN_RECOVERY=1',
     "Worker must expose a --recover-pending mode for the boot hook.",

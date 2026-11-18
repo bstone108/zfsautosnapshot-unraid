@@ -180,7 +180,7 @@ function zfsas_migrate_current_status()
 
     $state = (string) ($status['STATE'] ?? '');
     $pid = (int) ($status['PID'] ?? 0);
-    $activeStates = ['preparing', 'stopping_containers', 'migrating', 'waiting_for_space', 'restarting_containers', 'retrying_container_start'];
+    $activeStates = ['preparing', 'stopping_containers', 'migrating', 'waiting_for_space', 'restarting_containers', 'retrying_container_start', 'recovering', 'repairing', 'last_resort', 'settling'];
     $stateShouldHaveWorker = in_array($state, $activeStates, true);
     $pidIsRunning = zfsas_migrate_is_pid_running($pid);
     $status['isActive'] = $stateShouldHaveWorker && $pidIsRunning;
