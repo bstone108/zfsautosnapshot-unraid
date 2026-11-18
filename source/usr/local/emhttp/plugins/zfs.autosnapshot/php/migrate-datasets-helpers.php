@@ -531,6 +531,65 @@ function zfsas_migrate_preview_with_cache_stamp($dataset, $preview)
     return $preview;
 }
 
+function zfsas_migrate_mountinfo_unescape($value)
+{
+    return preg_replace_callback('/\\\\([0-7]{3})/', function ($matches) {
+        return chr(octdec($matches[1]));
+    }, (string) $value);
+}
+
+function zfsas_migrate_mountinfo_path()
+{
+    $override = getenv('ZFSAS_MIGRATE_MOUNTINFO');
+    if (is_string($override) && $override !== '') {
+        return $override;
+    }
+
+    return '/proc/self/mountinfo';
+}
+
+function zfsas_migrate_nested_mounts($folderPath)
+{
+    $folderPath = rtrim((string) $folderPath, '/');
+    if ($folderPath === '' || $folderPath === '/') {
+        return array();
+    }
+    $mountinfo = zfsas_migrate_mountinfo_path();
+    if (!is_file($mountinfo) || !is_readable($mountinfo)) {
+        return array();
+    }
+    $lines = @file($mountinfo, FILE_IGNORE_NEW_LINES);
+    if (!is_array($lines)) {
+        return array();
+    }
+    $mounts = array();
+    foreach ($lines as $line) {
+        $line = (string) $line;
+        if ($line === '') {
+            continue;
+        }
+        $fields = preg_split('/\s+/', $line);
+        if (!is_array($fields)) {
+            continue;
+        }
+        $separator = array_search('-', $fields, true);
+        if ($separator === false || $separator < 6 || !isset($fields[$separator + 2])) {
+            continue;
+        }
+        $mountpoint = zfsas_migrate_mountinfo_unescape((string) $fields[4]);
+        if (strpos($mountpoint, $folderPath . '/') !== 0) {
+            continue;
+        }
+        $mounts[] = array(
+            'mountpoint' => $mountpoint,
+            'fstype' => zfsas_migrate_mountinfo_unescape((string) $fields[$separator + 1]),
+            'source' => zfsas_migrate_mountinfo_unescape((string) $fields[$separator + 2]),
+        );
+    }
+
+    return $mounts;
+}
+
 function zfsas_migrate_preview_dataset($dataset, &$error = null, $includeSizes = true)
 {
     $error = null;
@@ -633,16 +692,42 @@ function zfsas_migrate_preview_dataset($dataset, &$error = null, $includeSizes =
             $message = 'Path is already occupied by a different mounted dataset.';
             $eligible = false;
         } else {
-            foreach ($mountMap as $otherMountpoint => $otherDataset) {
-                if ($otherMountpoint === '' || $otherMountpoint === 'none' || $otherMountpoint === 'legacy') {
-                    continue;
-                }
-                if (strpos($otherMountpoint, $path . '/') === 0) {
-                    $state = 'nested_mount';
-                    $message = 'Contains a nested mount or child dataset, so it is not safe to migrate automatically.';
-                    $eligible = false;
+            $nestedMounts = zfsas_migrate_nested_mounts($path);
+            $zfsNested = null;
+            $otherNested = null;
+            foreach ($nestedMounts as $nestedMount) {
+                $nestedType = strtolower((string) ($nestedMount['fstype'] ?? ''));
+                if ($nestedType === 'zfs') {
+                    $zfsNested = $nestedMount;
                     break;
                 }
+                if ($otherNested === null) {
+                    $otherNested = $nestedMount;
+                }
+            }
+            if ($zfsNested === null) {
+                foreach ($mountMap as $otherMountpoint => $otherDataset) {
+                    if ($otherMountpoint === '' || $otherMountpoint === 'none' || $otherMountpoint === 'legacy') {
+                        continue;
+                    }
+                    if (strpos((string) $otherMountpoint, $path . '/') === 0) {
+                        $zfsNested = array(
+                            'mountpoint' => (string) $otherMountpoint,
+                            'fstype' => 'zfs',
+                            'source' => (string) $otherDataset,
+                        );
+                        break;
+                    }
+                }
+            }
+            if ($zfsNested !== null) {
+                $state = 'nested_mount';
+                $message = 'Contains nested ZFS dataset "' . (string) ($zfsNested['source'] ?? '') . '" at "' . (string) ($zfsNested['mountpoint'] ?? '') . '". A parent dataset is not created over a live child mount.';
+                $eligible = false;
+            } elseif ($otherNested !== null) {
+                $state = 'nested_mount';
+                $message = 'Contains a nested ' . (string) ($otherNested['fstype'] ?? 'mount') . ' at "' . (string) ($otherNested['mountpoint'] ?? '') . '". Local files can be copied after that mount is unmounted and put back. If that is not safe, this folder is skipped and the other folders continue.';
+                $eligible = true;
             }
         }
 

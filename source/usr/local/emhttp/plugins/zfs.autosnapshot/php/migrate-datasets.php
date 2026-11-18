@@ -253,7 +253,7 @@ $csrfToken = zfsas_get_csrf_token();
       </div>
       <div class="zfsas-alert zfsas-alert-info">
         <div>Do not start containers again until the tool finishes. During active folder work, containers that use the folder being migrated may be stopped until verification and restoration complete.</div>
-        <div style="margin-top:6px;">Folder names must already be valid ZFS child dataset names. Anything with an unsafe name, nested mount, or existing child dataset will be skipped and called out below.</div>
+        <div style="margin-top:6px;">Folder names must already be valid ZFS child dataset names. A nested ZFS dataset is skipped, and a parent dataset is not created over it. Another nested mount, such as rclone, is unmounted after its containers stop, the local files are copied, the mount folder is put back, and the mount is restored. If that mount cannot be removed or put back safely, the folder is skipped, its containers are started again, and the other folders continue.</div>
       </div>
       <div id="migrate_feedback"></div>
       <div class="zfsas-dm-toolbar">

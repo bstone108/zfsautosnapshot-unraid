@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.18.t02 (Testing Branch Only)
+
+- Dataset Migrator no longer gets stuck when a folder contains a nested mount such as an rclone drive. It sees that mount before stopping containers. A nested ZFS dataset is skipped and left alone. Another nested mount is unmounted after its containers stop, only the local files are copied, the mount folder is created on the new dataset, and the mount is put back with the same command. If the mount cannot be removed or put back safely, that folder is skipped, its containers are started again with their original restart setting, and the other folders continue. A folder that was stuck in a repeating stop-and-fail loop is handled on the next run, and the in-progress flag is cleared when every folder is finished, skipped, or failed.
+
 ### 2026.11.18.t01 (Testing Branch Only)
 
 - Dataset Migrator stops a container when any of its mounts touches a folder being migrated. That includes /mnt/user and /mnt/user0 paths, a path on any pool or disk, a symlink, and a mount of a parent folder or a subfolder. Containers that use that container for their network, volumes_from, or compose depends_on are stopped with it.
