@@ -1,7 +1,8 @@
 <?xml version='1.0' standalone='yes'?>
-<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.11.13.t01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
+<PLUGIN name="zfs.autosnapshot" author="Brandon Stone" version="2026.11.18.t01" icon="zfs-autosnapshot.png" pluginURL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs.autosnapshot.plg" support="https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/" min="6.12.0" launch="Settings/ZFSAutoSnapshot">Plain-English ZFS snapshot scheduling, retention cleanup, and low-space protection for Unraid.
   <CHANGES>
-### 2026.11.13.t01 (2026-11-13)
+### 2026.11.18.t01 (2026-11-18)
+- Dataset Migrator stops a container when any of its mounts touches a folder being migrated, including /mnt/user, /mnt/user0, any pool or disk, a symlink, or a parent or child of that folder. Containers that depend on it are stopped too. If verification fails, the original files stay in the temporary folder and the new dataset is kept. The migrator waits 15 minutes and copies into that dataset again, up to 3 times. If it still does not match, Docker, virtual machines, and LXC are stopped, the broken dataset is removed, the original folder name is restored, and autostart services are started again. That folder is marked reverted and the other folders continue. Recovering one interrupted folder no longer ends the migration.
 - After an upgrade, including one that skipped the normal install steps, the plugin checks once whether this version already cleaned up leftovers. If the old flash ops_queue folder, leftover Recovery/Repair tool files, or AppleDouble metadata in the plugin folder are still there, they are removed. Settings, schedules, datasets, snapshots, and queued work are left alone. A failed cleanup step is logged and tried again on a later run. The normal plugin install still runs its own post-install steps.
 - A send marker left behind when a send worker is killed no longer pauses local snapshot cleanup forever. Each snapshot run checks whether that send is still queued or still running. A running send, including one waiting to retry, still pauses cleanup. After 5 snapshot runs in a row with nothing queued or running, the leftover marker is removed and cleanup continues on that same run.
 - A send waiting on destination free space stops when that destination is unreachable after its connection attempts, or when cleanup finds nothing new to delete. It tries again on the next scheduled backup. A send still waits while cleanup deletes are in their retry wait. Other backups are not held up.
@@ -41,9 +42,9 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 
   <SUPPORT>https://forums.unraid.net/topic/197348-plugin-zfs-auto-snapshot/</SUPPORT>
 
-  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.11.13.t01-noarch-1.txz" Min="6.12.0">
-    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.11.13.t01-noarch-1.txz</URL>
-    <MD5>898e46fb4a5b4a8de79d2912a7e989a6</MD5>
+  <FILE Name="/boot/config/plugins/zfs.autosnapshot/zfs-autosnapshot-2026.11.18.t01-noarch-1.txz" Min="6.12.0">
+    <URL>https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/zfs-autosnapshot-2026.11.18.t01-noarch-1.txz</URL>
+    <MD5>b523c22647348596a17bc0fb8aaf0875</MD5>
   </FILE>
 
   <FILE Run="/bin/bash">
@@ -51,10 +52,10 @@ ZFS Auto Snapshot adds plain-English scheduling and safe snapshot lifecycle mana
 set -euo pipefail
 
 PKG_DIR="/boot/config/plugins/zfs.autosnapshot"
-PKG_FILE="zfs-autosnapshot-2026.11.13.t01-noarch-1.txz"
+PKG_FILE="zfs-autosnapshot-2026.11.18.t01-noarch-1.txz"
 PKG_PATH="${PKG_DIR}/${PKG_FILE}"
 PKG_URL="https://raw.githubusercontent.com/bstone108/zfsautosnapshot-unraid/testing/dist/${PKG_FILE}"
-PKG_MD5="898e46fb4a5b4a8de79d2912a7e989a6"
+PKG_MD5="b523c22647348596a17bc0fb8aaf0875"
 PKG_NAME="zfs-autosnapshot"
 
 if command -v upgradepkg >/dev/null 2>&1; then
