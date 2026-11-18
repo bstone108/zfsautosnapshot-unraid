@@ -183,6 +183,24 @@ require_worker(
     r'while\s+CURRENT_FOLDER_INDEX=.*?select_batch_for_folder\s+"\$CURRENT_FOLDER_INDEX".*?preflight_space_for_folder\s+"\$CURRENT_FOLDER_INDEX".*?stop_container_batch\s+"\$CURRENT_BATCH_CONTAINERS"',
     "Worker main loop must run the pre-stop space gate before stopping any containers for the batch.",
 )
+require_worker(
+    r'prepare_nested_mounts_before_cutover\s+"\$folder_index".*?mv\s+--\s+"\$entry_path"\s+"\$temp_path"',
+    "Nested mounts must be classified and unmounted before the source folder is renamed.",
+)
+require_worker(
+    r'folder_is_pending\s*\(\)\s*{.*?complete\|failed\|reverted\|skipped',
+    "A skipped folder must leave the pending queue so the kicker does not retry it forever.",
+)
+require_worker(
+    r'restore_restart_policies_left_disabled\s*\(\)',
+    "Startup must restore restart policies left disabled when an earlier run stopped.",
+)
+require_worker(
+    r'handle_folder_problem\s+"\$CURRENT_FOLDER_INDEX"',
+    "A per-folder failure must restore that batch and continue with the remaining folders.",
+)
+if "umount -l" in worker_text or "umount -f" in worker_text or "umount --lazy" in worker_text:
+    raise AssertionError("Nested mounts must be unmounted normally, never lazily or forcibly.")
 
 # Crash/reboot recovery must be durable before the destructive rename/create/copy
 # boundary. A reboot can wipe /var/run, so the migrator needs a boot-persisted
