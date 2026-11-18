@@ -168,8 +168,12 @@ def main() -> None:
         if (plugin_root / "recovery.env").exists():
             raise AssertionError("recovery.env should be cleared after successful exact-sync recovery")
         status = (plugin_root / "status.env").read_text(encoding="utf-8")
-        if 'STATE="complete"' not in status or 'CURRENT_STEP="recovery_complete"' not in status:
-            raise AssertionError(f"status.env did not report recovery completion:\n{status}")
+        if 'STATE="complete"' not in status or 'CURRENT_STEP="complete"' not in status:
+            raise AssertionError(f"status.env did not report completion after recovery resumed the queue:\n{status}")
+        log_text = (root / "worker.log").read_text(encoding="utf-8") if (root / "worker.log").exists() else ""
+        combined = f"{result.stdout}\n{log_text}"
+        if "Resuming the remaining migration queue" not in combined:
+            raise AssertionError(f"recovery did not resume the remaining queue:\n{combined}")
 
     print("PASS: Dataset Migrator recovery simulation")
 
