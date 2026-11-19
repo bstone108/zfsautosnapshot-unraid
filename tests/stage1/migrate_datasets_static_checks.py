@@ -201,7 +201,22 @@ require_worker(
 )
 if "umount -l" in worker_text or "umount -f" in worker_text or "umount --lazy" in worker_text:
     raise AssertionError("Nested mounts must be unmounted normally, never lazily or forcibly.")
-
+require_worker(
+    r"setsid\s+nohup",
+    "A nested remount command must be started with setsid and nohup so it is not a child of the migrator.",
+)
+require_worker(
+    r"migrated, remount needs attention",
+    "A verified folder whose nested remount does not come back must be marked for attention.",
+)
+require_worker(
+    r"verify_copied_folder\s+\"\$temp_path\"\s+\"\$new_path\".*?cut_over_verified_folder",
+    "Verification must finish before nested mounts are restored.",
+)
+require_worker(
+    r"was unmounted externally",
+    "A nested mount that disappears before this migration unmounts it must be reported and skipped.",
+)
 # Crash/reboot recovery must be durable before the destructive rename/create/copy
 # boundary. A reboot can wipe /var/run, so the migrator needs a boot-persisted
 # recovery record under /boot/config and an event hook that starts delayed

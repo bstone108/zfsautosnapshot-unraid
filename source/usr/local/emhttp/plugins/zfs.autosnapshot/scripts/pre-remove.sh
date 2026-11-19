@@ -40,6 +40,7 @@ MIGRATOR_LOCK_DIR="${MIGRATOR_RUNTIME_DIR}/locks"
 MIGRATOR_CHILD_PID_FILE="${MIGRATOR_RUNTIME_DIR}/migrator.child.pid"
 MIGRATOR_STOP_FILE="${MIGRATOR_RUNTIME_DIR}/migrator.stop"
 MIGRATOR_RUN_MATCH='/usr/local/sbin/zfs_autosnapshot_migrate_datasets'
+PROTECT_MOUNT_HELPERS=0
 SNAPSHOT_MANAGER_RUNTIME_DIR="/var/run/zfs-autosnapshot-manager"
 SNAPSHOT_MANAGER_LOCK_FILE="${SNAPSHOT_MANAGER_RUNTIME_DIR}/snapshot_manager.lock"
 SNAPSHOT_MANAGER_LOCK_DIR="${SNAPSHOT_MANAGER_RUNTIME_DIR}/locks"
@@ -105,6 +106,27 @@ list_child_pids() {
   fi
 }
 
+pid_is_live_mount_helper() {
+  local pid="$1"
+  local comm cmdline
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [[ -r "/proc/${pid}/comm" ]] || return 1
+  comm="$(tr -d '[:space:]' < "/proc/${pid}/comm" 2>/dev/null || true)"
+  case "$comm" in
+    rclone|sshfs|mergerfs|fusermount|fusermount3|unionfs|unionfs-fuse|bindfs|curlftpfs|s3fs|gocryptfs|borg)
+      return 0
+      ;;
+  esac
+  [[ -r "/proc/${pid}/cmdline" ]] || return 1
+  cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+  case "$cmdline" in
+    *rclone\ mount*|*sshfs\ *|*mergerfs\ *|*s3fs\ *|*gocryptfs\ *|*fusermount\ *|*fusermount3\ *)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 collect_pid_tree() {
   local root_pid="$1"
   local child
@@ -134,8 +156,10 @@ request_graceful_stop() {
 stop_pid_tree() {
   local root_pid="$1"
   local waited=0
-  local pid
+  local pid child
+  local root_has_mount_child=0
   local -a pid_tree=()
+  local -a kill_pids=()
 
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
@@ -144,12 +168,31 @@ stop_pid_tree() {
 
   (( ${#pid_tree[@]} > 0 )) || return 0
 
-  echo "Stopping zfs_autosnapshot process tree rooted at ${root_pid}: ${pid_tree[*]}"
-  kill "${pid_tree[@]}" >/dev/null 2>&1 || true
+  if (( PROTECT_MOUNT_HELPERS == 1 )); then
+    while IFS= read -r child; do
+      [[ -n "$child" ]] || continue
+      if pid_is_live_mount_helper "$child"; then
+        root_has_mount_child=1
+      fi
+    done < <(list_child_pids "$root_pid")
+  fi
+
+  for pid in "${pid_tree[@]}"; do
+    if (( PROTECT_MOUNT_HELPERS == 1 )) && pid_is_live_mount_helper "$pid"; then
+      echo "Leaving mount helper ${pid} running so its filesystem stays mounted."
+      continue
+    fi
+    kill_pids+=("$pid")
+  done
+
+  (( ${#kill_pids[@]} > 0 )) || return 0
+
+  echo "Stopping zfs_autosnapshot process tree rooted at ${root_pid}: ${kill_pids[*]}"
+  kill "${kill_pids[@]}" >/dev/null 2>&1 || true
 
   while (( waited < 10 )); do
     local remaining=0
-    for pid in "${pid_tree[@]}"; do
+    for pid in "${kill_pids[@]}"; do
       if kill -0 "$pid" >/dev/null 2>&1; then
         remaining=1
         break
@@ -160,8 +203,15 @@ stop_pid_tree() {
     waited=$((waited + 1))
   done
 
-  for pid in "${pid_tree[@]}"; do
+  for pid in "${kill_pids[@]}"; do
     if kill -0 "$pid" >/dev/null 2>&1; then
+      if (( PROTECT_MOUNT_HELPERS == 1 && root_has_mount_child == 1 )); then
+        echo "Not force-stopping ${pid}. A live mount helper is still attached to ${root_pid}, and signaling that helper would unmount its filesystem."
+        echo "Run: /usr/local/sbin/zfs_autosnapshot_migrate_datasets --release-stuck-holder"
+        echo "That puts the mount helper in its own session, drops any inherited lock, and exits only the stuck migrator."
+        echo "If that cannot be done, leave the mount helper running. Do not signal its process group. After the helper is in its own session, stop only the migrator PID. Leave the temporary source folder in place until verification says it matches."
+        continue
+      fi
       echo "Force stopping stuck process: $pid"
       # Existing removal force-stop after the 10 second graceful wait above.
       # The version-change cleanup sweep must not stop processes and does not use this.
@@ -268,7 +318,21 @@ CONFIG_FILE="$SEND_CONFIG_FILE"
 SNAPSHOT_PREFIX='manual-migration-'
 ALLOW_ORPHAN_DESTROY_MATCHES=0
 RUN_MATCH="$MIGRATOR_RUN_MATCH"
+release_status=0
+if [[ -x /usr/local/sbin/zfs_autosnapshot_migrate_datasets ]]; then
+  /usr/local/sbin/zfs_autosnapshot_migrate_datasets --release-stuck-holder || release_status=$?
+fi
+if (( release_status == 2 )); then
+  echo "A dataset migrator is blocked on a live mount and could not be released."
+  echo "The mount process was not signaled. Signaling it would unmount the filesystem."
+  echo "Do not force-stop the migrator process group."
+  echo "When python3 is available, rerun: /usr/local/sbin/zfs_autosnapshot_migrate_datasets --release-stuck-holder"
+  echo "That puts the mount helper in its own session, closes any inherited lock, and exits only the stuck migrator."
+  echo "By hand: confirm the mount with findmnt, move the mount helper into its own session, then stop only the migrator PID. Leave the temporary source folder in place until verification says it matches."
+fi
+PROTECT_MOUNT_HELPERS=1
 stop_running_jobs
+PROTECT_MOUNT_HELPERS=0
 
 echo "Removed cron file: $CRON_FILE"
 exit 0

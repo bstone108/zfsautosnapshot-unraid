@@ -77,7 +77,13 @@ RECOVERY_ORIGINAL_NAME=""
 NESTED_DECISION=""
 NESTED_DECISION_MESSAGE=""
 NESTED_UNMOUNTED_FOLDER=""
+NESTED_SKIP_REMOUNT_RELS=""
 NESTED_SEP=$'\x1f'
+REMOUNT_HELPER_STILL_RUNNING=0
+RELEASE_STUCK_HOLDER=0
+POSTPONE_CONTAINER_RESTORE=0
+VERIFY_PRUNE_RELS=""
+RSYNC_LIVE_EXCLUDES=()
 
 TOTAL_FOLDERS=0
 COMPLETED_FOLDERS=0
@@ -673,11 +679,18 @@ require_cmd() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  for cmd in zfs rsync find sha256sum sort cmp awk sed flock sync mv rm readlink stat du wc grep sleep date dirname basename touch docker shutdown cat chown chmod ps dd; do
-    require_cmd "$cmd"
+  for _zfsas_arg in "$@"; do
+    if [[ "$_zfsas_arg" == "--release-stuck-holder" ]]; then
+      RELEASE_STUCK_HOLDER=1
+    fi
   done
+  if (( RELEASE_STUCK_HOLDER == 0 )); then
+    for cmd in zfs rsync find sha256sum sort cmp awk sed flock sync mv rm readlink stat du wc grep sleep date dirname basename touch docker shutdown cat chown chmod ps dd; do
+      require_cmd "$cmd"
+    done
 
-  [[ "$(id -u)" -eq 0 ]] || die "Must be run as root"
+    [[ "$(id -u)" -eq 0 ]] || die "Must be run as root"
+  fi
 fi
 
 find_mdcmd() {
@@ -1397,10 +1410,165 @@ ensure_planned_mountpoint_dirs() {
   done < <(read_plan_sorted "$name" shallow)
 }
 
+remount_timeout_seconds() {
+  local limit="${ZFSAS_MIGRATOR_REMOUNT_TIMEOUT:-90}"
+  if [[ ! "$limit" =~ ^[0-9]+$ ]] || (( limit < 1 )); then
+    limit=90
+  fi
+  printf '%s' "$limit"
+}
+
+remount_poll_seconds() {
+  local poll="${ZFSAS_MIGRATOR_REMOUNT_POLL_SECONDS:-1}"
+  if [[ ! "$poll" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    poll=1
+  fi
+  printf '%s' "$poll"
+}
+
+remount_log_dir() {
+  printf '%s' "${ZFSAS_MIGRATOR_REMOUNT_LOG_DIR:-$(dirname "$LOG_FILE")}"
+}
+
+protected_mount_pid_file() {
+  printf '%s' "${ZFSAS_MIGRATOR_PROTECTED_MOUNT_PIDS:-$(dirname "$LOCK_FILE")/protected-mount-pids}"
+}
+
+close_lock_fds() {
+  local path fd link lock_path
+  lock_path="$(readlink -f "$LOCK_FILE" 2>/dev/null || printf '%s' "$LOCK_FILE")"
+  for path in /proc/self/fd/*; do
+    fd="${path##*/}"
+    [[ "$fd" =~ ^[0-9]+$ ]] || continue
+    (( fd > 2 )) || continue
+    link="$(readlink "$path" 2>/dev/null || true)"
+    if [[ "$link" == "$LOCK_FILE" || "$link" == "$lock_path" ]]; then
+      eval "exec ${fd}>&-" || true
+    fi
+  done
+  return 0
+}
+
+using_kernel_mountinfo() {
+  local path
+  path="$(mountinfo_path)"
+  [[ "$path" == /proc/self/mountinfo || "$path" =~ ^/proc/[0-9]+/mountinfo$ ]]
+}
+
+mount_record_at() {
+  local target="$1"
+  local records record mountpoint
+  target="$(canonical_mount_path "$target")"
+  [[ -n "$target" ]] || return 1
+  records="$(list_mountinfo_records 2>/dev/null || true)"
+  while IFS= read -r record || [[ -n "$record" ]]; do
+    [[ -n "$record" ]] || continue
+    mountpoint="$(canonical_mount_path "${record%%"$NESTED_SEP"*}")"
+    if [[ "$mountpoint" == "$target" ]]; then
+      printf '%s\n' "$record"
+      return 0
+    fi
+  done <<< "$records"
+  return 1
+}
+
+findmnt_matches_expected() {
+  local target="$1" fstype="$2" source="$3" mode="$4"
+  local line got_target got_fstype got_source
+  using_kernel_mountinfo || return 1
+  command -v findmnt >/dev/null 2>&1 || return 1
+  line="$(findmnt -n -T "$target" -o TARGET,FSTYPE,SOURCE 2>/dev/null || true)"
+  [[ -n "$line" ]] || return 1
+  got_target="${line%% *}"
+  line="${line#* }"
+  got_fstype="${line%% *}"
+  got_source="${line#* }"
+  [[ "$(canonical_mount_path "$got_target")" == "$(canonical_mount_path "$target")" ]] || return 1
+  if [[ "$mode" == "bind" ]]; then
+    return 0
+  fi
+  if [[ -n "$fstype" && "$got_fstype" != "$fstype" ]]; then
+    return 1
+  fi
+  if [[ -n "$source" && "$source" != "none" && "$got_source" != "$source" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+mount_matches_expected() {
+  local target="$1" fstype="$2" source="$3" mode="${4:-}"
+  local record got_fstype got_source
+  if record="$(mount_record_at "$target")"; then
+    IFS="$NESTED_SEP" read -r _ got_fstype got_source _ <<< "$record"
+    if [[ "$mode" == "bind" ]]; then
+      return 0
+    fi
+    if [[ -n "$fstype" && "$got_fstype" != "$fstype" ]]; then
+      return 1
+    fi
+    if [[ -n "$source" && "$source" != "none" && "$got_source" != "$source" ]]; then
+      return 1
+    fi
+    return 0
+  fi
+  findmnt_matches_expected "$target" "$fstype" "$source" "$mode"
+}
+
+wait_for_remounted_mount() {
+  local target="$1" fstype="$2" source="$3" mode="$4" pid="${5:-}"
+  local timeout start now elapsed poll
+  timeout="$(remount_timeout_seconds)"
+  poll="$(remount_poll_seconds)"
+  start="$(date +%s)"
+  while true; do
+    if mount_matches_expected "$target" "$fstype" "$source" "$mode"; then
+      return 0
+    fi
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+      return 1
+    fi
+    now="$(date +%s)"
+    elapsed=$((now - start))
+    if (( elapsed >= timeout )); then
+      return 2
+    fi
+    sleep "$poll"
+  done
+}
+
+detach_remount_command() {
+  local log_file="$1" pid_file="$2"
+  shift 2
+  local pid
+  ensure_dir "$(dirname "$log_file")"
+  : >> "$log_file"
+  pid="$(
+    trap '' HUP
+    close_lock_fds
+    if command -v setsid >/dev/null 2>&1 && command -v nohup >/dev/null 2>&1; then
+      setsid nohup "$@" </dev/null >>"$log_file" 2>&1 &
+    elif command -v setsid >/dev/null 2>&1; then
+      setsid "$@" </dev/null >>"$log_file" 2>&1 &
+    else
+      nohup "$@" </dev/null >>"$log_file" 2>&1 &
+    fi
+    printf '%s\n' "$!"
+    exit 0
+  )"
+  pid="${pid//[!0-9]/}"
+  printf '%s\n' "$pid" > "$pid_file"
+  if [[ -n "$pid" ]]; then
+    ensure_dir "$(dirname "$(protected_mount_pid_file)")"
+    printf '%s\n' "$pid" >> "$(protected_mount_pid_file)"
+  fi
+  printf '%s' "$pid"
+}
+
 remount_one() {
   local mode="$1" source="$2" fstype="$3" options="$4" target="$5" bind_source="$6" argv_file="$7"
   local -a argv=()
-  local arg
+  local arg pid log_file pid_file rc timeout
   ensure_mountpoint_dir "$target"
   case "$mode" in
     command)
@@ -1410,29 +1578,45 @@ remount_one() {
         argv+=("$arg")
       done < "$argv_file"
       (( ${#argv[@]} > 0 )) || return 1
-      "${argv[@]}"
       ;;
     bind)
       [[ -n "$bind_source" && -e "$bind_source" ]] || return 1
-      mount --bind -- "$bind_source" "$target"
+      argv=(mount --bind -- "$bind_source" "$target")
       ;;
     mount)
       if [[ -n "$options" ]]; then
-        mount -t "$fstype" -o "$options" -- "$source" "$target"
+        argv=(mount -t "$fstype" -o "$options" -- "$source" "$target")
       else
-        mount -t "$fstype" -- "$source" "$target"
+        argv=(mount -t "$fstype" -- "$source" "$target")
       fi
       ;;
     *)
       return 1
       ;;
   esac
+  log_file="$(remount_log_dir)/nested-remount-$(printf '%s' "$target" | sha256sum | awk '{print $1}').log"
+  pid_file="${log_file}.pid"
+  pid="$(detach_remount_command "$log_file" "$pid_file" "${argv[@]}")"
+  log "Started nested remount for '${target}' in the background (pid ${pid:-unknown}). Waiting for mountinfo or findmnt to show it."
+  rc=0
+  wait_for_remounted_mount "$target" "$fstype" "$source" "$mode" "$pid" || rc=$?
+  if (( rc == 0 )); then
+    return 0
+  fi
+  if (( rc == 2 )); then
+    timeout="$(remount_timeout_seconds)"
+    REMOUNT_HELPER_STILL_RUNNING=1
+    log "Remount timed out after ${timeout}s waiting for '${target}' to show ${fstype:-the expected filesystem} from '${source:-the expected source}' in mountinfo. The remount command is still running in the background (pid ${pid:-unknown}) and was not signaled. See ${log_file}."
+    return 2
+  fi
+  log "Remount command for '${target}' exited before the mount appeared. See ${log_file}."
+  return 1
 }
 
 restore_planned_mounts() {
   local name="$1" dest_root="$2" source_root="${3:-}"
   local line rel fstype source options mode bind_source argv_name
-  local target source_dir argv_file attempt ok failed=0
+  local target source_dir argv_file attempt ok failed=0 rc=0
   [[ -n "$name" && -n "$dest_root" ]] || return 0
   [[ -s "$(nested_plan_file "$name")" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -1447,7 +1631,11 @@ restore_planned_mounts() {
     if [[ -n "$source_root" ]]; then
       source_dir="${source_root%/}/${rel}"
     fi
-    if path_is_mounted "$target"; then
+    if list_has_word "$NESTED_SKIP_REMOUNT_RELS" "$rel"; then
+      log "Warning: nested mount '${target}' was unmounted externally. Skipping the remount."
+      continue
+    fi
+    if mount_matches_expected "$target" "$fstype" "$source" "$mode"; then
       log "Nested mount already present at '${target}'."
       continue
     fi
@@ -1458,15 +1646,18 @@ restore_planned_mounts() {
     fi
     ok=0
     for attempt in 1 2 3; do
-      if remount_one "$mode" "$source" "$fstype" "$options" "$target" "$bind_source" "$argv_file"; then
-        if path_is_mounted "$target"; then
-          ok=1
-          break
-        fi
-        log "Remount command for '${target}' finished, but the mount is not visible in mountinfo."
-      else
-        log "Remount attempt ${attempt} failed for '${target}'."
+      REMOUNT_HELPER_STILL_RUNNING=0
+      rc=0
+      remount_one "$mode" "$source" "$fstype" "$options" "$target" "$bind_source" "$argv_file" || rc=$?
+      if (( rc == 0 )) && mount_matches_expected "$target" "$fstype" "$source" "$mode"; then
+        ok=1
+        break
       fi
+      if (( rc == 2 || REMOUNT_HELPER_STILL_RUNNING == 1 )); then
+        log "Nested remount for '${target}' did not appear before the timeout. Another remount was not started."
+        break
+      fi
+      log "Remount attempt ${attempt} failed for '${target}'."
       sleep "$(nested_retry_delay)"
     done
     if (( ok == 0 )); then
@@ -1500,12 +1691,18 @@ unmount_planned_mounts() {
   local name="$1" root="$2"
   local line rel target failed_target=""
   local -a lines=()
+  NESTED_SKIP_REMOUNT_RELS=""
   mapfile -t lines < <(read_plan_sorted "$name" deep)
   (( ${#lines[@]} > 0 )) || return 0
   for line in "${lines[@]}"; do
     [[ -n "$line" ]] || continue
     IFS="$NESTED_SEP" read -r rel _ <<< "$line"
     target="${root%/}/${rel}"
+    if ! path_is_mounted "$target"; then
+      log "Warning: nested mount '${target}' was unmounted externally. Skipping the remount."
+      NESTED_SKIP_REMOUNT_RELS="$(list_append_unique "$NESTED_SKIP_REMOUNT_RELS" "$rel")"
+      continue
+    fi
     if ! safely_unmount_path "$target"; then
       failed_target="$target"
       break
@@ -1584,7 +1781,7 @@ handle_folder_problem() {
   fi
   state="${FOLDER_STATES[$folder_index]:-}"
   case "$state" in
-    complete|failed|reverted|skipped) ;;
+    complete|failed|reverted|skipped|attention) ;;
     *)
       fallback_message="${fallback_message:-${LAST_ERROR:-This folder could not be migrated. It was left unchanged.}}"
       mark_folder_terminal "$folder_index" "$fallback_state" "$fallback_message"
@@ -1727,11 +1924,93 @@ verify_destination_is_empty() {
   fi
 }
 
+live_mount_relative_paths() {
+  local root="$1"
+  local records record mountpoint rel canon
+  [[ -n "$root" ]] || return 0
+  canon="$(canonical_mount_path "$root")"
+  [[ -n "$canon" && "$canon" != "/" ]] || return 0
+  records="$(list_mountinfo_records 2>/dev/null || true)"
+  [[ -n "$records" ]] || return 0
+  while IFS= read -r record || [[ -n "$record" ]]; do
+    [[ -n "$record" ]] || continue
+    mountpoint="$(canonical_mount_path "${record%%"$NESTED_SEP"*}")"
+    if path_is_strict_child "$canon" "$mountpoint"; then
+      rel="${mountpoint#"$canon"/}"
+      [[ -n "$rel" && "$rel" != /* && "$rel" != *".."* ]] || continue
+      printf '%s\n' "$rel"
+    fi
+  done <<< "$records"
+}
+
+dest_has_confirmed_nested_mount() {
+  local dir="$1" rel
+  [[ -n "$dir" ]] || return 1
+  rel="$(live_mount_relative_paths "$dir" | head -n 1 || true)"
+  [[ -n "$rel" ]]
+}
+
+set_verify_prune_rels() {
+  local root rel seen=$'\n'
+  VERIFY_PRUNE_RELS=""
+  RSYNC_LIVE_EXCLUDES=()
+  for root in "$@"; do
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
+      case "$seen" in
+        *$'\n'"${rel}"$'\n'*) continue ;;
+      esac
+      seen+="${rel}"$'\n'
+      VERIFY_PRUNE_RELS+="${rel}"$'\n'
+      RSYNC_LIVE_EXCLUDES+=(--exclude "/${rel}" --exclude "/${rel}/**")
+      log "Nested mount '${rel}' is excluded from verification so its filesystem is not read."
+    done < <(live_mount_relative_paths "$root")
+  done
+}
+
+find_excluding_live_mounts() {
+  local root="$1"
+  shift
+  local -a prune_paths=()
+  local -a expr=()
+  local -a actions=("$@")
+  local rel i arg has_print=0
+  [[ -d "$root" ]] || return 1
+  for arg in "${actions[@]+"${actions[@]}"}"; do
+    if [[ "$arg" == "-print" || "$arg" == "-print0" ]]; then
+      has_print=1
+    fi
+  done
+  if (( has_print == 0 )); then
+    actions+=(-print)
+  fi
+  while IFS= read -r rel || [[ -n "$rel" ]]; do
+    [[ -n "$rel" ]] || continue
+    prune_paths+=("./${rel}" "./${rel}/*")
+  done <<< "${VERIFY_PRUNE_RELS:-}"
+  (
+    cd "$root" || exit 1
+    if (( ${#prune_paths[@]} > 0 )); then
+      expr=( \( )
+      for (( i = 0; i < ${#prune_paths[@]}; i++ )); do
+        if (( i > 0 )); then
+          expr+=( -o )
+        fi
+        expr+=( -path "${prune_paths[$i]}" )
+      done
+      expr+=( \) -prune -o )
+      find . -xdev \( "${expr[@]}" ${actions[@]+"${actions[@]}"} \)
+    else
+      find . -xdev ${actions[@]+"${actions[@]}"}
+    fi
+  )
+}
+
 generate_file_manifest() {
   local root="$1"
   (
-    cd "$root"
-    find . -xdev -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+    cd "$root" || exit 1
+    find_excluding_live_mounts "." -type f -print0 | sort -z | while IFS= read -r -d '' f; do
       sha256sum -z -- "$f"
     done
   )
@@ -1740,8 +2019,8 @@ generate_file_manifest() {
 generate_symlink_manifest() {
   local root="$1"
   (
-    cd "$root"
-    find . -xdev -type l -print0 | sort -z | while IFS= read -r -d '' lnk; do
+    cd "$root" || exit 1
+    find_excluding_live_mounts "." -type l -print0 | sort -z | while IFS= read -r -d '' lnk; do
       printf '%s\0%s\0' "$lnk" "$(readlink -- "$lnk")"
     done
   )
@@ -1767,14 +2046,14 @@ compare_counts() {
   local src="$1"
   local dst="$2"
   local src_files dst_files src_dirs dst_dirs src_links dst_links
-  src_files="$(find "$src" -xdev -type f | wc -l)"
-  dst_files="$(find "$dst" -xdev -type f | wc -l)"
+  src_files="$(find_excluding_live_mounts "$src" -type f | wc -l)"
+  dst_files="$(find_excluding_live_mounts "$dst" -type f | wc -l)"
   [[ "$src_files" == "$dst_files" ]] || fail_verify "Regular file count mismatch: source=$src_files dest=$dst_files" || return 1
-  src_dirs="$(find "$src" -xdev -type d | wc -l)"
-  dst_dirs="$(find "$dst" -xdev -type d | wc -l)"
+  src_dirs="$(find_excluding_live_mounts "$src" -type d | wc -l)"
+  dst_dirs="$(find_excluding_live_mounts "$dst" -type d | wc -l)"
   [[ "$src_dirs" == "$dst_dirs" ]] || fail_verify "Directory count mismatch: source=$src_dirs dest=$dst_dirs" || return 1
-  src_links="$(find "$src" -xdev -type l | wc -l)"
-  dst_links="$(find "$dst" -xdev -type l | wc -l)"
+  src_links="$(find_excluding_live_mounts "$src" -type l | wc -l)"
+  dst_links="$(find_excluding_live_mounts "$dst" -type l | wc -l)"
   [[ "$src_links" == "$dst_links" ]] || fail_verify "Symlink count mismatch: source=$src_links dest=$dst_links" || return 1
 }
 
@@ -1787,6 +2066,7 @@ rsync_copy_with_progress() {
   while true; do
     rsync_status=0
     last_error=""
+    set_verify_prune_rels "$src" "$dst"
     while IFS= read -r line; do
       if [[ "$line" == __RSYNC_EXIT_STATUS__:* ]]; then
         rsync_status="${line#__RSYNC_EXIT_STATUS__:}"
@@ -1803,7 +2083,7 @@ rsync_copy_with_progress() {
         folder_set "$folder_index" "copying" "$(( percent * 80 / 100 ))" "Copying data (${percent}%)."
       fi
     done < <(
-      rsync -aHAXx --numeric-ids --human-readable --info=progress2 "$src"/ "$dst"/ 2>&1
+      rsync -aHAXx --numeric-ids --human-readable --info=progress2 ${RSYNC_LIVE_EXCLUDES[@]+"${RSYNC_LIVE_EXCLUDES[@]}"} "$src"/ "$dst"/ 2>&1
       printf '__RSYNC_EXIT_STATUS__:%s\n' "$?"
     )
 
@@ -1829,6 +2109,7 @@ rsync_verify() {
   local src="$1"
   local dst="$2"
   local line had_differences=0 rsync_status=
+  set_verify_prune_rels "$src" "$dst"
   while IFS= read -r line; do
     if [[ "$line" == __RSYNC_EXIT_STATUS__:* ]]; then
       rsync_status="${line#__RSYNC_EXIT_STATUS__:}"
@@ -1840,7 +2121,7 @@ rsync_verify() {
     fi
     printf '%s\n' "$line"
   done < <(
-    rsync -aHAXcnx --delete --numeric-ids --itemize-changes "$src"/ "$dst"/ 2>&1
+    rsync -aHAXcnx --delete --numeric-ids --itemize-changes ${RSYNC_LIVE_EXCLUDES[@]+"${RSYNC_LIVE_EXCLUDES[@]}"} "$src"/ "$dst"/ 2>&1
     printf '__RSYNC_EXIT_STATUS__:%s\n' "$?"
   )
   [[ "$rsync_status" =~ ^[0-9]+$ ]] || fail_verify "Unable to determine rsync verification exit status" || return 1
@@ -2339,7 +2620,7 @@ restart_policy_spec() {
 folder_is_pending() {
   local folder_index="$1"
   case "${FOLDER_STATES[$folder_index]:-}" in
-    complete|failed|reverted|skipped) return 1 ;;
+    complete|failed|reverted|skipped|attention) return 1 ;;
   esac
   return 0
 }
@@ -2659,7 +2940,7 @@ mark_folder_terminal() {
     name="${FOLDER_NAMES[$folder_index]}"
     previous="${FOLDER_STATES[$folder_index]:-}"
     case "$previous" in
-      complete|failed|reverted|skipped) ;;
+      complete|failed|reverted|skipped|attention) ;;
       *) COMPLETED_FOLDERS=$((COMPLETED_FOLDERS + 1)) ;;
     esac
     folder_set "$folder_index" "$state" "${FOLDER_PROGRESS[$folder_index]:-0}" "$message"
@@ -2720,13 +3001,16 @@ cut_over_verified_folder() {
   if [[ -z "$dest" && "$folder_index" =~ ^[0-9]+$ ]]; then
     dest="${FOLDER_SOURCE_PATHS[$folder_index]:-}"
   fi
+  if [[ -n "$name" && -s "$(nested_plan_file "$name")" ]]; then
+    log "Verification finished for '${name}' before nested mounts are restored."
+  fi
   if [[ -n "$dest" ]] && ! restore_planned_mounts "$name" "$dest" "$temp_path"; then
-    message="Verified '${name}' but could not remount a nested mount on '${dest}'. The temporary source was kept and the new dataset was left in place."
-    note_folder_error "$message"
-    mark_folder_terminal "$folder_index" "failed" "$message"
+    message="migrated, remount needs attention"
+    log "Verified '${name}' but a nested mount did not come back on '${dest}'. ${message}. The new dataset was kept. The preserved source was kept at '${temp_path}'. The dataset was not destroyed and the folder was not reverted."
+    mark_folder_terminal "$folder_index" "attention" "$message"
     clear_recovery_state
     NESTED_UNMOUNTED_FOLDER=""
-    return 1
+    return 0
   fi
   NESTED_UNMOUNTED_FOLDER=""
   log "Verification is clean for '$name'. Removing only the temporary source at '$temp_path'."
@@ -3366,7 +3650,7 @@ migration_has_handled_failures() {
   local index
   for index in "${!FOLDER_STATES[@]}"; do
     case "${FOLDER_STATES[$index]}" in
-      failed|reverted|skipped) return 0 ;;
+      failed|reverted|skipped|attention) return 0 ;;
     esac
   done
   return 1
@@ -3384,7 +3668,7 @@ finish_migration() {
   if migration_has_handled_failures; then
     STATE="complete_with_failures"
     CURRENT_STEP="complete_with_failures"
-    MESSAGE="Dataset migration finished. Some folders were skipped, reverted, or failed and were left as directories. The log lists each one. The other folders were migrated."
+    MESSAGE="Dataset migration finished. Some folders were skipped, reverted, failed, or still need a nested mount put back. The log lists each one. The other folders were migrated."
   else
     STATE="complete"
     CURRENT_STEP="complete"
@@ -3437,7 +3721,7 @@ build_folder_plan() {
       FOLDER_CONTAINER_INDEXES+=("")
       FOLDER_INDEX_BY_NAME["$name"]="$folder_index"
       case "${handled_state:-reverted}" in
-        complete|failed|reverted|skipped) COMPLETED_FOLDERS=$((COMPLETED_FOLDERS + 1)) ;;
+        complete|failed|reverted|skipped|attention) COMPLETED_FOLDERS=$((COMPLETED_FOLDERS + 1)) ;;
       esac
       continue
     fi
@@ -3499,8 +3783,182 @@ rsync_recover_exact() {
   local dst="$2"
   [[ -d "$src" ]] || die "Recovery source temp folder is missing: $src"
   [[ -d "$dst" ]] || die "Recovery destination dataset path is missing: $dst"
-  rsync -aHAXx --delete --numeric-ids "$src"/ "$dst"/ || die "Recovery exact rsync failed from '$src' to '$dst'"
+  set_verify_prune_rels "$src" "$dst"
+  rsync -aHAXx --delete --numeric-ids ${RSYNC_LIVE_EXCLUDES[@]+"${RSYNC_LIVE_EXCLUDES[@]}"} "$src"/ "$dst"/ || die "Recovery exact rsync failed from '$src' to '$dst'"
   sync
+}
+
+folder_resume_mount_is_back() {
+  local dest="$1" temp="$2" dataset="$3"
+  [[ -d "$temp" && -d "$dest" ]] || return 1
+  dataset_exists "$dataset" || return 1
+  dest_has_confirmed_nested_mount "$dest"
+}
+
+resume_mount_is_back() {
+  local dest="${RECOVERY_SOURCE_PATH:-}"
+  [[ -d "${RECOVERY_TEMP_PATH:-}" ]] || return 1
+  [[ -n "${RECOVERY_TARGET_DATASET:-}" ]] || return 1
+  if [[ -z "$dest" ]]; then
+    dest="$(zfs get -H -o value mountpoint "$RECOVERY_TARGET_DATASET" 2>/dev/null | head -n 1 || true)"
+    RECOVERY_SOURCE_PATH="$dest"
+  fi
+  folder_resume_mount_is_back "$dest" "$RECOVERY_TEMP_PATH" "$RECOVERY_TARGET_DATASET"
+}
+
+live_mount_resume_pending() {
+  local dataset="" mountpoint="" child name original dest target
+  dataset="${ACTIVE_DATASET:-}"
+  if [[ -z "$dataset" && -r "$IN_PROGRESS_FLAG" ]]; then
+    dataset="$(read_in_progress_dataset || true)"
+  fi
+  if [[ -z "$dataset" && -r "$RECOVERY_STATE_FILE" ]]; then
+    dataset="$(
+      # shellcheck disable=SC1090
+      source "$RECOVERY_STATE_FILE"
+      printf '%s' "${DATASET:-}"
+    )"
+  fi
+  [[ -n "$dataset" ]] || return 1
+  mountpoint="$(zfs get -H -o value mountpoint "$dataset" 2>/dev/null | head -n 1 || true)"
+  [[ -n "$mountpoint" && "$mountpoint" != "legacy" && "$mountpoint" != "none" && -d "$mountpoint" ]] || return 1
+  while IFS= read -r -d '' child; do
+    name="$(basename "$child")"
+    original="$(original_name_from_migration_temp "$name" || true)"
+    [[ -n "$original" ]] || continue
+    if handled_folder_record "$original" >/dev/null 2>&1; then
+      continue
+    fi
+    dest="${mountpoint}/${original}"
+    target="${dataset}/${original}"
+    if folder_resume_mount_is_back "$dest" "$child" "$target"; then
+      return 0
+    fi
+  done < <(find "$mountpoint" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+  return 1
+}
+
+refresh_loaded_container_runtime() {
+  local index id inspect name policy max network volumes depends
+  (( ${#CONTAINER_IDS[@]} > 0 )) || return 0
+  for index in "${!CONTAINER_IDS[@]}"; do
+    id="${CONTAINER_IDS[$index]}"
+    if container_is_running_by_id "$id"; then
+      CONTAINER_CURRENTLY_RUNNING[index]="1"
+    else
+      CONTAINER_CURRENTLY_RUNNING[index]="0"
+    fi
+    inspect="$(container_inspect_line "$id")"
+    [[ -n "$inspect" ]] || continue
+    IFS='|' read -r id name policy max network volumes depends <<< "$inspect"
+    CONTAINER_NETWORK_MODES[index]="${network:-default}"
+    CONTAINER_DEPENDENCY_REFS[index]="$(parse_container_dependency_refs "$network" "$volumes" "$depends")"
+    if [[ -n "$policy" && "$policy" != "<no value>" ]]; then
+      CONTAINER_RESTART_NAMES[index]="$policy"
+    fi
+    if [[ -n "$max" && "$max" != "<no value>" ]]; then
+      CONTAINER_RESTART_MAXS[index]="$max"
+    fi
+  done
+  resolve_container_dependencies
+}
+
+restart_loaded_containers() {
+  local indexes="" index
+  refresh_loaded_container_runtime
+  for index in "${!CONTAINER_IDS[@]}"; do
+    if [[ "${CONTAINER_WAS_RUNNING[$index]}" == "1" ]]; then
+      indexes="$(list_append_unique "$indexes" "$index")"
+    fi
+  done
+  if [[ -z "$indexes" ]]; then
+    restore_restart_policies_left_disabled || true
+    return 0
+  fi
+  log "Restoring restart policies and starting stopped containers in dependency order."
+  start_selected_containers "$indexes" || true
+}
+
+finish_mounted_resume() {
+  local folder_index="${RECOVERY_FOLDER_INDEX:--1}"
+  local dest="${RECOVERY_SOURCE_PATH:-}"
+  local temp="${RECOVERY_TEMP_PATH}"
+  local name="${RECOVERY_ORIGINAL_NAME:-folder}"
+  local dataset="${RECOVERY_TARGET_DATASET}"
+  if [[ -z "$dest" ]]; then
+    dest="$(zfs get -H -o value mountpoint "$dataset" 2>/dev/null | head -n 1 || true)"
+    RECOVERY_SOURCE_PATH="$dest"
+  fi
+  if [[ "$folder_index" =~ ^[0-9]+$ && -n "${FOLDER_NAMES[$folder_index]:-}" ]]; then
+    name="${FOLDER_NAMES[$folder_index]}"
+  fi
+  log "Resuming '${name}'. The new dataset ${dataset} exists, the preserved source is '${temp}', and the nested mount is already mounted. Verifying without copying again."
+  if dest_has_confirmed_nested_mount "$temp"; then
+    log "Preserved source '${temp}' has a live nested mount. It will be kept."
+    mark_folder_terminal "$folder_index" "attention" "migrated, remount needs attention"
+    clear_recovery_state
+    restart_loaded_containers
+    return 0
+  fi
+  if verify_copied_folder "$temp" "$dest" "$folder_index"; then
+    cut_over_verified_folder "$folder_index" "$temp" || true
+  else
+    log "Preserved source for '${name}' does not match the new dataset. The temporary source was kept at '${temp}'. The dataset was not destroyed."
+    mark_folder_terminal "$folder_index" "failed" "Preserved source does not match the new dataset. The temporary source was kept and the new dataset was left in place."
+    clear_recovery_state
+  fi
+  restart_loaded_containers
+  return 0
+}
+
+release_stuck_helper_path() {
+  if [[ -n "${ZFSAS_MIGRATOR_RELEASE_HELPER:-}" && -f "${ZFSAS_MIGRATOR_RELEASE_HELPER}" ]]; then
+    printf '%s\n' "${ZFSAS_MIGRATOR_RELEASE_HELPER}"
+    return 0
+  fi
+  if [[ -f /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/migrator-release-stuck.py ]]; then
+    printf '%s\n' /usr/local/emhttp/plugins/zfs.autosnapshot/scripts/migrator-release-stuck.py
+    return 0
+  fi
+  return 1
+}
+
+log_stuck_migrator_guidance() {
+  log "A previous dataset migrator is blocked on a live mount helper. The mount process was left running so the filesystem stays mounted."
+  log "Do not signal the mount helper. Signaling it unmounts the filesystem."
+  log "Do not signal the migrator process group. Stop only the migrator after the mount helper is in its own session, or rerun --release-stuck-holder where python3 is available."
+  log "The preserved source folder is kept until a later run verifies it. Do not delete that temporary folder by hand."
+}
+
+release_stuck_holder() {
+  local helper output status proc_root mountinfo line
+  helper="$(release_stuck_helper_path || true)"
+  if [[ -z "$helper" ]]; then
+    log "Could not release a stuck migrator safely because the release helper is not installed."
+    log_stuck_migrator_guidance
+    return 2
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    log "Could not release a stuck migrator safely because python3 is not available."
+    log_stuck_migrator_guidance
+    return 2
+  fi
+  proc_root="${ZFSAS_MIGRATOR_RELEASE_PROC_ROOT:-/proc}"
+  mountinfo="${ZFSAS_MIGRATOR_RELEASE_MOUNTINFO:-/proc/self/mountinfo}"
+  set +e
+  output="$(python3 "$helper" --lock "$LOCK_FILE" --proc-root "$proc_root" --mountinfo "$mountinfo" --self-pid "$$" 2>&1)"
+  status=$?
+  set -e
+  if [[ -n "$output" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ -n "$line" ]] || continue
+      log "$line"
+    done <<< "$output"
+  fi
+  if (( status == 2 )); then
+    log_stuck_migrator_guidance
+  fi
+  return "$status"
 }
 
 run_delayed_recovery() {
@@ -3519,6 +3977,13 @@ run_delayed_recovery() {
   fi
   if [[ ! -e "$IN_PROGRESS_FLAG" ]]; then
     write_in_progress_flag
+  fi
+
+  if resume_mount_is_back; then
+    finish_mounted_resume
+    RESUMING_AFTER_RECOVERY=1
+    log "Interrupted folder is handled. Resuming the remaining migration queue for ${ACTIVE_DATASET}."
+    return 0
   fi
 
   notify_interrupted_migration
@@ -3603,9 +4068,18 @@ while (( $# > 0 )); do
     --kick-if-idle)
       KICK_IF_IDLE=1
       ;;
+    --release-stuck-holder)
+      RELEASE_STUCK_HOLDER=1
+      ;;
   esac
   shift || true
 done
+
+if (( RELEASE_STUCK_HOLDER == 1 )); then
+  release_status=0
+  release_stuck_holder || release_status=$?
+  exit "$release_status"
+fi
 
 if (( KICK_IF_IDLE == 1 )); then
   if [[ ! -e "$RECOVERY_STATE_FILE" && ! -e "$IN_PROGRESS_FLAG" && ! -s "$(restart_policy_pending_file)" ]]; then
@@ -3630,15 +4104,29 @@ fi
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-  log "Another dataset migration appears to already be running."
-  exit 0
+  release_status=0
+  release_stuck_holder || release_status=$?
+  if ! flock -n 9; then
+    if (( release_status == 2 )); then
+      log_stuck_migrator_guidance
+    fi
+    log "Another dataset migration appears to already be running."
+    exit 0
+  fi
+  log "The previous dataset migrator was blocked on a live mount and was released without stopping that mount."
 fi
 chmod 0640 "$LOCK_FILE" >/dev/null 2>&1 || true
 apply_owner "$LOCK_FILE"
 
 trap cleanup EXIT INT TERM
 
-restore_restart_policies_left_disabled || true
+POSTPONE_CONTAINER_RESTORE=0
+if live_mount_resume_pending; then
+  POSTPONE_CONTAINER_RESTORE=1
+  log "A preserved folder already has its nested mount back. Container restart waits until that folder is verified."
+else
+  restore_restart_policies_left_disabled || true
+fi
 
 if (( RUN_RECOVERY == 1 )); then
   run_delayed_recovery || exit 1
