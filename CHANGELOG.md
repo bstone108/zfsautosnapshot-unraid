@@ -5,6 +5,10 @@ It answers one question: "What changed for me?"
 
 ## Public Releases
 
+### 2026.11.18.t03 (Testing Branch Only)
+
+- Dataset Migrator puts a nested mount such as rclone back in the background and then waits for the mount to show up. It no longer waits on the mount command itself, so a mount that stays running cannot freeze the rest of the migration. Verification happens before that mount is put back and does not read through it. Containers are stopped first and started again only after the mount step. If the mount does not come back, the new dataset stays, the original files stay in the temporary folder, and that folder is marked migrated, remount needs attention. The other folders continue. A mount that was already removed by something else is left alone, with a warning, and that folder still finishes. If a previous run is stuck waiting on a mount command whose mount is already back, the next run lets that migrator exit without stopping the mount, then checks the copy and continues.
+
 ### 2026.11.18.t02 (Testing Branch Only)
 
 - Dataset Migrator no longer gets stuck when a folder contains a nested mount such as an rclone drive. It sees that mount before stopping containers. A nested ZFS dataset is skipped and left alone. Another nested mount is unmounted after its containers stop, only the local files are copied, the mount folder is created on the new dataset, and the mount is put back with the same command. If the mount cannot be removed or put back safely, that folder is skipped, its containers are started again with their original restart setting, and the other folders continue. A folder that was stuck in a repeating stop-and-fail loop is handled on the next run, and the in-progress flag is cleared when every folder is finished, skipped, or failed.

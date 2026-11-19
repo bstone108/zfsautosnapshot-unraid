@@ -161,6 +161,10 @@ assert_hooks() {
   assert_file_contains "$POST_INSTALL" 'rm -f /usr/local/emhttp/plugins/zfs.autosnapshot/php/recovery-tools.php'
   assert_file_contains "$POST_INSTALL" 'kill -9 "$pid"'
   assert_file_contains "$PRE_REMOVE" 'kill -9 "$pid"'
+  assert_file_contains "$POST_INSTALL" 'release-stuck-holder'
+  assert_file_contains "$POST_INSTALL" 'pid_is_live_mount_helper'
+  assert_file_contains "$PRE_REMOVE" 'pid_is_live_mount_helper'
+  assert_file_contains "$POST_INSTALL" 'Leaving mount helper'
   if grep -Eq 'kill -9|zfs destroy|/tmp/zfs-autosnapshot-ops|TMP_OPS_QUEUE_DIR' "$SCRIPT"; then
     fail "upgrade cleanup script contains a live-state or process-stop action"
   fi
